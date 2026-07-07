@@ -1,0 +1,23 @@
+.DS_Store
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+.env.*
+*.sqlite
+*.sqlite3
+*.db
+*.pem
+*.key
+app/node_modules/
+app/dist/
+.playwright-mcp/
+
+# Local app data, secrets, and machine-specific settings.
+data/*
+!data/.gitkeep
+
+# Generated or temporary exports.
+exports/*
+!exports/.gitkeep

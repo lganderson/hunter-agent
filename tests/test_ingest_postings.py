@@ -1,0 +1,195 @@
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+from hunter import companies, paths, repository, sqlite_store
+
+
+SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "scripts"
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
+
+import ingest_postings  # noqa: E402
+
+
+class IngestPostingsTest(unittest.TestCase):
+    def setUp(self):
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.root = Path(self.tempdir.name)
+        self.original_paths = {
+            name: getattr(paths, name)
+            for name in [
+                "ROOT",
+                "DATA_DIR",
+                "FRONTEND_DIR",
+                "FRONTEND_DIST",
+                "OUTPUT_FILE",
+                "SETTINGS_FILE",
+                "SQLITE_DB",
+                "APPLICATIONS",
+                "CONTACTS",
+                "INTERVIEWS",
+                "ACTIONS",
+            ]
+        }
+        self.original_tracker_paths = {
+            name: getattr(ingest_postings.tracker, name)
+            for name in [
+                "ROOT",
+                "DATA_DIR",
+                "APPLICATIONS",
+                "CONTACTS",
+                "INTERVIEWS",
+                "ACTIONS",
+            ]
+        }
+        paths.ROOT = self.root
+        paths.DATA_DIR = self.root / "data"
+        paths.FRONTEND_DIR = self.root / "app"
+        paths.FRONTEND_DIST = paths.FRONTEND_DIR / "dist"
+        paths.OUTPUT_FILE = paths.FRONTEND_DIST / "index.html"
+        paths.SETTINGS_FILE = paths.DATA_DIR / "settings.local.json"
+        paths.SQLITE_DB = paths.DATA_DIR / "hunter.sqlite"
+        paths.APPLICATIONS = paths.DATA_DIR / "applications.csv"
+        paths.CONTACTS = paths.DATA_DIR / "contacts.csv"
+        paths.INTERVIEWS = paths.DATA_DIR / "interviews.csv"
+        paths.ACTIONS = paths.DATA_DIR / "actions.csv"
+        paths.DATA_DIR.mkdir(parents=True, exist_ok=True)
+        ingest_postings.tracker.ROOT = paths.ROOT
+        ingest_postings.tracker.DATA_DIR = paths.DATA_DIR
+        ingest_postings.tracker.APPLICATIONS = paths.APPLICATIONS
+        ingest_postings.tracker.CONTACTS = paths.CONTACTS
+        ingest_postings.tracker.INTERVIEWS = paths.INTERVIEWS
+        ingest_postings.tracker.ACTIONS = paths.ACTIONS
+        (paths.ROOT / "templates").mkdir(parents=True, exist_ok=True)
+        (paths.ROOT / "templates" / "job-posting.md").write_text(
+            "# {{company}}\n\n{{role}}\n",
+            encoding="utf-8",
+        )
+
+    def tearDown(self):
+        for name, value in self.original_paths.items():
+            setattr(paths, name, value)
+        for name, value in self.original_tracker_paths.items():
+            setattr(ingest_postings.tracker, name, value)
+        self.tempdir.cleanup()
+
+    def test_apple_careers_url_infers_company_and_clean_role(self):
+        company, role = ingest_postings.infer_company_role(
+            "https://jobs.apple.com/en-us/details/200660532-3956/aiml-technical-program-manager?team=CORSV",
+            "AIML Technical Program Manager - Jobs - Careers at Apple",
+            {},
+            {},
+        )
+
+        self.assertEqual(company, "Apple")
+        self.assertEqual(role, "AIML Technical Program Manager")
+
+    def test_apply_fields_fills_blank_existing_company_without_overwrite(self):
+        row = {"company": "", "role": "AIML Technical Program Manager"}
+
+        ingest_postings.apply_fields(
+            row,
+            {
+                "company": "Apple",
+                "role": "AIML Technical Program Manager",
+                "location": "",
+                "work_mode": "",
+                "source": "",
+                "source_url": "",
+                "compensation": "",
+                "priority": "",
+                "notes": "",
+            },
+            overwrite=False,
+        )
+
+        self.assertEqual(row["company"], "Apple")
+
+    def test_ingest_associates_existing_company_by_exact_name(self):
+        sqlite_store.initialize()
+        company = companies.upsert_company("", {"name": "Apple"})
+        args = ingest_postings.build_parser().parse_args([
+            "--company",
+            "Apple",
+            "--role",
+            "AIML Technical Program Manager",
+            "https://jobs.apple.com/en-us/details/200660532-3956/aiml-technical-program-manager?team=CORSV",
+        ])
+        original_fetch = ingest_postings.fetch
+        ingest_postings.fetch = lambda url: {
+            "status": 200,
+            "final_url": url,
+            "html": "<html><title>AIML Technical Program Manager - Jobs - Careers at Apple</title><body>Apply now</body></html>",
+            "error": "",
+        }
+        try:
+            created, row, _data = ingest_postings.upsert(args.urls[0], args)
+        finally:
+            ingest_postings.fetch = original_fetch
+
+        app = repository.read_applications()[0]
+        self.assertTrue(created)
+        self.assertEqual(row["company_id"], company["id"])
+        self.assertEqual(app["company_id"], company["id"])
+        self.assertEqual(app["company"], "Apple")
+
+    def test_ingest_creates_company_when_none_exists(self):
+        sqlite_store.initialize()
+        args = ingest_postings.build_parser().parse_args([
+            "--company",
+            "NewCo",
+            "--role",
+            "Technical Program Manager",
+            "https://example.com/jobs/technical-program-manager",
+        ])
+        original_fetch = ingest_postings.fetch
+        ingest_postings.fetch = lambda url: {
+            "status": 200,
+            "final_url": url,
+            "html": "<html><title>Technical Program Manager</title><body>Apply now</body></html>",
+            "error": "",
+        }
+        try:
+            created, row, _data = ingest_postings.upsert(args.urls[0], args)
+        finally:
+            ingest_postings.fetch = original_fetch
+
+        company = repository.read_companies()[0]
+        app = repository.read_applications()[0]
+        self.assertTrue(created)
+        self.assertEqual(company["name"], "NewCo")
+        self.assertEqual(company["interest_status"], "neutral")
+        self.assertEqual(row["company_id"], company["id"])
+        self.assertEqual(app["company_id"], company["id"])
+
+    def test_ingest_does_not_add_review_needed_tag_by_default(self):
+        sqlite_store.initialize()
+        args = ingest_postings.build_parser().parse_args([
+            "--company",
+            "Example",
+            "--role",
+            "Technical Program Manager",
+            "https://example.com/jobs/technical-program-manager",
+        ])
+        original_fetch = ingest_postings.fetch
+        ingest_postings.fetch = lambda url: {
+            "status": 200,
+            "final_url": url,
+            "html": "<html><title>Technical Program Manager</title><body>Apply now</body></html>",
+            "error": "",
+        }
+        try:
+            created, row, _data = ingest_postings.upsert(args.urls[0], args)
+        finally:
+            ingest_postings.fetch = original_fetch
+
+        app = repository.read_applications()[0]
+        self.assertTrue(created)
+        self.assertEqual(row["tags"], "")
+        self.assertEqual(app["tags"], "")
+
+
+if __name__ == "__main__":
+    unittest.main()
