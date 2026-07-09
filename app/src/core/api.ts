@@ -50,7 +50,7 @@ async function fetchWithLocalRetry(url: string, init: RequestInit): Promise<Resp
       return await fetch(url, init);
     } catch {
       const message = error instanceof Error ? error.message : String(error);
-      throw new Error(`Could not reach Hunter local API. Restart Hunter on port 8010 and reload the page. ${message}`);
+      throw new Error(`Could not reach Hunter local API. Restart the matching Hunter API server and reload the page. ${message}`);
     }
   }
 }

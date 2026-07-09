@@ -40,6 +40,29 @@ The `scripts/` directory still contains direct command wrappers, but `hunter.py`
 
 For a new clone, `init` creates a private local SQLite database at `data/hunter.sqlite`. The React frontend source lives in `app/src/`; private app data is loaded at runtime through the local API.
 
+### Worktree Local Environments
+
+Each git worktree should keep its own ignored local app data, dependencies, and dev ports:
+
+```bash
+git worktree add ../hunter-agent-feature -b codex/feature-name main
+cd ../hunter-agent-feature
+python3 hunter.py init
+make frontend-install
+make serve-app PORT=8011
+```
+
+For frontend development in a worktree, run the API and Vite on matching non-default ports:
+
+```bash
+python3 hunter.py serve 8011
+make frontend-dev API_PORT=8011 VITE_PORT=5174
+```
+
+The Vite dev server reads `HUNTER_API_PORT` for its `/api` proxy and `VITE_PORT` for its own port. Private data stays in that worktree's ignored `data/` directory. Copy `data/hunter.sqlite` or `data/settings.local.json` from another checkout only when you intentionally want that local data in the worktree.
+
+Codex app local environments are configured in `.codex/environments/environment.toml`. When you start a Codex task in a managed worktree and select the Hunter environment, Codex runs the setup script to initialize a fresh local SQLite database and install frontend dependencies. The checked-in environment intentionally does not include a `.worktreeinclude` file, so ignored private files such as `data/hunter.sqlite`, `data/settings.local.json`, resumes, logs, and exports are not copied into Codex-managed worktrees unless you add that file deliberately.
+
 Import older CSV/Markdown data if you have it:
 
 ```bash
@@ -271,7 +294,7 @@ python3 hunter.py serve 8010
 make frontend-dev
 ```
 
-The Vite dev server proxies `/api` to `http://127.0.0.1:8010`. The built React app loads private postings, actions, contacts, and note bodies from `GET /api/app-state` at runtime. The Settings page stores provider/model/token data in `data/settings.local.json`, which is ignored by git. Tokens are not embedded into frontend source or build files.
+The Vite dev server proxies `/api` to `http://127.0.0.1:8010` by default. For worktrees or parallel dev servers, use `make frontend-dev API_PORT=8011 VITE_PORT=5174`. The built React app loads private postings, actions, contacts, and note bodies from `GET /api/app-state` at runtime. The Settings page stores provider/model/token data in `data/settings.local.json`, which is ignored by git. Tokens are not embedded into frontend source or build files.
 
 ## MCP Support
 

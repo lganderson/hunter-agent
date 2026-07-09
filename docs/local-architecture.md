@@ -128,10 +128,36 @@ make frontend-dev
   -> Vite serves the React app
   -> /api proxies to http://127.0.0.1:8010
 
+make frontend-dev API_PORT=8011 VITE_PORT=5174
+  -> Vite serves a parallel worktree frontend on port 5174
+  -> /api proxies to that worktree's Hunter server on port 8011
+
 make frontend-build
   -> writes app/dist
   -> python3 hunter.py serve 8010 serves app/dist at /
 ```
+
+## Worktree Environment Model
+
+Git worktrees share repository history but keep separate working directories. Hunter treats each working directory as its local app root unless `HUNTER_ROOT` or `JOB_HUNT_ROOT` is set. That means every worktree gets separate ignored local files:
+
+- `data/hunter.sqlite`
+- `data/settings.local.json`
+- `data/hunter-server.pid`
+- `data/hunter-server.log`
+- `app/node_modules/`
+- `app/dist/`
+
+Use different ports when running more than one worktree at the same time:
+
+```bash
+python3 hunter.py serve 8011
+make frontend-dev API_PORT=8011 VITE_PORT=5174
+```
+
+Do not point multiple running worktrees at the same SQLite database. Copy a database into a worktree when you need realistic test data, then treat that copy as disposable unless you intentionally export changes.
+
+Codex app worktrees use the local environment defined at `.codex/environments/environment.toml`. The setup script runs `python3 hunter.py init` and `make frontend-install` in the managed worktree so Codex has a usable local database and frontend dependencies without copying private local state. Hunter does not check in `.worktreeinclude`; add one only if a future task explicitly needs selected ignored files copied into managed worktrees.
 
 ## MCP Flow
 

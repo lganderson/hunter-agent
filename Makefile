@@ -1,5 +1,7 @@
 PYTHON ?= python3
 PORT ?= 8010
+API_PORT ?= $(PORT)
+VITE_PORT ?= 5173
 HUNTER ?= $(PYTHON) hunter.py
 
 .PHONY: init list due stats actions ingest migrate-to-sqlite migrate-postings export-csv mcp repo-check clean-caches frontend-install frontend-dev frontend-build serve-app serve-status serve-stop serve-restart run
@@ -44,7 +46,7 @@ frontend-install:
 	cd app && npm install
 
 frontend-dev:
-	cd app && npm run dev
+	cd app && HUNTER_API_PORT=$(API_PORT) VITE_PORT=$(VITE_PORT) npm run dev
 
 frontend-build:
 	cd app && npm run build
