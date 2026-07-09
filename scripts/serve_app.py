@@ -6,7 +6,7 @@ import mimetypes
 import sys
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 ROOT_FOR_IMPORTS = Path(__file__).resolve().parents[1]
 if str(ROOT_FOR_IMPORTS) not in sys.path:
@@ -63,6 +63,18 @@ class AppHandler(SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def send_download_file(self, path):
+        if not path.exists() or not path.is_file():
+            self.send_error(404, "File not found")
+            return
+        body = path.read_bytes()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Disposition", f'attachment; filename="{path.name}"')
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def send_frontend(self, request_path):
         if not FRONTEND_DIST.exists():
             self.send_error(503, "Frontend build is missing. Run: make frontend-build")
@@ -80,9 +92,19 @@ class AppHandler(SimpleHTTPRequestHandler):
         self.send_file(FRONTEND_DIST / "index.html")
 
     def do_GET(self):  # noqa: N802 - stdlib API name.
-        path = urlparse(self.path).path
+        parsed = urlparse(self.path)
+        path = parsed.path
+        query = parse_qs(parsed.query)
         if path == "/api/app-state":
             self.send_json(app_state.build_payload())
+            return
+        if path == "/api/companies/export":
+            try:
+                result = company_store.write_company_export((query.get("id") or [""])[0])
+            except ValueError as exc:
+                self.send_json({"error": str(exc)}, status=400)
+                return
+            self.send_download_file(result["path"])
             return
         if path == "/api/settings":
             self.send_json(action_engine.settings_status())

@@ -25,6 +25,7 @@ def print_help():
         "  python3 hunter.py repo-check\n"
         "  python3 hunter.py clean-caches\n"
         "  python3 hunter.py companies list\n"
+        "  python3 hunter.py companies export\n"
         "  python3 hunter.py migrate-to-sqlite\n"
         "  python3 hunter.py migrate-postings\n"
         "  python3 hunter.py export-csv\n"

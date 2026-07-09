@@ -9,6 +9,7 @@ DATA_DIR = ROOT / "data"
 FRONTEND_DIR = ROOT / "app"
 FRONTEND_DIST = FRONTEND_DIR / "dist"
 OUTPUT_FILE = FRONTEND_DIST / "index.html"
+EXPORTS_DIR = ROOT / "exports"
 SETTINGS_FILE = DATA_DIR / "settings.local.json"
 SQLITE_DB = DATA_DIR / "hunter.sqlite"
 
