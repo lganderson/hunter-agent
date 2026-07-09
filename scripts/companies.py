@@ -56,6 +56,17 @@ def cmd_get(args):
     print_json(payload)
 
 
+def cmd_export(args):
+    sqlite_store.initialize()
+    try:
+        result = companies.write_company_export(args.company_id or "", args.output)
+    except ValueError as exc:
+        print(f"error: {exc}")
+        raise SystemExit(2) from exc
+    payload = result["payload"]
+    print(f"Exported {payload['scope']['company_count']} company record(s) to {result['path']}")
+
+
 def cmd_upsert(args):
     sqlite_store.initialize()
     updates = {
@@ -142,6 +153,11 @@ def build_parser():
     get_parser = subparsers.add_parser("get", help="Show one company.")
     get_parser.add_argument("company_id")
     get_parser.set_defaults(func=cmd_get)
+
+    export_parser = subparsers.add_parser("export", help="Export current company data to local JSON.")
+    export_parser.add_argument("company_id", nargs="?", help="Optional company id to export.")
+    export_parser.add_argument("--output", help="Output JSON path. Defaults to exports/company-data-*.json.")
+    export_parser.set_defaults(func=cmd_export)
 
     upsert_parser = subparsers.add_parser("upsert", help="Create or update a company.")
     upsert_parser.add_argument("company_id", nargs="?")

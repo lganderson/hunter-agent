@@ -21,6 +21,7 @@ class HunterCompaniesTest(unittest.TestCase):
                 "FRONTEND_DIR",
                 "FRONTEND_DIST",
                 "OUTPUT_FILE",
+                "EXPORTS_DIR",
                 "SETTINGS_FILE",
                 "SQLITE_DB",
                 "APPLICATIONS",
@@ -34,6 +35,7 @@ class HunterCompaniesTest(unittest.TestCase):
         paths.FRONTEND_DIR = self.root / "app"
         paths.FRONTEND_DIST = paths.FRONTEND_DIR / "dist"
         paths.OUTPUT_FILE = paths.FRONTEND_DIST / "index.html"
+        paths.EXPORTS_DIR = self.root / "exports"
         paths.SETTINGS_FILE = paths.DATA_DIR / "settings.local.json"
         paths.SQLITE_DB = paths.DATA_DIR / "hunter.sqlite"
         paths.APPLICATIONS = paths.DATA_DIR / "applications.csv"
@@ -2304,6 +2306,51 @@ class HunterCompaniesTest(unittest.TestCase):
         self.assertIn("hunter_get_resume_text", tool_names)
         self.assertIn("hunter_get_settings", tool_names)
         self.assertIn("hunter_update_settings", tool_names)
+
+    def test_export_company_data_writes_related_company_snapshot(self):
+        sqlite_store.initialize()
+        company = companies.upsert_company("", {"name": "Example", "careers_url": "https://example.com/careers"})
+        companies.upsert_company("", {"name": "Other"})
+        repository.write_contacts([contact_row({"id": "C0001", "name": "Ada"})])
+        companies.link_contact(company["id"], "C0001")
+        repository.write_applications([
+            application_row({"id": "A0001", "company": "Example", "company_id": company["id"], "role": "Engineer"}),
+            application_row({"id": "A0002", "company": "Other", "company_id": "CO0002", "role": "Designer"}),
+        ])
+        repository.write_actions([
+            action_row({"id": "T0001", "application_id": "A0001", "title": "Research company"}),
+            action_row({"id": "T0002", "application_id": "A0002", "title": "Unrelated action"}),
+        ])
+        repository.write_company_career_sources([
+            {field: "" for field in schema.COMPANY_CAREER_SOURCE_FIELDS} | {
+                "company_id": company["id"],
+                "source_url": "https://example.com/careers",
+                "platform_type": "html",
+            }
+        ])
+        repository.write_company_posting_candidates([
+            {field: "" for field in schema.COMPANY_POSTING_CANDIDATE_FIELDS} | {
+                "id": "CP0001",
+                "company_id": company["id"],
+                "title": "Platform Engineer",
+                "url": "https://example.com/jobs/platform-engineer",
+                "status": "new",
+            }
+        ])
+
+        result = companies.write_company_export(company["id"])
+        payload = json.loads(result["path"].read_text(encoding="utf-8"))
+
+        self.assertTrue(result["path"].name.startswith(f"company-data-{company['id']}-"))
+        self.assertEqual(payload["scope"]["company_count"], 1)
+        self.assertEqual(payload["companies"][0]["company"]["name"], "Example")
+        self.assertEqual(payload["companies"][0]["contacts"][0]["name"], "Ada")
+        self.assertEqual(payload["companies"][0]["postings"][0]["id"], "A0001")
+        self.assertEqual(payload["companies"][0]["actions"][0]["id"], "T0001")
+        self.assertEqual(payload["companies"][0]["career_sources"][0]["source_url"], "https://example.com/careers")
+        self.assertEqual(payload["companies"][0]["posting_candidates"][0]["id"], "CP0001")
+        self.assertEqual([row["id"] for row in payload["tables"]["applications"]], ["A0001"])
+        self.assertEqual([row["id"] for row in payload["tables"]["actions"]], ["T0001"])
 
 
 def table_names(connection):

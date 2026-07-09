@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { Link, Navigate, useNavigate, useParams } from "react-router-dom";
-import { ExternalIcon, FilterIcon, ListIcon, SearchIcon } from "../components/Icons";
+import { DownloadIcon, ExternalIcon, FilterIcon, ListIcon, SearchIcon } from "../components/Icons";
 import {
   archiveCompany,
   checkCompanyPostings,
@@ -91,6 +91,7 @@ export function CompaniesPage({ data, refresh }: CompaniesPageProps) {
           <label className="filter">Interest <select value={interestStatus} onChange={event => setInterestStatus(event.target.value)}>
             {INTEREST_STATUSES.map(status => <option key={status} value={status}>{titleCase(status)}</option>)}
           </select></label>
+          <a className="button icon-button" href="/api/companies/export" aria-label="Export company data" title="Export company data"><DownloadIcon /></a>
           <Link className="button primary" to={routes.companyNew}><ListIcon /> New Company</Link>
         </div>
         {operationStatus ? <div className="table-operation-status">{operationStatus}</div> : null}
@@ -342,6 +343,7 @@ export function CompanyDetailPage({ data, refresh, createNew = false }: CompanyD
           </div>
           <div className="detail-actions">
             <Link className="button compact" to={routes.companies}>Back to Companies</Link>
+            {company ? <a className="button compact icon-button" href={`/api/companies/export?id=${encodeURIComponent(company.id)}`} aria-label={`Export ${company.name || company.id} data`} title="Export company data"><DownloadIcon size={16} /></a> : null}
             {company
               ? company.interest_status === "archived"
                 ? <button className="button compact" type="button" onClick={restoreCurrentCompany}>Restore</button>

@@ -7,6 +7,7 @@ import ssl
 import subprocess
 import sys
 from datetime import datetime
+from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
 from urllib.request import Request, urlopen
@@ -4359,3 +4360,113 @@ def ingest_candidate(candidate_id):
         app = associate_application(company.get("id", ""), app.get("id", "")).get("posting")
     candidate = update_candidate_status(candidate.get("id", ""), "ingested")
     return {"candidate": candidate, "posting": app, "stdout": result.stdout.strip()}
+
+
+def build_company_export_payload(company_id=""):
+    companies = repository.read_companies()
+    wanted = storage.clean(company_id).upper()
+    if wanted:
+        selected_companies = [row for row in companies if row.get("id", "").upper() == wanted]
+        if not selected_companies:
+            raise ValueError(f"No company found with id {company_id}.")
+    else:
+        selected_companies = companies
+
+    selected_ids = {row.get("id", "").upper() for row in selected_companies}
+    contacts = repository.read_contacts()
+    applications = repository.read_applications()
+    actions = repository.read_actions()
+    contact_links = repository.read_company_contacts()
+    career_sources = repository.read_company_career_sources()
+    candidates = repository.read_company_posting_candidates()
+
+    contacts_by_id = {row.get("id", "").upper(): row for row in contacts}
+    actions_by_application_id = {}
+    for action in actions:
+        actions_by_application_id.setdefault(action.get("application_id", "").upper(), []).append(action)
+
+    records = []
+    for company in selected_companies:
+        current_company_id = company.get("id", "").upper()
+        current_links = [row for row in contact_links if row.get("company_id", "").upper() == current_company_id]
+        linked_postings = [
+            row
+            for row in applications
+            if row.get("company_id", "").upper() == current_company_id
+        ]
+        linked_actions = [
+            action
+            for posting in linked_postings
+            for action in actions_by_application_id.get(posting.get("id", "").upper(), [])
+        ]
+        records.append(
+            {
+                "company": company,
+                "contact_links": current_links,
+                "contacts": [
+                    contacts_by_id[link.get("contact_id", "").upper()]
+                    for link in current_links
+                    if link.get("contact_id", "").upper() in contacts_by_id
+                ],
+                "postings": linked_postings,
+                "actions": linked_actions,
+                "career_sources": [
+                    row
+                    for row in career_sources
+                    if row.get("company_id", "").upper() == current_company_id
+                ],
+                "posting_candidates": [
+                    row
+                    for row in candidates
+                    if row.get("company_id", "").upper() == current_company_id
+                ],
+            }
+        )
+
+    return {
+        "generated_at": now_iso(),
+        "scope": {"company_id": wanted, "company_count": len(records)},
+        "companies": records,
+        "tables": {
+            "companies": selected_companies,
+            "company_contacts": [row for row in contact_links if row.get("company_id", "").upper() in selected_ids],
+            "contacts": [
+                row
+                for row in contacts
+                if row.get("id", "").upper()
+                in {
+                    link.get("contact_id", "").upper()
+                    for link in contact_links
+                    if link.get("company_id", "").upper() in selected_ids
+                }
+            ],
+            "applications": [row for row in applications if row.get("company_id", "").upper() in selected_ids],
+            "actions": [
+                action
+                for action in actions
+                if action.get("application_id", "").upper()
+                in {
+                    app.get("id", "").upper()
+                    for app in applications
+                    if app.get("company_id", "").upper() in selected_ids
+                }
+            ],
+            "company_career_sources": [row for row in career_sources if row.get("company_id", "").upper() in selected_ids],
+            "company_posting_candidates": [row for row in candidates if row.get("company_id", "").upper() in selected_ids],
+        },
+    }
+
+
+def company_export_filename(company_id=""):
+    scope = storage.clean(company_id).upper() or "all"
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    return f"company-data-{scope}-{timestamp}.json"
+
+
+def write_company_export(company_id="", output_path=None):
+    payload = build_company_export_payload(company_id)
+    path = Path(output_path) if output_path else paths.EXPORTS_DIR / company_export_filename(company_id)
+    path = path if path.is_absolute() else paths.ROOT / path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return {"path": path, "payload": payload}

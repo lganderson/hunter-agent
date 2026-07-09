@@ -179,6 +179,18 @@
       justify-content: center;
     }
 
+    .button.icon-button {
+      width: 36px;
+      min-width: 36px;
+      padding: 0;
+      justify-content: center;
+    }
+
+    .button.compact.icon-button {
+      width: 30px;
+      min-width: 30px;
+    }
+
     .button:disabled {
       cursor: wait;
       opacity: 0.55;
