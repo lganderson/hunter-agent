@@ -4,7 +4,7 @@ API_PORT ?= $(PORT)
 VITE_PORT ?= 5173
 HUNTER ?= $(PYTHON) hunter.py
 
-.PHONY: init list due stats actions ingest migrate-to-sqlite migrate-postings export-csv mcp repo-check clean-caches frontend-install frontend-dev frontend-build serve-app serve-status serve-stop serve-restart run
+.PHONY: init list due stats actions ingest migrate-to-sqlite migrate-postings export-csv load-demo-data mcp repo-check clean-caches frontend-install frontend-dev frontend-build serve-app serve-status serve-stop serve-restart serve-ready run
 
 init:
 	$(HUNTER) init
@@ -32,6 +32,9 @@ migrate-postings:
 
 export-csv:
 	$(HUNTER) export-csv
+
+load-demo-data:
+	$(HUNTER) load-demo-data --overwrite
 
 mcp:
 	$(HUNTER) mcp
@@ -62,5 +65,8 @@ serve-stop:
 
 serve-restart:
 	$(HUNTER) serve-restart $(PORT)
+
+serve-ready:
+	$(HUNTER) serve-ready $(PORT)
 
 run: serve-app

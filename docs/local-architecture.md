@@ -157,7 +157,11 @@ make frontend-dev API_PORT=8011 VITE_PORT=5174
 
 Do not point multiple running worktrees at the same SQLite database. Copy a database into a worktree when you need realistic test data, then treat that copy as disposable unless you intentionally export changes.
 
-Codex app worktrees use the local environment defined at `.codex/environments/environment.toml`. The setup script runs `python3 hunter.py init` and `make frontend-install` in the managed worktree so Codex has a usable local database and frontend dependencies without copying private local state. Hunter does not check in `.worktreeinclude`; add one only if a future task explicitly needs selected ignored files copied into managed worktrees.
+Codex app worktrees use the local environment defined at `.codex/environments/environment.toml`. The setup script runs `python3 hunter.py init`, `python3 hunter.py load-demo-data --overwrite`, `make frontend-install`, and `python3 hunter.py serve-ready 8011` in the managed worktree so Codex has a usable demo database, frontend dependencies, and a background local server without copying private local state. Hunter does not check in `.worktreeinclude`; add one only if a future task explicitly needs selected ignored files copied into managed worktrees.
+
+For repeatable QA, `python3 hunter.py load-demo-data --overwrite` loads the committed fixture at `demo/hunter-demo-data.json` into the active worktree's ignored SQLite database. The fixture includes public company names and careers URLs from the local company list while keeping demo postings, contacts, actions, candidates, and notes synthetic. The Codex environment exposes the same command as `Load Demo Data`, so managed worktrees can be seeded without copying private app data from the main checkout.
+
+For repeatable app preview after changes, `python3 hunter.py serve-ready 8011` rebuilds the frontend, chooses the first free port at or above `8011`, starts the managed server in the background, and writes the active URL to `data/hunter-server.url`.
 
 ## MCP Flow
 

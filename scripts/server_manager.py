@@ -18,6 +18,8 @@ from hunter import paths  # noqa: E402
 
 PID_FILE = paths.DATA_DIR / "hunter-server.pid"
 LOG_FILE = paths.DATA_DIR / "hunter-server.log"
+PORT_FILE = paths.DATA_DIR / "hunter-server.port"
+URL_FILE = paths.DATA_DIR / "hunter-server.url"
 
 
 def command_for_pid(pid):
@@ -62,6 +64,22 @@ def tracked_pid():
         return None
 
 
+def tracked_port():
+    if not PORT_FILE.exists():
+        return None
+    try:
+        return int(PORT_FILE.read_text(encoding="utf-8").strip())
+    except ValueError:
+        return None
+
+
+def first_available_port(start_port, limit=50):
+    for port in range(start_port, start_port + limit):
+        if not listening_pids(port):
+            return port
+    return None
+
+
 def stop_server(port):
     candidates = []
     pid = tracked_pid()
@@ -86,6 +104,10 @@ def stop_server(port):
         stopped.append(candidate)
     if PID_FILE.exists() and (tracked_pid() in stopped or not tracked_pid() or not is_running(tracked_pid())):
         PID_FILE.unlink()
+    if stopped:
+        for path in [PORT_FILE, URL_FILE]:
+            if path.exists():
+                path.unlink()
     return stopped, refused
 
 
@@ -118,10 +140,31 @@ def start_server(port, build=True):
     if process.poll() is not None:
         print(f"error: Hunter server exited with code {process.returncode}. Log: {LOG_FILE}")
         return process.returncode or 1
-    print(f"Serving Hunter at http://127.0.0.1:{port}/")
+    url = f"http://127.0.0.1:{port}/"
+    PORT_FILE.write_text(str(port), encoding="utf-8")
+    URL_FILE.write_text(url + "\n", encoding="utf-8")
+    print(f"Serving Hunter at {url}")
     print(f"PID: {process.pid}")
     print(f"Log: {LOG_FILE}")
+    print(f"URL file: {URL_FILE}")
     return 0
+
+
+def ready_server(start_port, build=True):
+    port = tracked_port()
+    if port is not None:
+        stopped, refused = stop_server(port)
+        for pid, command in refused:
+            print(f"Refused to stop non-Hunter process {pid}: {command}")
+        if refused:
+            return 1
+        if stopped:
+            print("Stopped Hunter server PIDs: " + ", ".join(str(pid) for pid in stopped))
+    port = first_available_port(start_port)
+    if port is None:
+        print(f"error: no free port found from {start_port} to {start_port + 49}")
+        return 2
+    return start_server(port, build=build)
 
 
 def print_status(port):
@@ -138,16 +181,18 @@ def print_status(port):
             print(f"  {listener} [{marker}] {command_for_pid(listener)}")
     else:
         print(f"Listening on port {port}: none")
+    if URL_FILE.exists():
+        print(f"Last Hunter URL: {URL_FILE.read_text(encoding='utf-8').strip()}")
 
 
 def build_parser():
     parser = argparse.ArgumentParser(description="Manage the local Hunter app server.")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    for name in ["status", "stop", "start", "restart"]:
+    for name in ["status", "stop", "start", "restart", "ready"]:
         item = subparsers.add_parser(name)
         item.add_argument("port", nargs="?", type=int, default=8010)
-        if name in {"start", "restart"}:
+        if name in {"start", "restart", "ready"}:
             item.add_argument("--no-build", action="store_true")
 
     return parser
@@ -175,6 +220,8 @@ def main(argv=None):
         if stopped:
             print("Stopped Hunter server PIDs: " + ", ".join(str(pid) for pid in stopped))
         return start_server(args.port, build=not args.no_build)
+    if args.command == "ready":
+        return ready_server(args.port, build=not args.no_build)
     return 2
 
 

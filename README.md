@@ -61,7 +61,23 @@ make frontend-dev API_PORT=8011 VITE_PORT=5174
 
 The Vite dev server reads `HUNTER_API_PORT` for its `/api` proxy and `VITE_PORT` for its own port. Private data stays in that worktree's ignored `data/` directory. Copy `data/hunter.sqlite` or `data/settings.local.json` from another checkout only when you intentionally want that local data in the worktree.
 
-Codex app local environments are configured in `.codex/environments/environment.toml`. When you start a Codex task in a managed worktree and select the Hunter environment, Codex runs the setup script to initialize a fresh local SQLite database and install frontend dependencies. The checked-in environment intentionally does not include a `.worktreeinclude` file, so ignored private files such as `data/hunter.sqlite`, `data/settings.local.json`, resumes, logs, and exports are not copied into Codex-managed worktrees unless you add that file deliberately.
+Codex app local environments are configured in `.codex/environments/environment.toml`. When you start a Codex task in a managed worktree and select the Hunter environment, Codex runs the setup script to initialize a fresh local SQLite database, load the fictional demo dataset, install frontend dependencies, build the app, and start a managed local server. The checked-in environment intentionally does not include a `.worktreeinclude` file, so ignored private files such as `data/hunter.sqlite`, `data/settings.local.json`, resumes, logs, and exports are not copied into Codex-managed worktrees unless you add that file deliberately.
+
+For QA, load the committed fictional demo dataset into the current worktree's ignored SQLite database:
+
+```bash
+python3 hunter.py load-demo-data --overwrite
+```
+
+The Codex local environment loads this during worktree setup and also exposes it as the `Load Demo Data` action when you want to reset a worktree. The fixture lives in `demo/hunter-demo-data.json`; it uses the public company names and careers URLs from the local company list, with synthetic `example.invalid` posting candidates, demo contacts, postings, actions, and posting notes.
+
+After frontend or demo-data changes, refresh the worktree server with:
+
+```bash
+python3 hunter.py serve-ready 8011
+```
+
+That command rebuilds the frontend, chooses the first free port at or above `8011`, starts Hunter in the background, and writes the active URL to `data/hunter-server.url`.
 
 Import older CSV/Markdown data if you have it:
 
@@ -122,6 +138,7 @@ python3 hunter.py companies list
 python3 hunter.py ingest "https://example.com/job"
 python3 hunter.py serve 8010
 python3 hunter.py serve-restart 8010
+python3 hunter.py serve-ready 8011
 python3 hunter.py export-csv
 python3 hunter.py mcp
 make frontend-dev
@@ -146,6 +163,7 @@ starting a second copy on a new port:
 python3 hunter.py serve-status 8010
 python3 hunter.py serve-restart 8010
 python3 hunter.py serve-stop 8010
+python3 hunter.py serve-ready 8011
 ```
 
 The managed server writes its PID and log under ignored `data/` files.

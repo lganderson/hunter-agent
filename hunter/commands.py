@@ -3,7 +3,7 @@
 import subprocess
 import sys
 
-from . import paths, repo_hygiene, sqlite_store
+from . import demo_data, paths, repo_hygiene, sqlite_store
 
 
 def run_script(name, args):
@@ -15,12 +15,13 @@ def print_help():
         "Usage: python3 hunter.py <command> [args]\n\n"
         "Commands:\n"
         "  init, list, due, stats, add, update, make-note\n"
-        "  actions, companies, ingest, serve, serve-status, serve-stop, serve-restart, mcp\n"
-        "  migrate-to-sqlite, migrate-postings, export-csv\n\n"
+        "  actions, companies, ingest, serve, serve-status, serve-stop, serve-restart, serve-ready, mcp\n"
+        "  migrate-to-sqlite, migrate-postings, export-csv, load-demo-data\n\n"
         "  repo-check, clean-caches\n\n"
         "Examples:\n"
         "  python3 hunter.py serve 8010\n"
         "  python3 hunter.py serve-restart 8010\n"
+        "  python3 hunter.py serve-ready 8011\n"
         "  python3 hunter.py mcp\n"
         "  python3 hunter.py repo-check\n"
         "  python3 hunter.py clean-caches\n"
@@ -29,6 +30,7 @@ def print_help():
         "  python3 hunter.py migrate-to-sqlite\n"
         "  python3 hunter.py migrate-postings\n"
         "  python3 hunter.py export-csv\n"
+        "  python3 hunter.py load-demo-data --overwrite\n"
         "  python3 hunter.py list --limit 5\n"
         "  python3 hunter.py ingest --dry-run https://example.com/job\n"
     )
@@ -71,6 +73,7 @@ def main(argv=None):
         "serve-status": ("server_manager.py", ["status"]),
         "serve-stop": ("server_manager.py", ["stop"]),
         "serve-restart": ("server_manager.py", ["restart"]),
+        "serve-ready": ("server_manager.py", ["ready"]),
     }
 
     if command == "init":
@@ -99,6 +102,15 @@ def main(argv=None):
         overwrite = "--overwrite" in passthrough
         counts = sqlite_store.import_posting_notes_from_files(overwrite=overwrite)
         print_counts("Migrated posting Markdown into SQLite", counts)
+        raise SystemExit(0)
+    if command == "load-demo-data":
+        overwrite = "--overwrite" in passthrough
+        try:
+            counts = demo_data.load_demo_data(overwrite=overwrite)
+        except ValueError as exc:
+            print(f"error: {exc}")
+            raise SystemExit(2) from exc
+        demo_data.print_counts(counts)
         raise SystemExit(0)
     if command == "export-csv":
         if not sqlite_store.is_initialized():
