@@ -2134,6 +2134,22 @@ class HunterCompaniesTest(unittest.TestCase):
 
         self.assertLess(int(scored["fit_score"]), companies.FIT_RECOMMENDATION_THRESHOLD)
 
+    def test_candidate_fit_ignores_sales_compensation_boilerplate_for_exclusions(self):
+        scored = companies.score_candidate_fit(
+            {
+                "title": "Technical Program Manager, Cloud Inference",
+                "url": "https://example.com/jobs/technical-program-manager-cloud-inference",
+                "description": (
+                    "Own AI platform infrastructure delivery. "
+                    "For sales roles, compensation may include commissions."
+                ),
+            },
+            "Senior Technical Program Manager with AI platform infrastructure experience.",
+            "2026-07-09T10:00:00",
+        )
+
+        self.assertGreaterEqual(int(scored["fit_score"]), companies.FIT_RECOMMENDATION_THRESHOLD)
+
     def test_check_company_postings_recommends_only_latest_seen_candidates(self):
         sqlite_store.initialize()
         resume = "Senior Technical Program Manager with AI platform experience."

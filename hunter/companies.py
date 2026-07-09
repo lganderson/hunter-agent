@@ -553,6 +553,16 @@ def candidate_role_text(candidate):
     return normalized_text(f"{candidate.get('title', '')} {url_text}")
 
 
+def candidate_exclusion_text(candidate):
+    return normalized_text(
+        " ".join(
+            storage.clean(str(candidate.get(field, "")))
+            for field in ["title", "url", "category", "categories"]
+            if candidate.get(field)
+        )
+    )
+
+
 def fit_context_text():
     return settings_store.fit_context()
 
@@ -564,6 +574,7 @@ def score_candidate_fit(candidate, resume_text, checked_at):
 
     candidate_text = candidate_search_text(candidate)
     role_text = candidate_role_text(candidate)
+    exclusion_text = candidate_exclusion_text(candidate)
     score = 0
     role_matches = []
     domain_matches = []
@@ -597,9 +608,9 @@ def score_candidate_fit(candidate, resume_text, checked_at):
         score += 10
     if strong_role_match:
         score = max(score, FIT_RECOMMENDATION_THRESHOLD)
-    if any(text_contains_phrase(candidate_text, phrase) for phrase in settings_store.role_exclusion_terms()):
+    if any(text_contains_phrase(exclusion_text, phrase) for phrase in settings_store.role_exclusion_terms()):
         score = min(score, FIT_RECOMMENDATION_THRESHOLD - 1)
-    if not role_matches and any(text_contains_phrase(candidate_text, phrase) for phrase in settings_store.low_match_terms()):
+    if not role_matches and any(text_contains_phrase(exclusion_text, phrase) for phrase in settings_store.low_match_terms()):
         score -= 20
     if not role_matches:
         score = min(score, FIT_RECOMMENDATION_THRESHOLD - 1)
