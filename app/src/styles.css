@@ -1633,14 +1633,31 @@
       letter-spacing: 0.02em;
     }
 
+    .note-view h3 {
+      font-size: 12px;
+      line-height: 1.25;
+      margin: 14px 0 6px;
+    }
+
     .note-view p, .note-view li {
       color: #313d44;
       font-size: 12px;
     }
 
-    .note-view ul {
+    .note-view ul, .note-view ol {
       margin: 6px 0 12px;
       padding-left: 18px;
+    }
+
+    .note-view pre {
+      overflow: auto;
+      margin: 8px 0 12px;
+      padding: 10px;
+      border: 1px solid var(--border);
+      border-radius: 7px;
+      background: var(--surface);
+      font-size: 12px;
+      line-height: 1.45;
     }
 
     .detail-actions {
@@ -2096,10 +2113,76 @@
       padding: 9px 11px;
       border: 1px solid var(--border);
       border-radius: 8px;
-      white-space: pre-wrap;
-      word-break: break-word;
+      overflow-wrap: anywhere;
       font-size: 13px;
       line-height: 1.4;
+    }
+
+    .chat-message h1,
+    .chat-message h2,
+    .chat-message h3,
+    .chat-message p,
+    .chat-message ul,
+    .chat-message ol,
+    .chat-message pre {
+      margin-top: 0;
+    }
+
+    .chat-message h1 {
+      margin-bottom: 7px;
+      font-size: 15px;
+      line-height: 1.25;
+    }
+
+    .chat-message h2,
+    .chat-message h3 {
+      margin-bottom: 6px;
+      font-size: 13px;
+      line-height: 1.25;
+    }
+
+    .chat-message p,
+    .chat-message li {
+      font-size: inherit;
+      line-height: inherit;
+    }
+
+    .chat-message p,
+    .chat-message ul,
+    .chat-message ol,
+    .chat-message pre {
+      margin-bottom: 7px;
+    }
+
+    .chat-message > :last-child {
+      margin-bottom: 0;
+    }
+
+    .chat-message ul,
+    .chat-message ol {
+      padding-left: 18px;
+    }
+
+    .chat-message code {
+      padding: 1px 4px;
+      border-radius: 4px;
+      background: rgb(15 23 42 / 8%);
+      font-size: 12px;
+    }
+
+    .chat-message pre {
+      overflow: auto;
+      padding: 8px;
+      border-radius: 7px;
+      background: #101820;
+      color: #f5f7fa;
+      line-height: 1.45;
+    }
+
+    .chat-message pre code {
+      padding: 0;
+      background: transparent;
+      color: inherit;
     }
 
     .chat-message.user {

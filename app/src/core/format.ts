@@ -85,15 +85,40 @@ export function inlineMarkdown(text: string): string {
 export function markdownToHtml(markdown: string): string {
   const lines = normalize(markdown).split(/\r?\n/);
   const out: string[] = [];
-  let inList = false;
+  let listType: "ul" | "ol" | null = null;
+  let codeLines: string[] | null = null;
   function closeList() {
-    if (inList) {
-      out.push("</ul>");
-      inList = false;
+    if (listType) {
+      out.push(`</${listType}>`);
+      listType = null;
     }
+  }
+  function openList(type: "ul" | "ol") {
+    if (listType === type) return;
+    closeList();
+    out.push(`<${type}>`);
+    listType = type;
+  }
+  function closeCodeBlock() {
+    if (!codeLines) return;
+    out.push(`<pre><code>${escapeHtml(codeLines.join("\n"))}</code></pre>`);
+    codeLines = null;
   }
   lines.forEach(line => {
     const trimmed = line.trim();
+    if (trimmed.startsWith("```")) {
+      closeList();
+      if (codeLines) {
+        closeCodeBlock();
+      } else {
+        codeLines = [];
+      }
+      return;
+    }
+    if (codeLines) {
+      codeLines.push(line);
+      return;
+    }
     if (!trimmed) {
       closeList();
       return;
@@ -104,17 +129,21 @@ export function markdownToHtml(markdown: string): string {
     } else if (trimmed.startsWith("## ")) {
       closeList();
       out.push(`<h2>${escapeHtml(trimmed.slice(3))}</h2>`);
+    } else if (trimmed.startsWith("### ")) {
+      closeList();
+      out.push(`<h3>${escapeHtml(trimmed.slice(4))}</h3>`);
     } else if (trimmed.startsWith("- ")) {
-      if (!inList) {
-        out.push("<ul>");
-        inList = true;
-      }
+      openList("ul");
       out.push(`<li>${inlineMarkdown(trimmed.slice(2))}</li>`);
+    } else if (/^\d+\.\s+/.test(trimmed)) {
+      openList("ol");
+      out.push(`<li>${inlineMarkdown(trimmed.replace(/^\d+\.\s+/, ""))}</li>`);
     } else {
       closeList();
       out.push(`<p>${inlineMarkdown(trimmed)}</p>`);
     }
   });
+  closeCodeBlock();
   closeList();
   return out.join("");
 }

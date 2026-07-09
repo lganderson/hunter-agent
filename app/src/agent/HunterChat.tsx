@@ -1,6 +1,7 @@
 import { FormEvent, useEffect, useRef, useState } from "react";
 import { ChatIcon, SendIcon, XIcon } from "../components/Icons";
 import { sendAgentChat } from "../core/api";
+import { markdownToHtml } from "../core/format";
 import type { AgentChatMessage, AppState } from "../core/types";
 
 type HunterChatProps = {
@@ -11,6 +12,15 @@ const welcomeMessage: AgentChatMessage = {
   role: "assistant",
   content: "Ask me about your postings, actions, or contacts. I can update Hunter when your request is clear."
 };
+
+function ChatMessage({ message }: { message: AgentChatMessage }) {
+  return (
+    <div
+      className={`chat-message ${message.role}`}
+      dangerouslySetInnerHTML={{ __html: markdownToHtml(message.content) }}
+    />
+  );
+}
 
 export function HunterChat({ refresh }: HunterChatProps) {
   const [open, setOpen] = useState(false);
@@ -74,9 +84,7 @@ export function HunterChat({ refresh }: HunterChatProps) {
 
       <div className="chat-messages" ref={messagesRef}>
         {messages.map((message, index) => (
-          <div key={`${message.role}-${index}`} className={`chat-message ${message.role}`}>
-            {message.content}
-          </div>
+          <ChatMessage key={`${message.role}-${index}`} message={message} />
         ))}
         {sending ? <div className="chat-message assistant muted">Working...</div> : null}
       </div>
