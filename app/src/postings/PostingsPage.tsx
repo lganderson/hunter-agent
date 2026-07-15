@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { FilterIcon, SearchIcon } from "../components/Icons";
 import { Priority, TagList } from "../components/Primitives";
-import { dueLabel, tagList, titleCase } from "../core/format";
+import { DATA_QUALITY_TAGS, dueLabel, normalize, tagList, titleCase } from "../core/format";
+import { isWithinPastDays } from "../core/date";
 import type { AppState, Application } from "../core/types";
 
 function unique(applications: Application[], field: keyof Application) {
@@ -11,6 +12,7 @@ function unique(applications: Application[], field: keyof Application) {
 
 export function PostingsPage({ data }: { data: AppState }) {
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const [search, setSearch] = useState("");
   const stageValues = useMemo(() => orderedStages(data), [data]);
   const defaultStages = useMemo(() => stageValues.filter(stage => stage !== "closed"), [stageValues]);
@@ -19,13 +21,17 @@ export function PostingsPage({ data }: { data: AppState }) {
   const priorityValues = useMemo(() => unique(data.applications, "priority"), [data.applications]);
   const companyValues = useMemo(() => unique(data.applications, "company"), [data.applications]);
   const sourceValues = useMemo(() => unique(data.applications, "source"), [data.applications]);
-  const [stages, setStages] = useState<string[]>(defaultStages);
-  const [outcomes, setOutcomes] = useState<string[]>(outcomeValues);
-  const [tags, setTags] = useState<string[]>(tagValues);
+  const [stages, setStages] = useState<string[]>(() => querySelection(searchParams.get("stages"), stageValues, defaultStages));
+  const [outcomes, setOutcomes] = useState<string[]>(() => querySelection(searchParams.get("outcomes"), outcomeValues, outcomeValues));
+  const [tags, setTags] = useState<string[]>(() => querySelection(searchParams.get("tags"), tagValues, tagValues));
   const [priorities, setPriorities] = useState<string[]>(priorityValues);
   const [companies, setCompanies] = useState<string[]>(companyValues);
   const [sources, setSources] = useState<string[]>(sourceValues);
   const [dueOnly, setDueOnly] = useState(false);
+  const [attention, setAttention] = useState(() => searchParams.get("attention") || "");
+  const [applied, setApplied] = useState(() => searchParams.get("applied") || "");
+
+  const queryKey = searchParams.toString();
 
   useEffect(() => setStages(previous => reconcileSelection(previous, stageValues, defaultStages)), [stageValues, defaultStages]);
   useEffect(() => setOutcomes(previous => reconcileSelection(previous, outcomeValues, outcomeValues)), [outcomeValues]);
@@ -33,6 +39,14 @@ export function PostingsPage({ data }: { data: AppState }) {
   useEffect(() => setPriorities(previous => reconcileSelection(previous, priorityValues, priorityValues)), [priorityValues]);
   useEffect(() => setCompanies(previous => reconcileSelection(previous, companyValues, companyValues)), [companyValues]);
   useEffect(() => setSources(previous => reconcileSelection(previous, sourceValues, sourceValues)), [sourceValues]);
+  useEffect(() => {
+    const params = new URLSearchParams(queryKey);
+    setStages(querySelection(params.get("stages"), stageValues, defaultStages));
+    setOutcomes(querySelection(params.get("outcomes"), outcomeValues, outcomeValues));
+    setTags(querySelection(params.get("tags"), tagValues, tagValues));
+    setAttention(params.get("attention") || "");
+    setApplied(params.get("applied") || "");
+  }, [queryKey, stageValues, defaultStages, outcomeValues, tagValues]);
 
   const rows = data.applications
     .filter(app => {
@@ -61,6 +75,9 @@ export function PostingsPage({ data }: { data: AppState }) {
       if (!matchesSelection(app.company, companies, companyValues)) return false;
       if (!matchesSelection(app.source, sources, sourceValues)) return false;
       if (dueOnly && !app.is_due_soon && !app.is_overdue) return false;
+      if (attention === "missing-next" && (app.is_closed || Boolean(normalize(app.next_action)))) return false;
+      if (attention === "data-quality" && !tagList(app).some(tag => DATA_QUALITY_TAGS.has(tag))) return false;
+      if (applied === "last-7-days" && !isWithinPastDays(app.date_applied, data.generated_date, 7)) return false;
       return true;
     })
     .sort((a, b) => a.sort_due.localeCompare(b.sort_due) || (a.company || "").localeCompare(b.company || ""));
@@ -74,6 +91,9 @@ export function PostingsPage({ data }: { data: AppState }) {
     setCompanies(companyValues);
     setSources(sourceValues);
     setDueOnly(false);
+    setAttention("");
+    setApplied("");
+    setSearchParams({});
   }
 
   return (
@@ -93,6 +113,8 @@ export function PostingsPage({ data }: { data: AppState }) {
           <MultiFilter label="Source" values={sourceValues} selected={sources} onChange={setSources} />
           <label className="toggle"><input checked={dueOnly} onChange={event => setDueOnly(event.target.checked)} type="checkbox" /> Due soon</label>
           <button className="button" type="button" onClick={clearFilters}><FilterIcon size={16} /> Clear</button>
+          {attention ? <span className="active-filter">Attention: {attention === "missing-next" ? "Missing next action" : "Data cleanup"}</span> : null}
+          {applied ? <span className="active-filter">Applied: Last 7 days</span> : null}
         </div>
         <div className="table-scroll">
           <table>
@@ -193,6 +215,13 @@ function orderedStages(data: AppState) {
 function reconcileSelection(previous: string[], values: string[], fallback: string[]) {
   const selected = previous.filter(value => values.includes(value));
   return selected.length ? selected : fallback;
+}
+
+function querySelection(value: string | null, options: string[], fallback: string[]) {
+  if (!value) return fallback;
+  if (value === "all") return options;
+  const requested = value.split(",").filter(item => options.includes(item));
+  return requested.length ? requested : fallback;
 }
 
 function matchesSelection(value: string, selected: string[], values: string[]) {

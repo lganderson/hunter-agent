@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useEffect, useState } from "react";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { ActionCommand, ActionDue, Priority, StatusPill } from "../components/Primitives";
 import { FilterIcon, SearchIcon } from "../components/Icons";
 import { isActionComplete, titleCase } from "../core/format";
@@ -17,12 +17,20 @@ function unique(actions: Action[], field: keyof Action) {
 
 export function ActionsPage({ data, refresh }: ActionsPageProps) {
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const [search, setSearch] = useState("");
   const [type, setType] = useState("all");
-  const [status, setStatus] = useState("open");
+  const [status, setStatus] = useState(() => searchParams.get("status") || "open");
   const [priority, setPriority] = useState("all");
-  const [dueOnly, setDueOnly] = useState(false);
+  const [due, setDue] = useState(() => validDueFilter(searchParams.get("due")));
   const [operationStatus, setOperationStatus] = useState("");
+  const queryKey = searchParams.toString();
+
+  useEffect(() => {
+    const params = new URLSearchParams(queryKey);
+    setStatus(params.get("status") || "open");
+    setDue(validDueFilter(params.get("due")));
+  }, [queryKey]);
 
   const rows = data.actions
     .filter(action => {
@@ -46,7 +54,8 @@ export function ActionsPage({ data, refresh }: ActionsPageProps) {
         if (status !== "open" && action.status !== status) return false;
       }
       if (priority !== "all" && action.priority !== priority) return false;
-      if (dueOnly && !action.is_due_soon && !action.is_overdue) return false;
+      if (due === "overdue" && !action.is_overdue) return false;
+      if (due === "upcoming" && (!action.is_due_soon || action.is_overdue)) return false;
       return true;
     })
     .sort((a, b) => {
@@ -71,7 +80,8 @@ export function ActionsPage({ data, refresh }: ActionsPageProps) {
     setType("all");
     setStatus("open");
     setPriority("all");
-    setDueOnly(false);
+    setDue("all");
+    setSearchParams({});
   }
 
   return (
@@ -87,7 +97,7 @@ export function ActionsPage({ data, refresh }: ActionsPageProps) {
           <Filter label="Type" value={type} values={unique(data.actions, "type")} onChange={setType} />
           <Filter label="Status" value={status} values={["open", ...unique(data.actions, "status").filter(item => item !== "open")]} onChange={setStatus} />
           <Filter label="Priority" value={priority} values={unique(data.actions, "priority")} onChange={setPriority} />
-          <label className="toggle"><input checked={dueOnly} onChange={event => setDueOnly(event.target.checked)} type="checkbox" /> Due soon</label>
+          <Filter label="Due" value={due} values={["overdue", "upcoming"]} onChange={setDue} />
           <button className="button" type="button" onClick={clearFilters}><FilterIcon size={16} /> Clear</button>
         </div>
         <div className="table-scroll">
@@ -121,6 +131,10 @@ export function ActionsPage({ data, refresh }: ActionsPageProps) {
       </article>
     </section>
   );
+}
+
+function validDueFilter(value: string | null) {
+  return value === "overdue" || value === "upcoming" ? value : "all";
 }
 
 function Filter({ label, value, values, onChange }: { label: string; value: string; values: string[]; onChange: (value: string) => void }) {

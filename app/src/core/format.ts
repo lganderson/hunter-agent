@@ -1,6 +1,7 @@
 import type { Action, Application } from "./types";
 
 export const COMPLETED_ACTION_STATUSES = new Set(["done", "completed", "cancelled", "skipped"]);
+export const DATA_QUALITY_TAGS = new Set(["bad-title", "duplicate", "old-source-url"]);
 
 export function normalize(value: unknown): string {
   return (value || "").toString().trim();

@@ -1,4 +1,4 @@
-import { NavLink, Navigate, Route, Routes } from "react-router-dom";
+import { Link, NavLink, Navigate, Route, Routes } from "react-router-dom";
 import { ActionsPage } from "./actions/ActionsPage";
 import { HunterChat } from "./agent/HunterChat";
 import { CandidatesPage } from "./candidates/CandidatesPage";
@@ -6,6 +6,7 @@ import { BriefcaseIcon, CalendarIcon, GearIcon, HomeIcon, ListIcon, PeopleIcon, 
 import { CompaniesPage, CompanyDetailPage } from "./companies/CompaniesPage";
 import { ContactsPage } from "./contacts/ContactsPage";
 import type { AppState } from "./core/types";
+import { routes } from "./core/routes";
 import { DashboardPage } from "./dashboard/DashboardPage";
 import { PostingDetailPage } from "./postings/PostingDetailPage";
 import { PostingsPage } from "./postings/PostingsPage";
@@ -51,16 +52,16 @@ export function App({ data, refresh }: AppProps) {
         </div>
         <AppNav />
         <div className="sidebar-label">Views</div>
-        <div className="sidebar-stat"><span>Review</span><strong>{data.applications.filter(app => app.stage === "posting-review").length}</strong></div>
-        <div className="sidebar-stat"><span>Open actions</span><strong>{data.actions.filter(action => action.is_open).length}</strong></div>
-        <div className="sidebar-stat"><span>Closed</span><strong>{closed}</strong></div>
+        <Link className="sidebar-stat" to={routes.postingsFiltered({ stages: "posting-review" })}><span>Review</span><strong>{data.applications.filter(app => app.stage === "posting-review").length}</strong></Link>
+        <Link className="sidebar-stat" to={routes.actionsFiltered({ status: "open" })}><span>Open actions</span><strong>{data.actions.filter(action => action.is_open).length}</strong></Link>
+        <Link className="sidebar-stat" to={routes.postingsFiltered({ stages: "closed" })}><span>Closed</span><strong>{closed}</strong></Link>
       </aside>
 
       <main className="main">
         <AppNav mobile />
 
         <Routes>
-          <Route path="/" element={<DashboardPage data={data} />} />
+          <Route path="/" element={<DashboardPage data={data} refresh={refresh} />} />
           <Route path="/postings" element={<PostingsPage data={data} />} />
           <Route path="/postings/:id" element={<PostingDetailPage data={data} refresh={refresh} />} />
           <Route path="/companies" element={<CompaniesPage data={data} refresh={refresh} />} />
