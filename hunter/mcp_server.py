@@ -232,6 +232,17 @@ def tool_list_actions(args):
     return text_result({"count": len(rows), "actions": rows[:limit]})
 
 
+def tool_create_action(args):
+    action = action_store.create_action(args.get("application_id", ""), args.get("values", {}))
+    posting = action_store.sync_next_action(action.get("application_id", ""))
+    return text_result(
+        {
+            "action": compact_action(action, detail=True),
+            "posting": compact_application(posting) if posting else None,
+        }
+    )
+
+
 def tool_update_action(args):
     action = action_store.update_action_status(args.get("id", ""), args.get("status", ""))
     posting = action_store.sync_next_action(action.get("application_id", ""))
@@ -444,6 +455,89 @@ def tool_get_company_candidate(args):
     )
 
 
+def tool_list_company_candidates(args):
+    company_id = storage.clean(args.get("company_id", "")).upper()
+    status = storage.clean(args.get("status", "all")).lower() or "all"
+    if status != "all" and status not in schema.COMPANY_POSTING_CANDIDATE_STATUSES:
+        raise ValueError(f"Unsupported company posting candidate status: {status}")
+    search = storage.clean(args.get("search", "")).lower()
+    try:
+        minimum_fit_score = max(0, min(100, int(args.get("minimum_fit_score") or 0)))
+    except (TypeError, ValueError):
+        minimum_fit_score = 0
+    limit = requested_limit(args, default=50)
+    company = company_store.get_company(company_id) if company_id else None
+    company_by_id = {
+        row.get("id", "").upper(): row
+        for row in company_store.list_companies()
+    }
+    scored_rows = []
+    for candidate in repository.read_company_posting_candidates():
+        candidate_company_id = candidate.get("company_id", "").upper()
+        if company_id and candidate_company_id != company_id:
+            continue
+        candidate_status = candidate.get("status", "new").lower()
+        if status != "all" and candidate_status != status:
+            continue
+        try:
+            fit_score = int(candidate.get("fit_score") or 0)
+        except (TypeError, ValueError):
+            fit_score = 0
+        if fit_score < minimum_fit_score:
+            continue
+        candidate_company = company_by_id.get(candidate_company_id, {})
+        haystack = " ".join(
+            [
+                candidate.get("id", ""),
+                candidate.get("title", ""),
+                candidate.get("location", ""),
+                candidate.get("fit_summary", ""),
+                candidate_company.get("name", ""),
+            ]
+        ).lower()
+        if search and search not in haystack:
+            continue
+        scored_rows.append(
+            (
+                fit_score,
+                {
+                    **compact_company_candidate(candidate),
+                    "company": candidate_company.get("name", ""),
+                    "recommended": (
+                        candidate_status == "new"
+                        and fit_score >= company_store.FIT_RECOMMENDATION_THRESHOLD
+                    ),
+                },
+            )
+        )
+    scored_rows.sort(
+        key=lambda item: (
+            -item[0],
+            item[1].get("company", ""),
+            item[1].get("title", ""),
+        )
+    )
+    rows = [candidate for _score, candidate in scored_rows]
+    return text_result(
+        {
+            "company": compact_company(company) if company else None,
+            "count": len(rows),
+            "candidates": rows[:limit],
+        }
+    )
+
+
+def tool_update_company_candidate(args):
+    candidate = company_store.update_candidate_status(args.get("id", ""), args.get("status", ""))
+    company = company_store.get_company(candidate.get("company_id", ""))
+    return text_result(
+        {
+            "candidate": compact_company_candidate(candidate, detail=True),
+            "company": compact_company(company),
+        }
+    )
+
+
 def tool_link_company_contact(args):
     link = company_store.link_contact(args.get("company_id", ""), args.get("contact_id", ""))
     return text_result({"link": link})
@@ -502,6 +596,31 @@ TOOLS = {
             },
         },
         "handler": tool_list_actions,
+    },
+    "hunter_create_action": {
+        "description": "Create a concrete action for a tracked posting and refresh that posting's next-action summary.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "application_id": {"type": "string"},
+                "values": {
+                    "type": "object",
+                    "properties": {
+                        "title": {"type": "string"},
+                        "description": {"type": "string"},
+                        "type": {"type": "string"},
+                        "priority": {"type": "string", "enum": ["high", "medium", "low"]},
+                        "due_date": {"type": "string"},
+                        "related_url": {"type": "string"},
+                        "notes": {"type": "string"},
+                    },
+                    "required": ["title", "type"],
+                    "additionalProperties": False,
+                },
+            },
+            "required": ["application_id", "values"],
+        },
+        "handler": tool_create_action,
     },
     "hunter_update_action": {
         "description": "Update an action status, such as marking an action done or reopening it.",
@@ -790,6 +909,32 @@ TOOLS = {
             "required": ["id"],
         },
         "handler": tool_get_company_candidate,
+    },
+    "hunter_list_company_candidates": {
+        "description": "List company posting candidates with optional company, review-status, search, and minimum-fit filters.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "company_id": {"type": "string"},
+                "status": {"type": "string", "enum": ["all", *sorted(schema.COMPANY_POSTING_CANDIDATE_STATUSES)]},
+                "search": {"type": "string"},
+                "minimum_fit_score": {"type": "integer", "minimum": 0, "maximum": 100},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 100},
+            },
+        },
+        "handler": tool_list_company_candidates,
+    },
+    "hunter_update_company_candidate": {
+        "description": "Update a company posting candidate's review status, such as ignoring it or returning it to new.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "id": {"type": "string"},
+                "status": {"type": "string", "enum": sorted(schema.COMPANY_POSTING_CANDIDATE_STATUSES)},
+            },
+            "required": ["id", "status"],
+        },
+        "handler": tool_update_company_candidate,
     },
     "hunter_link_company_contact": {
         "description": "Associate a contact with a managed company.",

@@ -233,11 +233,28 @@ export type AgentChatMessage = {
   content: string;
 };
 
+export type AgentContext = {
+  route: string;
+  pathname: string;
+  entity_type?: "posting" | "company";
+  entity_id?: string;
+  label?: string;
+  query: Record<string, string>;
+};
+
 export type AgentToolCall = {
   name: string;
   ok: boolean;
   arguments?: Record<string, unknown>;
   error?: string;
+  receipt?: string;
+};
+
+export type AgentChatHistoryMessage = AgentChatMessage & {
+  id: number;
+  tool_calls: AgentToolCall[];
+  context: Partial<AgentContext>;
+  created_at: string;
 };
 
 export type AgentChatResponse = {

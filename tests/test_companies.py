@@ -2383,6 +2383,57 @@ class HunterCompaniesTest(unittest.TestCase):
         self.assertEqual(payload["candidate"]["notes"], "Full candidate notes")
         self.assertEqual(payload["company"]["name"], "Example")
 
+    def test_mcp_list_company_candidates_filters_status_and_fit(self):
+        sqlite_store.initialize()
+        company = companies.upsert_company("", {"name": "Example"})
+        other = companies.upsert_company("", {"name": "Other"})
+        candidates = []
+        for candidate_id, company_id, title, status, fit_score in [
+            ("CP0001", company["id"], "Strong role", "new", "82"),
+            ("CP0002", company["id"], "Ignored role", "ignored", "91"),
+            ("CP0003", other["id"], "Other role", "new", "95"),
+            ("CP0004", company["id"], "Lower role", "new", "44"),
+        ]:
+            candidate = {field: "" for field in schema.COMPANY_POSTING_CANDIDATE_FIELDS}
+            candidate.update({
+                "id": candidate_id,
+                "company_id": company_id,
+                "title": title,
+                "url": f"https://example.com/jobs/{candidate_id.lower()}",
+                "status": status,
+                "fit_score": fit_score,
+            })
+            candidates.append(candidate)
+        repository.write_company_posting_candidates(candidates)
+
+        result = mcp_server.call_named_tool(
+            "hunter_list_company_candidates",
+            {"company_id": company["id"], "status": "new", "minimum_fit_score": 60},
+        )
+        payload = json.loads(result["content"][0]["text"])
+
+        self.assertEqual(payload["company"]["name"], "Example")
+        self.assertEqual(payload["count"], 1)
+        self.assertEqual(payload["candidates"][0]["id"], "CP0001")
+        self.assertTrue(payload["candidates"][0]["recommended"])
+
+    def test_mcp_update_company_candidate_changes_review_status(self):
+        sqlite_store.initialize()
+        company = companies.upsert_company("", {"name": "Example"})
+        candidate = {field: "" for field in schema.COMPANY_POSTING_CANDIDATE_FIELDS}
+        candidate.update({"id": "CP0001", "company_id": company["id"], "title": "Role", "status": "new"})
+        repository.write_company_posting_candidates([candidate])
+
+        result = mcp_server.call_named_tool(
+            "hunter_update_company_candidate",
+            {"id": "CP0001", "status": "ignored"},
+        )
+        payload = json.loads(result["content"][0]["text"])
+
+        self.assertEqual(payload["candidate"]["status"], "ignored")
+        self.assertEqual(payload["company"]["name"], "Example")
+        self.assertEqual(repository.read_company_posting_candidates()[0]["status"], "ignored")
+
     def test_app_state_and_mcp_expose_companies(self):
         sqlite_store.initialize()
         companies.upsert_company("", {"name": "Apple"})
@@ -2400,6 +2451,8 @@ class HunterCompaniesTest(unittest.TestCase):
         self.assertIn("hunter_restore_company", tool_names)
         self.assertIn("hunter_check_company_postings", tool_names)
         self.assertIn("hunter_get_company_candidate", tool_names)
+        self.assertIn("hunter_list_company_candidates", tool_names)
+        self.assertIn("hunter_update_company_candidate", tool_names)
         self.assertIn("hunter_get_resume_text", tool_names)
         self.assertIn("hunter_get_settings", tool_names)
         self.assertIn("hunter_update_settings", tool_names)

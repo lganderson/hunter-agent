@@ -2,7 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from hunter import app_state, demo_data, paths, repository, sqlite_store
+from hunter import app_state, chat_history, demo_data, paths, repository, sqlite_store
 
 
 class HunterDemoDataTest(unittest.TestCase):
@@ -67,6 +67,14 @@ class HunterDemoDataTest(unittest.TestCase):
 
         counts = demo_data.load_demo_data(overwrite=True)
         self.assertEqual(counts["contacts"], 4)
+
+    def test_overwriting_demo_data_clears_agent_history(self):
+        sqlite_store.initialize()
+        chat_history.record_exchange("Old question", "Old answer")
+
+        demo_data.load_demo_data(overwrite=True)
+
+        self.assertEqual(chat_history.list_messages(), [])
 
 
 if __name__ == "__main__":

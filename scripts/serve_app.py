@@ -17,6 +17,7 @@ from hunter import agent as hunter_agent
 from hunter import app_state
 from hunter import actions as action_store
 from hunter import applications as application_store
+from hunter import chat_history
 from hunter import companies as company_store
 from hunter import contacts as contact_store
 from hunter import settings as settings_store
@@ -98,6 +99,9 @@ class AppHandler(SimpleHTTPRequestHandler):
         if path == "/api/app-state":
             self.send_json(app_state.build_payload())
             return
+        if path == "/api/agent/history":
+            self.send_json({"api_version": chat_history.API_VERSION, "messages": chat_history.list_messages()})
+            return
         if path == "/api/companies/export":
             try:
                 result = company_store.write_company_export((query.get("id") or [""])[0])
@@ -160,8 +164,34 @@ class AppHandler(SimpleHTTPRequestHandler):
 
         if path == "/api/agent/chat":
             payload = self.read_json()
+            if payload.get("api_version") != chat_history.API_VERSION:
+                self.send_json(
+                    {
+                        "code": "client_outdated",
+                        "error": "Hunter was updated. Reload the page and try again.",
+                        "api_version": chat_history.API_VERSION,
+                    },
+                    status=409,
+                )
+                return
+            message = str(payload.get("message") or "").strip()
+            context = payload.get("context", {})
             try:
-                result = hunter_agent.chat(payload.get("messages", []))
+                if not message:
+                    raise ValueError("Chat message is required.")
+                history = chat_history.list_messages()
+                messages = [
+                    {"role": row["role"], "content": row["content"]}
+                    for row in history
+                ]
+                messages.append({"role": "user", "content": message})
+                result = hunter_agent.chat(messages, context)
+                chat_history.record_exchange(
+                    message,
+                    result.get("message", ""),
+                    tool_calls=result.get("tool_calls", []),
+                    context=context,
+                )
             except ValueError as exc:
                 self.send_json({"error": str(exc)}, status=400)
                 return
@@ -169,6 +199,10 @@ class AppHandler(SimpleHTTPRequestHandler):
                 self.send_json({"error": f"Hunter chat failed: {exc}"}, status=502)
                 return
             self.send_json(result)
+            return
+
+        if path == "/api/agent/history/clear":
+            self.send_json(chat_history.clear_messages())
             return
 
         if path == "/api/actions/update":

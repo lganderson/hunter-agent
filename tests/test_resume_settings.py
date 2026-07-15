@@ -224,12 +224,25 @@ class ResumeSettingsTest(unittest.TestCase):
         with patch("hunter.agent._settings", return_value={"token": "token", "model": "gpt-5.5", "api_base": "https://example.test"}), \
              patch("hunter.agent.settings_store.fit_profile_context", return_value="Compact fit profile:\nAI TPM\nGame developer tools"):
             with patch("hunter.agent._request_json", side_effect=fake_request):
-                result = agent.chat([{"role": "user", "content": "Which postings fit me?"}])
+                result = agent.chat(
+                    [{"role": "user", "content": "Which postings fit me?"}],
+                    {
+                        "route": "posting-detail",
+                        "pathname": "/postings/A0001",
+                        "entity_type": "posting",
+                        "entity_id": "A0001",
+                        "label": "Example · Product Manager",
+                        "query": {"stage": "posting-review"},
+                    },
+                )
 
         self.assertEqual(result["message"], "ok")
         self.assertIn("AI TPM", captured["instructions"])
         self.assertIn("Game developer tools", captured["instructions"])
         self.assertIn("evaluating job fit", captured["instructions"])
+        self.assertIn("calm, candid job-search chief of staff", captured["instructions"])
+        self.assertIn('\"entity_id\": \"A0001\"', captured["instructions"])
+        self.assertIn("Verify record details through Hunter tools", captured["instructions"])
         self.assertIn("hunter_get_resume_text", [tool["name"] for tool in captured["payload"]["tools"]])
         self.assertEqual(captured["payload"]["prompt_cache_key"], agent.PROMPT_CACHE_KEY)
         self.assertEqual(captured["payload"]["prompt_cache_retention"], "24h")
@@ -242,6 +255,17 @@ class ResumeSettingsTest(unittest.TestCase):
         self.assertEqual(usage["uncached_input_tokens"], 304)
         self.assertEqual(usage["output_tokens"], 20)
         self.assertEqual(usage["reasoning_tokens"], 4)
+
+    def test_mutating_tool_receipts_are_human_readable(self):
+        receipt = agent._tool_receipt(
+            "hunter_create_action",
+            {
+                "application_id": "A0001",
+                "values": {"title": "Tailor resume"},
+            },
+        )
+
+        self.assertEqual(receipt, 'Created "Tailor resume" for A0001.')
 
 
 if __name__ == "__main__":

@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -123,6 +124,28 @@ class HunterWorkflowTest(unittest.TestCase):
         posting = repository.read_applications()[0]
         self.assertEqual(posting["next_action_id"], "T0001")
         self.assertEqual(posting["next_action"], "Email recruiter")
+
+    def test_mcp_create_action_returns_action_and_synced_posting(self):
+        sqlite_store.initialize()
+        repository.write_applications([application_row({"id": "A0001"})])
+
+        result = mcp_server.call_named_tool(
+            "hunter_create_action",
+            {
+                "application_id": "A0001",
+                "values": {
+                    "title": "Prepare portfolio examples",
+                    "type": "review-fit",
+                    "priority": "high",
+                    "due_date": "2026-07-22",
+                },
+            },
+        )
+        payload = json.loads(result["content"][0]["text"])
+
+        self.assertEqual(payload["action"]["title"], "Prepare portfolio examples")
+        self.assertEqual(payload["posting"]["next_action"], "Prepare portfolio examples")
+        self.assertIn("hunter_create_action", mcp_server.TOOLS)
 
     def test_application_company_update_syncs_related_actions(self):
         sqlite_store.initialize()

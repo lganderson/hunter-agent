@@ -1,8 +1,9 @@
 import type {
   Action,
   ActionUpdates,
-  AgentChatMessage,
+  AgentChatHistoryMessage,
   AgentChatResponse,
+  AgentContext,
   AppState,
   Application,
   ApplicationUpdates,
@@ -23,14 +24,28 @@ async function readJson<T>(response: Response): Promise<T> {
   if (!response.ok) {
     let message = `HTTP ${response.status}`;
     try {
-      const result = (await response.json()) as { error?: string };
+      const result = (await response.json()) as { error?: string; code?: string; api_version?: number };
       message = result.error || message;
+      if (result.code === "client_outdated") reloadForAgentUpdate(result.api_version);
     } catch {
       // Keep the original HTTP status when the response is not JSON.
     }
     throw new Error(message);
   }
   return response.json() as Promise<T>;
+}
+
+const AGENT_CHAT_API_VERSION = 2;
+const AGENT_RELOAD_VERSION_KEY = "hunter-agent-chat-reload-version";
+
+function reloadForAgentUpdate(apiVersion?: number): never {
+  const version = String(apiVersion ?? "unknown");
+  if (window.sessionStorage.getItem(AGENT_RELOAD_VERSION_KEY) !== version) {
+    window.sessionStorage.setItem(AGENT_RELOAD_VERSION_KEY, version);
+    window.location.reload();
+    throw new Error("Hunter was updated. Reloading…");
+  }
+  throw new Error("Hunter was updated. Reload the page and try again.");
 }
 
 async function postJson<T>(url: string, payload: unknown, init: RequestInit = {}): Promise<T> {
@@ -202,8 +217,25 @@ export function ingestCompanyCandidate(id: string): Promise<{ candidate: Company
   return postJson<{ candidate: CompanyPostingCandidate; posting: Application | null; stdout: string }>("/api/companies/candidates/ingest", { id });
 }
 
-export function sendAgentChat(messages: AgentChatMessage[]): Promise<AgentChatResponse> {
-  return postJson<AgentChatResponse>("/api/agent/chat", { messages });
+export async function getAgentChatHistory(): Promise<AgentChatHistoryMessage[]> {
+  const result = await readJson<{ api_version: number; messages: AgentChatHistoryMessage[] }>(
+    await fetch("/api/agent/history", { cache: "no-store" })
+  );
+  if (result.api_version !== AGENT_CHAT_API_VERSION) reloadForAgentUpdate(result.api_version);
+  window.sessionStorage.removeItem(AGENT_RELOAD_VERSION_KEY);
+  return result.messages;
+}
+
+export function clearAgentChatHistory(): Promise<{ cleared: number }> {
+  return postJson<{ cleared: number }>("/api/agent/history/clear", {});
+}
+
+export function sendAgentChat(message: string, context: AgentContext): Promise<AgentChatResponse> {
+  return postJson<AgentChatResponse>("/api/agent/chat", {
+    api_version: AGENT_CHAT_API_VERSION,
+    message,
+    context
+  });
 }
 
 export async function getWorkflow(): Promise<Workflow> {

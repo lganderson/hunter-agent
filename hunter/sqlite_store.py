@@ -259,6 +259,16 @@ def initialize():
             ")"
         )
         connection.execute(
+            "CREATE TABLE IF NOT EXISTS agent_messages ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "role TEXT NOT NULL, "
+            "content TEXT NOT NULL, "
+            "tool_calls_json TEXT NOT NULL DEFAULT '[]', "
+            "context_json TEXT NOT NULL DEFAULT '{}', "
+            "created_at TEXT NOT NULL"
+            ")"
+        )
+        connection.execute(
             "CREATE TABLE IF NOT EXISTS application_contacts ("
             "application_id TEXT NOT NULL, "
             "contact_id TEXT NOT NULL, "
@@ -320,7 +330,7 @@ def initialize():
         )
         ensure_text_columns(connection, "company_posting_candidates", schema.COMPANY_POSTING_CANDIDATE_FIELDS)
         connection.execute(
-            "INSERT INTO meta(key, value) VALUES('schema_version', '3') "
+            "INSERT INTO meta(key, value) VALUES('schema_version', '4') "
             "ON CONFLICT(key) DO UPDATE SET value=excluded.value"
         )
 

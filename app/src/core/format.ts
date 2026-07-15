@@ -83,6 +83,45 @@ export function inlineMarkdown(text: string): string {
     .replace(/`(.+?)`/g, "<code>$1</code>");
 }
 
+function tableCells(line: string): string[] | null {
+  let text = line.trim();
+  if (!text.includes("|")) return null;
+  if (text.startsWith("|")) text = text.slice(1);
+  if (text.endsWith("|")) text = text.slice(0, -1);
+
+  const cells: string[] = [];
+  let cell = "";
+  let escaped = false;
+  let inCode = false;
+  for (const character of text) {
+    if (escaped) {
+      cell += character;
+      escaped = false;
+    } else if (character === "\\") {
+      escaped = true;
+    } else if (character === "`") {
+      inCode = !inCode;
+      cell += character;
+    } else if (character === "|" && !inCode) {
+      cells.push(cell.trim());
+      cell = "";
+    } else {
+      cell += character;
+    }
+  }
+  if (escaped) cell += "\\";
+  cells.push(cell.trim());
+  return cells.length > 1 ? cells : null;
+}
+
+function isTableDivider(cells: string[] | null, columnCount: number): boolean {
+  return Boolean(cells && cells.length === columnCount && cells.every(cell => /^:?-{3,}:?$/.test(cell)));
+}
+
+function tableLabel(value: string): string {
+  return escapeHtml(value.replace(/\*\*|__|`/g, "").trim());
+}
+
 export function markdownToHtml(markdown: string): string {
   const lines = normalize(markdown).split(/\r?\n/);
   const out: string[] = [];
@@ -105,7 +144,9 @@ export function markdownToHtml(markdown: string): string {
     out.push(`<pre><code>${escapeHtml(codeLines.join("\n"))}</code></pre>`);
     codeLines = null;
   }
-  lines.forEach(line => {
+  let index = 0;
+  while (index < lines.length) {
+    const line = lines[index];
     const trimmed = line.trim();
     if (trimmed.startsWith("```")) {
       closeList();
@@ -114,16 +155,46 @@ export function markdownToHtml(markdown: string): string {
       } else {
         codeLines = [];
       }
-      return;
+      index += 1;
+      continue;
     }
     if (codeLines) {
       codeLines.push(line);
-      return;
+      index += 1;
+      continue;
     }
     if (!trimmed) {
       closeList();
-      return;
+      index += 1;
+      continue;
     }
+
+    const headers = tableCells(line);
+    const divider = index + 1 < lines.length ? tableCells(lines[index + 1]) : null;
+    if (headers && isTableDivider(divider, headers.length)) {
+      closeList();
+      const rows: string[][] = [];
+      index += 2;
+      while (index < lines.length) {
+        const cells = tableCells(lines[index]);
+        if (!cells) break;
+        rows.push(headers.map((_, cellIndex) => cells[cellIndex] || ""));
+        index += 1;
+      }
+      out.push('<div class="markdown-table-scroll"><table><thead><tr>');
+      headers.forEach(header => out.push(`<th scope="col">${inlineMarkdown(header)}</th>`));
+      out.push("</tr></thead><tbody>");
+      rows.forEach(row => {
+        out.push("<tr>");
+        row.forEach((cell, cellIndex) => {
+          out.push(`<td data-label="${tableLabel(headers[cellIndex])}"><div class="markdown-table-cell">${inlineMarkdown(cell)}</div></td>`);
+        });
+        out.push("</tr>");
+      });
+      out.push("</tbody></table></div>");
+      continue;
+    }
+
     if (trimmed.startsWith("# ")) {
       closeList();
       out.push(`<h1>${escapeHtml(trimmed.slice(2))}</h1>`);
@@ -143,7 +214,8 @@ export function markdownToHtml(markdown: string): string {
       closeList();
       out.push(`<p>${inlineMarkdown(trimmed)}</p>`);
     }
-  });
+    index += 1;
+  }
   closeCodeBlock();
   closeList();
   return out.join("");

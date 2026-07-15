@@ -46,6 +46,14 @@ export function XIcon(props: IconProps) {
   return <Icon {...props}><path d="M18 6 6 18M6 6l12 12" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" /></Icon>;
 }
 
+export function ChevronLeftIcon(props: IconProps) {
+  return <Icon {...props}><path d="m15 18-6-6 6-6" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" /></Icon>;
+}
+
+export function ChevronRightIcon(props: IconProps) {
+  return <Icon {...props}><path d="m9 18 6-6-6-6" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" /></Icon>;
+}
+
 export function SearchIcon(props: IconProps) {
   return <Icon {...props}><path d="m21 21-4.3-4.3M10.5 18a7.5 7.5 0 1 1 0-15 7.5 7.5 0 0 1 0 15Z" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" /></Icon>;
 }

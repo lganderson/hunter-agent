@@ -3,7 +3,7 @@
 import json
 from pathlib import Path
 
-from . import paths, repository, schema, sqlite_store, storage
+from . import chat_history, paths, repository, schema, sqlite_store, storage
 
 
 DEMO_DATA_FILE = Path(__file__).resolve().parents[1] / "demo" / "hunter-demo-data.json"
@@ -46,6 +46,7 @@ def _posting_note_count():
 
 
 def _clear_related_tables():
+    chat_history.clear_messages()
     with sqlite_store.connect() as connection:
         connection.execute("DELETE FROM application_contacts")
         connection.execute("DELETE FROM company_contacts")
