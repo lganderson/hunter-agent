@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
+import { useSearchParams } from "react-router-dom";
 import { FilterIcon, ListIcon, PeopleIcon, SearchIcon, XIcon } from "../components/Icons";
 import { linkCompanyContact, linkContact, unlinkCompanyContact, unlinkContact, upsertContact } from "../core/api";
 import { titleCase } from "../core/format";
@@ -10,12 +11,20 @@ type ContactsPageProps = {
 };
 
 export function ContactsPage({ data, refresh }: ContactsPageProps) {
+  const [searchParams, setSearchParams] = useSearchParams();
   const [search, setSearch] = useState("");
   const [selectedContactId, setSelectedContactId] = useState("");
   const [operationStatus, setOperationStatus] = useState("");
   const selectedContact = data.contacts.find(contact => contact.id === selectedContactId) || null;
+  const companyId = searchParams.get("company_id") || "";
+  const filteredCompany = data.companies.find(company => company.id === companyId) || null;
+  const companyContactIds = useMemo(
+    () => new Set(data.company_contacts.filter(link => link.company_id === companyId).map(link => link.contact_id)),
+    [companyId, data.company_contacts]
+  );
   const rows = data.contacts
     .filter(contact => {
+      if (companyId && !companyContactIds.has(contact.id)) return false;
       const query = search.toLowerCase();
       if (!query) return true;
       return [
@@ -47,7 +56,9 @@ export function ContactsPage({ data, refresh }: ContactsPageProps) {
               <SearchIcon />
               <input value={search} onChange={event => setSearch(event.target.value)} type="search" placeholder="Search contacts, companies, notes..." />
             </label>
+            {companyId ? <button className="button" type="button" onClick={() => setSearchParams({})}><FilterIcon size={16} /> Clear company</button> : null}
             <button className="button primary" type="button" onClick={() => setSelectedContactId("new")}><PeopleIcon /> New Contact</button>
+            {companyId ? <span className="active-filter">Company: {filteredCompany?.name || companyId}</span> : null}
           </div>
           <div className="table-scroll">
             <table className="simple-table">

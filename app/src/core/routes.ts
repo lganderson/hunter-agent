@@ -7,9 +7,11 @@ export const routes = {
   companyNew: "/companies/new",
   companyDetail: (id: string) => `/companies/${encodeURIComponent(id)}`,
   candidates: "/candidates",
+  candidatesFiltered: (filters: Record<string, string>) => withQuery("/candidates", filters),
   actions: "/actions",
   actionsFiltered: (filters: Record<string, string>) => withQuery("/actions", filters),
   contacts: "/contacts",
+  contactsFiltered: (filters: Record<string, string>) => withQuery("/contacts", filters),
   settings: "/settings"
 };
 

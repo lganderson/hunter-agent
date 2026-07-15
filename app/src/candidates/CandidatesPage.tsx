@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import { ExternalIcon, FilterIcon, SearchIcon, XIcon } from "../components/Icons";
 import { checkCompanyPostings, ingestCompanyCandidate, updateCompanyCandidate } from "../core/api";
 import { dateOnlyLabel, titleCase } from "../core/format";
@@ -34,12 +34,13 @@ const FIT_VALUES = ["all", "strong", "recommended", "low"];
 const SORT_VALUES = ["fit", "last_seen", "company", "title"];
 
 export function CandidatesPage({ data, refresh }: CandidateReviewPageProps) {
+  const [searchParams, setSearchParams] = useSearchParams();
   const [search, setSearch] = useState("");
-  const [candidateFilter, setCandidateFilter] = useState<CandidateFilter>("recommended");
+  const [candidateFilter, setCandidateFilter] = useState<CandidateFilter>(() => candidateFilterFromQuery(searchParams.get("status")));
   const [interestStatuses, setInterestStatuses] = useState<string[]>(INTEREST_VALUES);
-  const [companyIds, setCompanyIds] = useState<string[]>([]);
+  const [companyIds, setCompanyIds] = useState<string[]>(() => querySelection(searchParams.get("companies"), companyOptionsFromData(data), companyOptionsFromData(data)));
   const [fitFilter, setFitFilter] = useState("all");
-  const [latestOnly, setLatestOnly] = useState(false);
+  const [latestOnly, setLatestOnly] = useState(() => searchParams.get("latest") === "true");
   const [sortBy, setSortBy] = useState("fit");
   const [operationStatus, setOperationStatus] = useState("");
   const [checkingAll, setCheckingAll] = useState(false);
@@ -57,6 +58,8 @@ export function CandidatesPage({ data, refresh }: CandidateReviewPageProps) {
     [data.companies, data.company_posting_candidates]
   );
 
+  const queryKey = searchParams.toString();
+
   useEffect(() => {
     setCompanyIds(previous => {
       const validIds = new Set(companyOptions.map(company => company.id));
@@ -64,6 +67,14 @@ export function CandidatesPage({ data, refresh }: CandidateReviewPageProps) {
       return selected.length ? selected : companyOptions.map(company => company.id);
     });
   }, [companyOptions]);
+
+  useEffect(() => {
+    const params = new URLSearchParams(queryKey);
+    const optionIds = companyOptions.map(company => company.id);
+    setCompanyIds(querySelection(params.get("companies"), optionIds, optionIds));
+    setCandidateFilter(candidateFilterFromQuery(params.get("status")));
+    setLatestOnly(params.get("latest") === "true");
+  }, [companyOptions, queryKey]);
 
   const allRows = useMemo<CandidateRow[]>(
     () => data.company_posting_candidates.map(candidate => {
@@ -228,6 +239,7 @@ export function CandidatesPage({ data, refresh }: CandidateReviewPageProps) {
     setFitFilter("all");
     setLatestOnly(false);
     setSortBy("fit");
+    setSearchParams({});
   }
 
   return (
@@ -408,6 +420,23 @@ function candidateDateLabel(candidate: CompanyPostingCandidate) {
 function matchesSelection(value: string, selected: string[], values: string[]) {
   if (!values.length || selected.length === values.length) return true;
   return selected.includes(value);
+}
+
+function companyOptionsFromData(data: AppState) {
+  return data.companies
+    .filter(company => data.company_posting_candidates.some(candidate => candidate.company_id === company.id))
+    .map(company => company.id);
+}
+
+function candidateFilterFromQuery(value: string | null): CandidateFilter {
+  return CANDIDATE_FILTERS.some(filter => filter.id === value) ? value as CandidateFilter : "recommended";
+}
+
+function querySelection(value: string | null, options: string[], fallback: string[]) {
+  if (!value) return fallback;
+  if (value === "all") return options;
+  const requested = value.split(",").filter(item => options.includes(item));
+  return requested.length ? requested : fallback;
 }
 
 function matchesFitFilter(score: number, filter: string) {

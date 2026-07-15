@@ -25,7 +25,7 @@ export function PostingsPage({ data }: { data: AppState }) {
   const [outcomes, setOutcomes] = useState<string[]>(() => querySelection(searchParams.get("outcomes"), outcomeValues, outcomeValues));
   const [tags, setTags] = useState<string[]>(() => querySelection(searchParams.get("tags"), tagValues, tagValues));
   const [priorities, setPriorities] = useState<string[]>(priorityValues);
-  const [companies, setCompanies] = useState<string[]>(companyValues);
+  const [companies, setCompanies] = useState<string[]>(() => querySelection(searchParams.get("companies"), companyValues, companyValues));
   const [sources, setSources] = useState<string[]>(sourceValues);
   const [dueOnly, setDueOnly] = useState(false);
   const [attention, setAttention] = useState(() => searchParams.get("attention") || "");
@@ -44,9 +44,10 @@ export function PostingsPage({ data }: { data: AppState }) {
     setStages(querySelection(params.get("stages"), stageValues, defaultStages));
     setOutcomes(querySelection(params.get("outcomes"), outcomeValues, outcomeValues));
     setTags(querySelection(params.get("tags"), tagValues, tagValues));
+    setCompanies(querySelection(params.get("companies"), companyValues, companyValues));
     setAttention(params.get("attention") || "");
     setApplied(params.get("applied") || "");
-  }, [queryKey, stageValues, defaultStages, outcomeValues, tagValues]);
+  }, [queryKey, stageValues, defaultStages, outcomeValues, tagValues, companyValues]);
 
   const rows = data.applications
     .filter(app => {
