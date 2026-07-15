@@ -120,7 +120,7 @@ The current local runtime architecture is documented in `docs/local-architecture
 
 ## Core Workflow
 
-1. Add an interesting posting with `python3 hunter.py add` or `python3 hunter.py ingest`.
+1. Add an interesting posting from **Postings → Add posting**, with `python3 hunter.py add`, or with `python3 hunter.py ingest`.
 2. Create or refresh the posting note in SQLite from `templates/job-posting.md`.
 3. Track each meaningful state change with `stage`, `outcome`, and `tags`.
 4. Keep the next concrete action and due date filled in for every active application.

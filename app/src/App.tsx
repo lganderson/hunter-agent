@@ -63,6 +63,7 @@ export function App({ data, refresh }: AppProps) {
         <Routes>
           <Route path="/" element={<DashboardPage data={data} refresh={refresh} />} />
           <Route path="/postings" element={<PostingsPage data={data} />} />
+          <Route path="/postings/new" element={<PostingDetailPage data={data} refresh={refresh} createNew />} />
           <Route path="/postings/:id" element={<PostingDetailPage data={data} refresh={refresh} />} />
           <Route path="/companies" element={<CompaniesPage data={data} refresh={refresh} />} />
           <Route path="/companies/new" element={<CompanyDetailPage data={data} refresh={refresh} createNew />} />

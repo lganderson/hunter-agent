@@ -88,6 +88,52 @@ def upsert_action(rows, action):
     return created, row
 
 
+def create_action(application_id, values):
+    wanted = storage.clean(application_id).upper()
+    application = next(
+        (row for row in repository.read_applications() if row.get("id", "").upper() == wanted),
+        None,
+    )
+    if application is None:
+        raise ValueError(f"No application found with id {application_id}.")
+    values = values or {}
+    title = storage.clean(values.get("title", ""))
+    if not title:
+        raise ValueError("Action title is required.")
+    action_type = workflow.validate_action_type(values.get("type", ""))
+    priority = storage.clean(values.get("priority", "")).lower()
+    if priority and priority not in {"high", "medium", "low"}:
+        raise ValueError("Action priority must be high, medium, or low.")
+
+    rows = repository.read_actions()
+    row = {field: "" for field in schema.ACTION_FIELDS}
+    row.update({
+        "id": next_action_id(rows),
+        "application_id": wanted,
+        "company": application.get("company", ""),
+        "role": application.get("role", ""),
+        "type": action_type,
+        "title": title,
+        "description": values.get("description", ""),
+        "status": "open",
+        "priority": priority,
+        "due_date": "",
+        "created_date": storage.today_iso(),
+        "source": "manual",
+        "related_url": values.get("related_url", ""),
+        "notes": values.get("notes", ""),
+    })
+    try:
+        row["due_date"] = storage.normalize_date(values.get("due_date", ""))
+    except SystemExit as exc:
+        raise ValueError(str(exc)) from exc
+    row = {field: storage.clean(row.get(field, "")) for field in schema.ACTION_FIELDS}
+    rows.append(row)
+    repository.write_actions(rows)
+    sync_next_action(wanted)
+    return row
+
+
 def update_action_status(action_id, status):
     status = normalize_action_status(status)
     if status not in schema.ACTION_STATUSES:

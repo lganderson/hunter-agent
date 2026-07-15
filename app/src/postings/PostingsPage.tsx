@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { FilterIcon, SearchIcon } from "../components/Icons";
+import { FilterIcon, PlusIcon, SearchIcon } from "../components/Icons";
 import { Priority, TagList } from "../components/Primitives";
 import { DATA_QUALITY_TAGS, dueLabel, normalize, tagList, titleCase } from "../core/format";
 import { isWithinPastDays } from "../core/date";
@@ -100,6 +100,10 @@ export function PostingsPage({ data }: { data: AppState }) {
   return (
     <section className="view-section workspace" id="postings-view" aria-label="Posting workspace">
       <article className="panel">
+        <div className="panel-header postings-header">
+          <div><h2 className="panel-title">Postings</h2><p>Track opportunities from discovery through close.</p></div>
+          <button className="button primary" type="button" onClick={() => navigate("/postings/new")}><PlusIcon /> Add posting</button>
+        </div>
         <div className="toolbar" aria-label="Posting filters">
           <label className="search">
             <span className="sr-only">Search postings</span>

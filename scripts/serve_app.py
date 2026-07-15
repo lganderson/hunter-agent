@@ -185,6 +185,20 @@ class AppHandler(SimpleHTTPRequestHandler):
             self.send_json({"action": action, "posting": posting})
             return
 
+        if path == "/api/actions/create":
+            payload = self.read_json()
+            try:
+                action = action_store.create_action(
+                    application_id=payload.get("application_id", ""),
+                    values=payload.get("values", {}),
+                )
+                posting = action_store.sync_next_action(action.get("application_id", ""))
+            except ValueError as exc:
+                self.send_json({"error": str(exc)}, status=400)
+                return
+            self.send_json({"action": action, "posting": posting})
+            return
+
         if path == "/api/actions/update-fields":
             payload = self.read_json()
             try:
@@ -216,6 +230,17 @@ class AppHandler(SimpleHTTPRequestHandler):
                     application_id=payload.get("id", ""),
                     updates=payload.get("updates", {}),
                 )
+            except ValueError as exc:
+                self.send_json({"error": str(exc)}, status=400)
+                return
+            self.send_json({"application": application})
+            return
+
+
+        if path == "/api/applications/create":
+            payload = self.read_json()
+            try:
+                application = application_store.create_application(payload.get("values", {}))
             except ValueError as exc:
                 self.send_json({"error": str(exc)}, status=400)
                 return

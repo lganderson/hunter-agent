@@ -1,4 +1,6 @@
-"""Application/posting update operations shared by the local app surfaces."""
+"""Application/posting create and update operations shared by local app surfaces."""
+
+import re
 
 from . import actions, repository, schema, storage, workflow
 
@@ -6,16 +8,80 @@ from . import actions, repository, schema, storage, workflow
 EDITABLE_FIELDS = {
     "company_id",
     "company",
+    "role",
+    "location",
+    "work_mode",
+    "source",
+    "source_url",
+    "compensation",
     "stage",
     "outcome",
     "tags",
     "priority",
+    "date_found",
     "date_applied",
     "contact",
     "resume_version",
     "cover_letter",
     "notes",
 }
+
+
+def next_application_id(rows):
+    highest = 0
+    for row in rows:
+        match = re.fullmatch(r"A(\d+)", row.get("id", "").upper())
+        if match:
+            highest = max(highest, int(match.group(1)))
+    return f"A{highest + 1:04d}"
+
+
+def normalize_date(value):
+    try:
+        return storage.normalize_date(value)
+    except SystemExit as exc:
+        raise ValueError(str(exc)) from exc
+
+
+def create_application(values):
+    values = values or {}
+    role = storage.clean(values.get("role", ""))
+    company = storage.clean(values.get("company", ""))
+    company_id = storage.clean(values.get("company_id", "")).upper()
+    companies = repository.read_companies()
+    managed_company = next((item for item in companies if item.get("id", "").upper() == company_id), None)
+    if company_id and managed_company is None:
+        raise ValueError(f"No company found with id {company_id}.")
+    if managed_company:
+        company = storage.clean(managed_company.get("name", ""))
+    if not role:
+        raise ValueError("Role is required.")
+    if not company:
+        raise ValueError("Company is required.")
+
+    rows = repository.read_applications()
+    row = {field: "" for field in schema.APPLICATION_FIELDS}
+    row.update({"id": next_application_id(rows), "company": company, "role": role})
+    row["stage"] = workflow.validate_stage(values.get("stage") or schema.DEFAULT_STAGE)
+    row["outcome"] = workflow.validate_outcome(row["stage"], values.get("outcome", ""))
+    row["priority"] = storage.clean(values.get("priority") or schema.DEFAULT_PRIORITY).lower()
+    if row["priority"] not in {"high", "medium", "low"}:
+        raise ValueError("Posting priority must be high, medium, or low.")
+    row["date_found"] = normalize_date(values.get("date_found") or "today")
+    for field, value in values.items():
+        if field not in EDITABLE_FIELDS or field in {"company", "role", "stage", "outcome", "priority", "date_found"}:
+            continue
+        if field == "tags":
+            row[field] = storage.normalize_tags(value)
+        elif field == "company_id":
+            row[field] = company_id
+        elif field == "date_applied":
+            row[field] = normalize_date(value)
+        else:
+            row[field] = storage.clean(value)
+    rows.append(row)
+    repository.write_applications(rows)
+    return row
 
 
 def sync_related_action_identity(application):
@@ -67,8 +133,13 @@ def update_application(application_id, updates):
                 row[field] = next_stage
             elif field == "outcome":
                 row[field] = next_outcome
-            elif field == "date_applied":
-                row[field] = storage.normalize_date(value)
+            elif field in {"date_found", "date_applied"}:
+                row[field] = normalize_date(value)
+            elif field == "priority":
+                priority = storage.clean(value).lower()
+                if priority and priority not in {"high", "medium", "low"}:
+                    raise ValueError("Posting priority must be high, medium, or low.")
+                row[field] = priority
             else:
                 row[field] = storage.clean(value)
         row["outcome"] = next_outcome

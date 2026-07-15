@@ -90,6 +90,40 @@ class HunterWorkflowTest(unittest.TestCase):
         self.assertEqual(updated["stage"], "closed")
         self.assertEqual(updated["outcome"], "withdrawn")
 
+    def test_manual_application_creation_assigns_id_and_validates_required_fields(self):
+        sqlite_store.initialize()
+        repository.write_applications([application_row({"id": "A0007"})])
+
+        created = applications.create_application({
+            "company": "Acme",
+            "role": "Product Manager",
+            "location": "Chicago",
+            "tags": "Warm Lead, remote",
+        })
+
+        self.assertEqual(created["id"], "A0008")
+        self.assertEqual(created["stage"], schema.DEFAULT_STAGE)
+        self.assertEqual(created["tags"], "warm-lead,remote")
+        with self.assertRaisesRegex(ValueError, "Role is required"):
+            applications.create_application({"company": "Acme"})
+
+    def test_manual_action_creation_syncs_posting_next_action(self):
+        sqlite_store.initialize()
+        repository.write_applications([application_row({"id": "A0001"})])
+
+        created = actions.create_action("A0001", {
+            "title": "Email recruiter",
+            "type": "follow-up",
+            "priority": "high",
+            "due_date": "2026-07-20",
+        })
+
+        self.assertEqual(created["id"], "T0001")
+        self.assertEqual(created["source"], "manual")
+        posting = repository.read_applications()[0]
+        self.assertEqual(posting["next_action_id"], "T0001")
+        self.assertEqual(posting["next_action"], "Email recruiter")
+
     def test_application_company_update_syncs_related_actions(self):
         sqlite_store.initialize()
         repository.write_applications([
@@ -109,7 +143,10 @@ class HunterWorkflowTest(unittest.TestCase):
         input_schema = mcp_server.TOOLS["hunter_update_application"]["inputSchema"]
         update_properties = input_schema["properties"]["updates"]["properties"]
 
-        self.assertIn("company", update_properties)
+        self.assertTrue({
+            "company", "role", "location", "work_mode", "source", "source_url",
+            "compensation", "date_found",
+        }.issubset(update_properties))
 
     def test_mcp_update_application_can_set_company(self):
         sqlite_store.initialize()

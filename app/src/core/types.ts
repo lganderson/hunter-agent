@@ -203,9 +203,16 @@ export type ApplicationUpdates = Partial<
     Application,
     | "company_id"
     | "company"
+    | "role"
+    | "location"
+    | "work_mode"
+    | "source"
+    | "source_url"
+    | "compensation"
     | "stage"
     | "outcome"
     | "priority"
+    | "date_found"
     | "date_applied"
     | "tags"
     | "contact"
@@ -214,6 +221,8 @@ export type ApplicationUpdates = Partial<
     | "notes"
   >
 >;
+
+export type ActionUpdates = Partial<Pick<Action, "title" | "description" | "type" | "priority" | "due_date" | "related_url" | "notes">>;
 
 export type ContactUpdates = Partial<Omit<Contact, "id">>;
 

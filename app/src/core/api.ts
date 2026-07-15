@@ -1,5 +1,6 @@
 import type {
   Action,
+  ActionUpdates,
   AgentChatMessage,
   AgentChatResponse,
   AppState,
@@ -99,6 +100,10 @@ export function updateAction(id: string, status: string): Promise<{ action: Acti
   return postJson<{ action: Action; posting: Application | null }>("/api/actions/update", { id, status });
 }
 
+export function createAction(applicationId: string, values: ActionUpdates): Promise<{ action: Action; posting: Application | null }> {
+  return postJson<{ action: Action; posting: Application | null }>("/api/actions/create", { application_id: applicationId, values });
+}
+
 export function updateActionFields(id: string, updates: Partial<Pick<Action, "title" | "description" | "type" | "priority" | "due_date" | "related_url" | "notes">>): Promise<{ action: Action; posting: Application | null }> {
   return postJson<{ action: Action; posting: Application | null }>("/api/actions/update-fields", { id, updates });
 }
@@ -109,6 +114,10 @@ export function makeNextAction(id: string): Promise<{ posting: Application | nul
 
 export function updateApplication(id: string, updates: ApplicationUpdates): Promise<{ application: Application }> {
   return postJson<{ application: Application }>("/api/applications/update", { id, updates });
+}
+
+export function createApplication(values: ApplicationUpdates): Promise<{ application: Application }> {
+  return postJson<{ application: Application }>("/api/applications/create", { values });
 }
 
 export function upsertContact(id: string, updates: ContactUpdates): Promise<{ contact: Contact }> {
