@@ -71,6 +71,11 @@ class HunterCompaniesTest(unittest.TestCase):
             self.assertIn("company_contacts", table_names(connection))
             self.assertIn("company_career_sources", table_names(connection))
             self.assertIn("company_posting_candidates", table_names(connection))
+            candidate_columns = {
+                row[1]
+                for row in connection.execute("PRAGMA table_info(company_posting_candidates)").fetchall()
+            }
+            self.assertIn("location", candidate_columns)
 
     def test_upsert_company_auto_associates_exact_posting_and_syncs_action_company(self):
         sqlite_store.initialize()
@@ -153,6 +158,31 @@ class HunterCompaniesTest(unittest.TestCase):
         self.assertEqual(candidates[0]["url"], "https://example.com/jobs/new-role")
         self.assertIn("fit_score", candidates[0])
 
+    def test_check_company_postings_persists_structured_job_location(self):
+        sqlite_store.initialize()
+        company = companies.upsert_company("", {"name": "Example", "careers_url": "https://example.com/careers"})
+        html = """
+        <script type="application/ld+json">
+        {
+          "@context": "https://schema.org",
+          "@type": "JobPosting",
+          "title": "Technical Program Manager",
+          "url": "https://example.com/jobs/technical-program-manager",
+          "jobLocationType": "TELECOMMUTE",
+          "applicantLocationRequirements": {"@type": "Country", "name": "United States"}
+        }
+        </script>
+        <a href="/jobs/technical-program-manager">Technical Program Manager</a>
+        """
+
+        result = companies.check_company_postings(
+            company["id"],
+            fetcher=lambda _url: {"status": 200, "final_url": "https://example.com/careers", "html": html, "error": ""},
+        )
+
+        self.assertEqual(result["new"][0]["location"], "Remote; United States")
+        self.assertEqual(repository.read_company_posting_candidates()[0]["location"], "Remote; United States")
+
     def test_check_company_postings_marks_existing_candidate_ingested_by_job_board_identity(self):
         sqlite_store.initialize()
         company = companies.upsert_company("", {"name": "Figma", "careers_url": "https://www.figma.com/careers"})
@@ -194,6 +224,7 @@ class HunterCompaniesTest(unittest.TestCase):
             "company_id": company["id"],
             "title": "Product Manager, AI Platform",
             "url": "https://example.com/jobs/product-manager-ai-platform",
+            "location": "Remote; United States",
             "status": "new",
         })
         repository.write_company_posting_candidates([candidate])
@@ -204,6 +235,7 @@ class HunterCompaniesTest(unittest.TestCase):
         command = run.call_args.args[0]
         self.assertIn("--role", command)
         self.assertEqual(command[command.index("--role") + 1], "Product Manager, AI Platform")
+        self.assertEqual(command[command.index("--location") + 1], "Remote; United States")
         self.assertEqual(command[-1], "https://example.com/jobs/product-manager-ai-platform")
         self.assertEqual(result["candidate"]["status"], "ingested")
 
@@ -421,6 +453,55 @@ class HunterCompaniesTest(unittest.TestCase):
         candidates = companies.extract_candidate_links(html, "https://www.github.careers/careers-home/jobs")
 
         self.assertEqual(candidates, [])
+
+    def test_extract_candidate_links_reads_avature_job_detail_location_and_skips_structured_login(self):
+        html = """
+        <script type="application/ld+json">
+        {"@type":"JobPosting","title":"Create a job alert","url":"https://jobs.ea.com/en_US/careers/Login"}
+        </script>
+        <article class="article article--result">
+          <h3><a href="https://jobs.ea.com/en_US/careers/JobDetail/Development-Director/215676">Development Director</a></h3>
+          <span class="list-item-location">Shanghai, China</span>
+        </article>
+        """
+
+        candidates = companies.extract_candidate_links(html, "https://jobs.ea.com/en_US/careers")
+
+        self.assertEqual(
+            candidates,
+            [{
+                "title": "Development Director",
+                "url": "https://jobs.ea.com/en_US/careers/JobDetail/Development-Director/215676",
+                "location": "Shanghai, China",
+            }],
+        )
+
+    def test_check_company_postings_marks_previously_saved_non_job_candidate_unavailable(self):
+        sqlite_store.initialize()
+        company = companies.upsert_company("", {"name": "Example", "careers_url": "https://example.com/careers"})
+        candidate = {field: "" for field in schema.COMPANY_POSTING_CANDIDATE_FIELDS}
+        candidate.update({
+            "id": "CP0001",
+            "company_id": company["id"],
+            "title": "Create a job alert",
+            "url": "https://example.com/careers/Login",
+            "status": "new",
+        })
+        repository.write_company_posting_candidates([candidate])
+
+        result = companies.check_company_postings(
+            company["id"],
+            fetcher=lambda _url: {
+                "status": 200,
+                "final_url": "https://example.com/careers",
+                "html": '<a href="/jobs/product-manager">Product Manager</a>',
+                "error": "",
+            },
+        )
+
+        saved = next(row for row in result["candidates"] if row["id"] == "CP0001")
+        self.assertEqual(saved["status"], "unavailable")
+        self.assertEqual(result["unavailable_count"], 1)
 
     def test_extract_candidate_links_respects_html_base_and_cleans_google_titles(self):
         html = """

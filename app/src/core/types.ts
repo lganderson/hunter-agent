@@ -111,6 +111,7 @@ export type CompanyPostingCandidate = {
   company_id: string;
   title: string;
   url: string;
+  location: string;
   status: string;
   first_seen_at: string;
   last_seen_at: string;

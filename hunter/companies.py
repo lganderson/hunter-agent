@@ -35,14 +35,14 @@ JOB_BOARD_HOST_MARKERS = {
 }
 JOB_LINK_PATTERN = re.compile(r"\b(job|jobs|career|careers|position|positions|opening|openings|req|role)\b", re.I)
 JOB_URL_PATTERN = re.compile(
-    r"(^|/)(job|jobs|job-postings|positions|openings|req|requisition|details)(/|$)|[?&](gh_jid|jobid|job_id|reqid|req_id)=",
+    r"(^|/)(job|jobs|job-detail|jobdetail|job-postings|positions|openings|req|requisition|details)(/|$)|[?&](gh_jid|jobid|job_id|reqid|req_id)=",
     re.I,
 )
 NON_JOB_TITLE_PATTERN = re.compile(
     r"\b(employee\s+login|login|sign\s+in|job\s+listings|all\s+jobs|us\s+jobs|global\s+jobs)\b",
     re.I,
 )
-NON_JOB_URL_PATTERN = re.compile(r"(^|/)login(/|$)|[?&]loginOnly=1", re.I)
+NON_JOB_URL_PATTERN = re.compile(r"(^|/)login(?:/|$|\?)|[?&]loginOnly=1", re.I)
 JOB_ID_QUERY_KEYS = {"gh_jid", "jobid", "job_id", "jobId".lower(), "reqid", "req_id", "req"}
 GOOGLE_CAREERS_HOST = "www.google.com"
 GOOGLE_CAREERS_RESULTS_PATH = "/about/careers/applications/jobs/results"
@@ -414,9 +414,27 @@ def clean_candidate_title(title, url):
     return cleaned
 
 
+def candidate_location_near_link(page_html, match_start, match_end):
+    article_start = page_html.rfind("<article", 0, match_start)
+    article_end = page_html.find("</article>", match_end)
+    if article_start < 0 or article_end < 0:
+        return ""
+    article = page_html[article_start : article_end + len("</article>")]
+    values = []
+    for location_html in re.findall(
+        r"<(?:span|div|p)\b[^>]*class\s*=\s*(['\"])[^'\"]*location[^'\"]*\1[^>]*>(.*?)</(?:span|div|p)>",
+        article,
+        re.I | re.S,
+    ):
+        value = clean_link_text(location_html[1])
+        if value and value.lower() not in {item.lower() for item in values}:
+            values.append(value)
+    return "; ".join(values)
+
+
 def extract_candidate_links(page_html, base_url):
-    candidates = []
-    seen = set()
+    candidates = extract_structured_job_candidates(page_html, base_url)
+    seen = {candidate["url"] for candidate in candidates}
     link_base_url = html_base_url(page_html, base_url)
     for match in re.finditer(r"<a\b([^>]*)>(.*?)</a>", page_html or "", re.I | re.S):
         attrs = match.group(1)
@@ -435,7 +453,93 @@ def extract_candidate_links(page_html, base_url):
         if url in seen or normalize_url(base_url) == url:
             continue
         seen.add(url)
-        candidates.append({"title": title, "url": url})
+        candidate = {"title": title, "url": url}
+        location = candidate_location_near_link(page_html, match.start(), match.end())
+        if location:
+            candidate["location"] = location
+        candidates.append(candidate)
+    return candidates
+
+
+def json_ld_objects(page_html):
+    objects = []
+    for raw in re.findall(
+        r"<script[^>]+type\s*=\s*(['\"])application/ld\+json\1[^>]*>(.*?)</script>",
+        page_html or "",
+        re.I | re.S,
+    ):
+        try:
+            value = json.loads(html.unescape(raw[1].strip()))
+        except json.JSONDecodeError:
+            continue
+        pending = value if isinstance(value, list) else [value]
+        for item in pending:
+            if not isinstance(item, dict):
+                continue
+            objects.append(item)
+            graph = item.get("@graph")
+            if isinstance(graph, list):
+                objects.extend(entry for entry in graph if isinstance(entry, dict))
+    return objects
+
+
+def structured_job_location(job):
+    values = []
+    location_type = storage.clean(str(job.get("jobLocationType", "") or ""))
+    if location_type.upper() == "TELECOMMUTE":
+        values.append("Remote")
+
+    locations = job.get("jobLocation") or []
+    if isinstance(locations, dict):
+        locations = [locations]
+    for location in locations if isinstance(locations, list) else []:
+        if not isinstance(location, dict):
+            continue
+        address = location.get("address") if isinstance(location.get("address"), dict) else location
+        parts = []
+        for field in ["addressLocality", "addressRegion", "addressCountry"]:
+            value = address.get(field)
+            if isinstance(value, dict):
+                value = value.get("name")
+            cleaned = storage.clean(str(value or ""))
+            if cleaned and cleaned.lower() not in {part.lower() for part in parts}:
+                parts.append(cleaned)
+        if parts:
+            values.append(", ".join(parts))
+
+    requirements = job.get("applicantLocationRequirements") or []
+    if isinstance(requirements, dict):
+        requirements = [requirements]
+    for requirement in requirements if isinstance(requirements, list) else []:
+        value = requirement.get("name") if isinstance(requirement, dict) else requirement
+        cleaned = storage.clean(str(value or ""))
+        if cleaned:
+            values.append(cleaned)
+
+    return "; ".join(dict.fromkeys(value for value in values if value))
+
+
+def extract_structured_job_candidates(page_html, base_url):
+    candidates = []
+    seen = set()
+    for job in json_ld_objects(page_html):
+        item_type = job.get("@type", "")
+        types = item_type if isinstance(item_type, list) else [item_type]
+        if "JobPosting" not in types:
+            continue
+        raw_url = job.get("url") or job.get("sameAs") or ""
+        url = normalize_url(urljoin(base_url, storage.clean(str(raw_url))))
+        title = storage.clean(str(job.get("title", "") or ""))
+        if (
+            not url
+            or not title
+            or not host_allowed(url, base_url)
+            or not looks_like_job_link(title, url, base_url)
+            or url in seen
+        ):
+            continue
+        seen.add(url)
+        candidates.append({"title": title, "url": url, "location": structured_job_location(job)})
     return candidates
 
 
@@ -2782,7 +2886,7 @@ def ashby_posting_url(board_url, posting_id):
 
 def ashby_location(posting):
     parts = []
-    for field in ["locationName", "workplaceType", "departmentName", "teamName", "compensationTierSummary"]:
+    for field in ["locationName", "workplaceType"]:
         value = storage.clean(str(posting.get(field, "") or ""))
         if value:
             parts.append(value)
@@ -2800,6 +2904,16 @@ def ashby_location(posting):
                 if value:
                     parts.append(value)
     return ", ".join(dict.fromkeys(parts))
+
+
+def ashby_category(posting):
+    return ", ".join(
+        dict.fromkeys(
+            storage.clean(str(posting.get(field, "") or ""))
+            for field in ["departmentName", "teamName"]
+            if storage.clean(str(posting.get(field, "") or ""))
+        )
+    )
 
 
 def ashby_candidate_matches_resume(candidate, resume_text):
@@ -2827,7 +2941,7 @@ def extract_ashby_candidates(page_html, board_url):
             "title": title,
             "url": url,
             "location": location,
-            "category": location,
+            "category": ashby_category(posting),
         }
         if not ashby_candidate_matches_resume(candidate, resume_text):
             continue
@@ -4209,6 +4323,7 @@ def check_company_postings(company_id, fetcher=None):
         if existing:
             existing["title"] = item.get("title", "") or existing.get("title", "")
             existing["url"] = url
+            existing["location"] = item.get("location", "") or existing.get("location", "")
             existing["last_seen_at"] = checked_at
             if candidate_is_tracked(item, tracked):
                 existing["status"] = "ingested"
@@ -4225,6 +4340,7 @@ def check_company_postings(company_id, fetcher=None):
                 "company_id": company.get("id", ""),
                 "title": item.get("title", ""),
                 "url": url,
+                "location": item.get("location", ""),
                 "status": "new",
                 "first_seen_at": checked_at,
                 "last_seen_at": checked_at,
@@ -4239,7 +4355,16 @@ def check_company_postings(company_id, fetcher=None):
         for row in candidates
         if row.get("company_id", "").upper() == company.get("id", "").upper()
     ]
+    invalid_candidate_count = 0
+    for candidate in company_candidates:
+        if candidate.get("status", "new") != "new" or candidate_seen_in_scan(candidate, seen_urls, seen_identity_keys):
+            continue
+        if looks_like_job_link(candidate.get("title", ""), candidate.get("url", ""), careers_url):
+            continue
+        candidate["status"] = "unavailable"
+        invalid_candidate_count += 1
     verification = verify_unseen_candidate_availability(company_candidates, seen_urls, seen_identity_keys, fetch)
+    verification["unavailable_count"] += invalid_candidate_count
     annotate_candidate_fit(candidates, company.get("id", ""), checked_at, only_missing=True)
     current_candidates = [row for row in company_candidates if row.get("last_seen_at") == checked_at]
     recommended = recommended_candidates(current_candidates)
@@ -4352,8 +4477,10 @@ def ingest_candidate(candidate_id):
         company.get("name", ""),
         "--role",
         candidate.get("title", ""),
-        candidate.get("url", ""),
     ]
+    if candidate.get("location"):
+        command.extend(["--location", candidate.get("location", "")])
+    command.append(candidate.get("url", ""))
     result = subprocess.run(command, cwd=paths.ROOT, capture_output=True, text=True, check=False)
     if result.returncode:
         raise ValueError((result.stderr or result.stdout or "candidate ingest failed").strip())

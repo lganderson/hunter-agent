@@ -307,6 +307,7 @@ def initialize():
             "company_id TEXT NOT NULL, "
             "title TEXT NOT NULL DEFAULT '', "
             "url TEXT NOT NULL DEFAULT '', "
+            "location TEXT NOT NULL DEFAULT '', "
             "status TEXT NOT NULL DEFAULT 'new', "
             "first_seen_at TEXT NOT NULL DEFAULT '', "
             "last_seen_at TEXT NOT NULL DEFAULT '', "

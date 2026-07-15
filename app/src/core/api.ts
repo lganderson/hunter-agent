@@ -32,10 +32,11 @@ async function readJson<T>(response: Response): Promise<T> {
   return response.json() as Promise<T>;
 }
 
-async function postJson<T>(url: string, payload: unknown): Promise<T> {
+async function postJson<T>(url: string, payload: unknown, init: RequestInit = {}): Promise<T> {
   const response = await fetchWithLocalRetry(url, {
+    ...init,
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...init.headers },
     body: JSON.stringify(payload)
   });
   return readJson<T>(response);
@@ -45,6 +46,7 @@ async function fetchWithLocalRetry(url: string, init: RequestInit): Promise<Resp
   try {
     return await fetch(url, init);
   } catch (error) {
+    if (init.signal?.aborted) throw error;
     await new Promise(resolve => window.setTimeout(resolve, 500));
     try {
       return await fetch(url, init);
@@ -161,8 +163,8 @@ export type CompanyCheckAllResult = {
   verification_skipped_count: number;
 };
 
-export function checkCompanyPostings(id: string): Promise<CompanyCheckResult> {
-  return postJson<CompanyCheckResult>("/api/companies/check", { id });
+export function checkCompanyPostings(id: string, signal?: AbortSignal): Promise<CompanyCheckResult> {
+  return postJson<CompanyCheckResult>("/api/companies/check", { id }, { signal });
 }
 
 export function checkAllCompanyPostings(): Promise<CompanyCheckAllResult> {

@@ -1,7 +1,7 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
-import { ExternalIcon, FilterIcon, SearchIcon } from "../components/Icons";
-import { checkAllCompanyPostings, ingestCompanyCandidate, updateCompanyCandidate } from "../core/api";
+import { ExternalIcon, FilterIcon, SearchIcon, XIcon } from "../components/Icons";
+import { checkCompanyPostings, ingestCompanyCandidate, updateCompanyCandidate } from "../core/api";
 import { dateOnlyLabel, titleCase } from "../core/format";
 import { routes } from "../core/routes";
 import type { AppState, Company, CompanyPostingCandidate } from "../core/types";
@@ -43,6 +43,8 @@ export function CandidatesPage({ data, refresh }: CandidateReviewPageProps) {
   const [sortBy, setSortBy] = useState("fit");
   const [operationStatus, setOperationStatus] = useState("");
   const [checkingAll, setCheckingAll] = useState(false);
+  const [checkProgress, setCheckProgress] = useState<{ completed: number; total: number } | null>(null);
+  const checkAbortController = useRef<AbortController | null>(null);
 
   const companyById = useMemo(
     () => new Map(data.companies.map(company => [company.id, company])),
@@ -90,6 +92,7 @@ export function CandidatesPage({ data, refresh }: CandidateReviewPageProps) {
           candidate.id,
           candidate.title,
           candidate.url,
+          candidate.location,
           candidate.status,
           candidate.fit_score,
           candidate.fit_summary,
@@ -127,6 +130,7 @@ export function CandidatesPage({ data, refresh }: CandidateReviewPageProps) {
   );
 
   async function setCandidateStatus(candidateId: string, status: string) {
+    setCheckProgress(null);
     setOperationStatus(status === "ignored" ? "Ignoring candidate..." : "Updating candidate...");
     try {
       await updateCompanyCandidate(candidateId, status);
@@ -138,6 +142,7 @@ export function CandidatesPage({ data, refresh }: CandidateReviewPageProps) {
   }
 
   async function ingestCandidate(candidateId: string) {
+    setCheckProgress(null);
     setOperationStatus("Ingesting candidate...");
     try {
       await ingestCompanyCandidate(candidateId);
@@ -149,22 +154,70 @@ export function CandidatesPage({ data, refresh }: CandidateReviewPageProps) {
   }
 
   async function checkAllCompanies() {
+    const companiesToCheck = data.companies.filter(
+      company => company.interest_status.toLowerCase() !== "archived" && company.careers_url.trim()
+    );
+    const skippedCount = data.companies.length - companiesToCheck.length;
+    const totals = {
+      checked: 0,
+      errors: 0,
+      newCandidates: 0,
+      recommended: 0,
+      unavailable: 0,
+      verification: 0,
+      verificationSkipped: 0
+    };
+    const abortController = new AbortController();
+    let canceled = false;
+
+    checkAbortController.current = abortController;
     setCheckingAll(true);
     setOperationStatus("Checking careers pages for all companies...");
+    setCheckProgress({ completed: 0, total: companiesToCheck.length });
     try {
-      const result = await checkAllCompanyPostings();
+      for (const company of companiesToCheck) {
+        try {
+          const result = await checkCompanyPostings(company.id, abortController.signal);
+          totals.checked += 1;
+          totals.newCandidates += result.new.length;
+          totals.recommended += result.recommended.length;
+          totals.unavailable += result.unavailable_count;
+          totals.verification += result.verification_count;
+          totals.verificationSkipped += result.verification_skipped_count;
+        } catch {
+          if (abortController.signal.aborted) {
+            canceled = true;
+            break;
+          }
+          totals.errors += 1;
+        } finally {
+          if (!abortController.signal.aborted) {
+            setCheckProgress(previous => previous ? { ...previous, completed: previous.completed + 1 } : previous);
+          }
+        }
+      }
       await refresh();
-      const errorText = result.error_count ? ` ${result.error_count} failed.` : "";
-      const detailChecked = result.verification_count ? ` ${result.verification_count} detail checked.` : "";
-      const detailSkipped = result.verification_skipped_count ? ` ${result.verification_skipped_count} detail skipped.` : "";
+      if (canceled) {
+        setOperationStatus(`Canceled after checking ${totals.checked + totals.errors} of ${companiesToCheck.length} companies.`);
+        return;
+      }
+      const errorText = totals.errors ? ` ${totals.errors} failed.` : "";
+      const detailChecked = totals.verification ? ` ${totals.verification} detail checked.` : "";
+      const detailSkipped = totals.verificationSkipped ? ` ${totals.verificationSkipped} detail skipped.` : "";
       setOperationStatus(
-        `Checked ${result.checked_count} companies. ${result.new_count} new candidates, ${result.recommended_count} recommended, ${result.unavailable_count} unavailable. ${result.skipped_count} skipped.${detailChecked}${detailSkipped}${errorText}`
+        `Checked ${totals.checked} companies. ${totals.newCandidates} new candidates, ${totals.recommended} recommended, ${totals.unavailable} unavailable. ${skippedCount} skipped.${detailChecked}${detailSkipped}${errorText}`
       );
     } catch (error) {
       setOperationStatus(`Could not check all companies. ${error instanceof Error ? error.message : String(error)}`);
     } finally {
+      checkAbortController.current = null;
       setCheckingAll(false);
     }
+  }
+
+  function cancelCheckAllCompanies() {
+    setOperationStatus("Canceling careers-page checks...");
+    checkAbortController.current?.abort();
   }
 
   function clearFilters() {
@@ -184,7 +237,7 @@ export function CandidatesPage({ data, refresh }: CandidateReviewPageProps) {
           <label className="search">
             <span className="sr-only">Search posting candidates</span>
             <SearchIcon />
-            <input value={search} onChange={event => setSearch(event.target.value)} type="search" placeholder="Search candidates, companies, fit notes..." />
+            <input value={search} onChange={event => setSearch(event.target.value)} type="search" placeholder="Search candidates, locations, companies, fit notes..." />
           </label>
           <MultiFilter label="Interest" values={INTEREST_VALUES} selected={interestStatuses} onChange={setInterestStatuses} />
           <MultiFilter label="Company" values={companyOptions.map(company => company.id)} selected={companyIds} onChange={setCompanyIds} labelForValue={id => companyById.get(id)?.name || id} />
@@ -215,7 +268,33 @@ export function CandidatesPage({ data, refresh }: CandidateReviewPageProps) {
           ))}
         </div>
 
-        {operationStatus ? <div className="table-operation-status">{operationStatus}</div> : null}
+        {operationStatus ? (
+          <div className="table-operation-status" role="status">
+            <div className="table-operation-status-content">
+              <span>{operationStatus}</span>
+              {checkProgress ? (
+                <div className="table-operation-progress">
+                  <progress
+                    value={checkProgress.total ? checkProgress.completed : Number(!checkingAll)}
+                    max={Math.max(1, checkProgress.total)}
+                    aria-label="Company careers check progress"
+                  />
+                  <span>{checkProgress.completed} of {checkProgress.total}</span>
+                </div>
+              ) : null}
+            </div>
+            {checkProgress && checkingAll ? (
+              <button className="button compact" type="button" onClick={cancelCheckAllCompanies}>
+                Cancel
+              </button>
+            ) : null}
+            {checkProgress && !checkingAll ? (
+              <button className="icon-button table-operation-close" type="button" onClick={() => { setOperationStatus(""); setCheckProgress(null); }} aria-label="Close check results">
+                <XIcon size={15} />
+              </button>
+            ) : null}
+          </div>
+        ) : null}
         <div className="candidate-review-summary">
           <strong>{rows.length}</strong>
           <span>shown from {data.company_posting_candidates.length} total candidates</span>
@@ -238,6 +317,7 @@ export function CandidatesPage({ data, refresh }: CandidateReviewPageProps) {
                 <tr key={candidate.id}>
                   <td className="role-cell candidate-title-cell">
                     <strong>{candidate.title || candidate.url}</strong>
+                    <span className="cell-subtle">{candidate.location || "Location unknown"}</span>
                   </td>
                   <td>
                     {company ? <Link to={routes.companyDetail(company.id)}>{company.name}</Link> : candidate.company_id || "Unknown"}

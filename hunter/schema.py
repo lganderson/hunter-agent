@@ -75,6 +75,7 @@ COMPANY_POSTING_CANDIDATE_FIELDS = [
     "company_id",
     "title",
     "url",
+    "location",
     "status",
     "first_seen_at",
     "last_seen_at",

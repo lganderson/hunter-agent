@@ -140,6 +140,7 @@ def compact_company_candidate(candidate, detail=False):
         "company_id",
         "title",
         "url",
+        "location",
         "status",
         "last_seen_at",
         "fit_score",

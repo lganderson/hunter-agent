@@ -12,7 +12,7 @@ import {
   upsertCompany
 } from "../core/api";
 import { routes } from "../core/routes";
-import { titleCase } from "../core/format";
+import { dateOnlyLabel, titleCase } from "../core/format";
 import type { AppState, Company, CompanyCareerSource, CompanyPostingCandidate } from "../core/types";
 import {
   CANDIDATE_FILTERS,
@@ -36,11 +36,12 @@ type CompanyDetailPageProps = CompaniesPageProps & {
   createNew?: boolean;
 };
 
-const INTEREST_STATUSES = ["all", "interested", "neutral", "archived"];
+const INTEREST_STATUSES = ["interested", "neutral", "archived"];
+const DEFAULT_INTEREST_STATUSES = ["interested", "neutral"];
 
 export function CompaniesPage({ data, refresh }: CompaniesPageProps) {
   const [search, setSearch] = useState("");
-  const [interestStatus, setInterestStatus] = useState("all");
+  const [interestStatuses, setInterestStatuses] = useState<string[]>(DEFAULT_INTEREST_STATUSES);
   const [checkingCompanyId, setCheckingCompanyId] = useState("");
   const [operationStatus, setOperationStatus] = useState("");
 
@@ -48,7 +49,7 @@ export function CompaniesPage({ data, refresh }: CompaniesPageProps) {
     const query = search.toLowerCase();
     return data.companies
       .filter(company => {
-        if (interestStatus !== "all" && company.interest_status !== interestStatus) return false;
+        if (!interestStatuses.includes(company.interest_status)) return false;
         if (!query) return true;
         return [
           company.id,
@@ -61,8 +62,13 @@ export function CompaniesPage({ data, refresh }: CompaniesPageProps) {
           company.last_check_status
         ].join(" ").toLowerCase().includes(query);
       })
-      .sort((a, b) => interestRank(a.interest_status) - interestRank(b.interest_status) || a.name.localeCompare(b.name));
-  }, [data.companies, interestStatus, search]);
+      .sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
+  }, [data.companies, interestStatuses, search]);
+
+  function clearFilters() {
+    setSearch("");
+    setInterestStatuses(DEFAULT_INTEREST_STATUSES);
+  }
 
   async function checkCareersFromTable(company: Company) {
     if (!company.careers_url || checkingCompanyId) return;
@@ -88,9 +94,8 @@ export function CompaniesPage({ data, refresh }: CompaniesPageProps) {
             <SearchIcon />
             <input value={search} onChange={event => setSearch(event.target.value)} type="search" placeholder="Search companies, careers URLs, notes..." />
           </label>
-          <label className="filter">Interest <select value={interestStatus} onChange={event => setInterestStatus(event.target.value)}>
-            {INTEREST_STATUSES.map(status => <option key={status} value={status}>{titleCase(status)}</option>)}
-          </select></label>
+          <MultiFilter label="Interest" values={INTEREST_STATUSES} selected={interestStatuses} onChange={setInterestStatuses} />
+          <button className="button" type="button" onClick={clearFilters}><FilterIcon size={16} /> Clear</button>
           <a className="button icon-button" href="/api/companies/export" aria-label="Export company data" title="Export company data"><DownloadIcon /></a>
           <Link className="button primary" to={routes.companyNew}><ListIcon /> New Company</Link>
         </div>
@@ -144,6 +149,43 @@ function LastCheckCell({ company }: { company: Company }) {
       <span className={`last-check-chip ${chip.tone}`}>{chip.label}</span>
       <span className="last-check-detail">{lastCheckDetail(company)}</span>
     </div>
+  );
+}
+
+function MultiFilter({
+  label,
+  values,
+  selected,
+  onChange
+}: {
+  label: string;
+  values: string[];
+  selected: string[];
+  onChange: (values: string[]) => void;
+}) {
+  const allSelected = values.length === selected.length;
+  const summary = allSelected ? "All" : selected.length === 1 ? titleCase(selected[0]) : `${selected.length} selected`;
+
+  function toggle(value: string) {
+    onChange(selected.includes(value) ? selected.filter(item => item !== value) : [...selected, value]);
+  }
+
+  return (
+    <details className="filter multi-filter">
+      <summary>{label} <span>{summary}</span></summary>
+      <div className="multi-filter-menu">
+        <label className="multi-filter-option">
+          <input checked={allSelected} onChange={event => onChange(event.target.checked ? values : [])} type="checkbox" />
+          All
+        </label>
+        {values.map(value => (
+          <label className="multi-filter-option" key={value}>
+            <input checked={selected.includes(value)} onChange={() => toggle(value)} type="checkbox" />
+            {titleCase(value)}
+          </label>
+        ))}
+      </div>
+    </details>
   );
 }
 
@@ -493,11 +535,6 @@ export function CompanyDetailPage({ data, refresh, createNew = false }: CompanyD
   );
 }
 
-function interestRank(status: string) {
-  const ranks: Record<string, number> = { interested: 0, neutral: 1, archived: 2 };
-  return ranks[status] ?? 3;
-}
-
 function lastCheckChip(status: string) {
   const normalized = status.toLowerCase();
   if (!normalized) return { label: "Not checked", tone: "not-checked" };
@@ -507,10 +544,7 @@ function lastCheckChip(status: string) {
 }
 
 function lastCheckDetail(company: Company) {
-  const status = company.last_check_status || "";
-  if (!status) return "No scan run";
-  const cleaned = status.replace(/^(ok|error):\s*/i, "");
-  return company.last_checked_at ? cleaned : status;
+  return company.last_checked_at ? dateOnlyLabel(company.last_checked_at) : "Never";
 }
 
 function parseEvidence(source: CompanyCareerSource | null) {
