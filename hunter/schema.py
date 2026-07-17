@@ -76,6 +76,17 @@ COMPANY_POSTING_CANDIDATE_FIELDS = [
     "title",
     "url",
     "location",
+    "work_mode",
+    "category",
+    "source_platform",
+    "source_job_id",
+    "matched_queries",
+    "description_excerpt",
+    "description_hash",
+    "score_inputs_hash",
+    "normalization_warnings",
+    "scan_state",
+    "last_verified_at",
     "status",
     "first_seen_at",
     "last_seen_at",
@@ -83,6 +94,23 @@ COMPANY_POSTING_CANDIDATE_FIELDS = [
     "fit_summary",
     "fit_checked_at",
     "notes",
+]
+
+COMPANY_CAREER_SCAN_FIELDS = [
+    "company_id",
+    "checked_at",
+    "platform_type",
+    "status",
+    "requests_succeeded",
+    "requests_failed",
+    "extracted_count",
+    "unique_candidate_count",
+    "new_count",
+    "recommended_count",
+    "unavailable_count",
+    "verification_count",
+    "verification_skipped_count",
+    "errors_json",
 ]
 
 INTERVIEW_FIELDS = [
@@ -189,3 +217,4 @@ DEFAULT_PRIORITY = "medium"
 DEFAULT_COMPANY_INTEREST_STATUS = "neutral"
 COMPANY_INTEREST_STATUSES = {"interested", "neutral", "archived"}
 COMPANY_POSTING_CANDIDATE_STATUSES = {"new", "ignored", "ingested", "unavailable"}
+COMPANY_POSTING_CANDIDATE_SCAN_STATES = {"current", "not-seen", "verification-pending", "unavailable"}

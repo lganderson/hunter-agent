@@ -219,6 +219,12 @@ python3 hunter.py companies ingest-candidate CP0001
 
 Companies are local SQLite records for interest tracking, careers URLs, notes,
 contacts, associated postings, and manually reviewed posting candidates.
+Career checks normalize and deduplicate extracted jobs before saving them. Each
+candidate retains its source platform, source job ID, matched search queries,
+work mode, category, description and scoring hashes, normalization warnings,
+and verification state. Hunter also records a scan summary for every check so
+successful, partial, and failed scans can be distinguished and raw extraction
+counts can be compared with unique candidates.
 
 Add a new opportunity:
 

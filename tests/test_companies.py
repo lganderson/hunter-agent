@@ -71,11 +71,14 @@ class HunterCompaniesTest(unittest.TestCase):
             self.assertIn("company_contacts", table_names(connection))
             self.assertIn("company_career_sources", table_names(connection))
             self.assertIn("company_posting_candidates", table_names(connection))
+            self.assertIn("company_career_scans", table_names(connection))
             candidate_columns = {
                 row[1]
                 for row in connection.execute("PRAGMA table_info(company_posting_candidates)").fetchall()
             }
             self.assertIn("location", candidate_columns)
+            self.assertIn("source_platform", candidate_columns)
+            self.assertIn("scan_state", candidate_columns)
 
     def test_upsert_company_auto_associates_exact_posting_and_syncs_action_company(self):
         sqlite_store.initialize()
@@ -156,7 +159,88 @@ class HunterCompaniesTest(unittest.TestCase):
         self.assertEqual(result["recommended"], [])
         self.assertEqual(candidates[0]["title"], "New Role")
         self.assertEqual(candidates[0]["url"], "https://example.com/jobs/new-role")
+        self.assertEqual(candidates[0]["source_platform"], "generic_html")
+        self.assertEqual(candidates[0]["source_job_id"], "")
+        self.assertEqual(candidates[0]["scan_state"], "current")
+        self.assertEqual(result["scan"]["unique_candidate_count"], "2")
         self.assertIn("fit_score", candidates[0])
+
+    def test_check_company_postings_records_partial_scan_and_query_provenance(self):
+        sqlite_store.initialize()
+        careers_url = "https://www.google.com/about/careers/applications/jobs/results"
+        company = companies.upsert_company("", {"name": "Google", "careers_url": careers_url})
+        companies.save_company_career_source(
+            company["id"],
+            careers_url,
+            "google_careers",
+            status="verified",
+        )
+        urls = [
+            f"{careers_url}?q=technical+program+manager",
+            f"{careers_url}?q=product+manager",
+        ]
+        html = """
+        <base href="https://www.google.com/about/careers/applications/">
+        <li class="lLd3Je">
+          <h3 class="QJPWVe">Technical Program Manager</h3>
+          <span class="r0wTof">Chicago, IL, USA</span>
+          <a href="jobs/results/123456789012345678-technical-program-manager"></a>
+        </li>
+        """
+
+        def fetcher(url):
+            if "technical+program+manager" in url:
+                return {"status": 200, "final_url": url, "html": html, "error": ""}
+            return {"status": 503, "final_url": url, "html": "", "error": "HTTP Error 503"}
+
+        with patch.object(companies, "google_careers_search_urls", return_value=urls):
+            result = companies.check_company_postings(company["id"], fetcher=fetcher)
+
+        candidate = result["new"][0]
+        self.assertEqual(candidate["matched_queries"], "technical program manager")
+        self.assertEqual(candidate["source_platform"], "google_careers")
+        self.assertEqual(candidate["source_job_id"], "external-job-id:123456789012345678")
+        self.assertEqual(candidate["location"], "Chicago, IL, USA")
+        self.assertTrue(candidate["score_inputs_hash"])
+        self.assertEqual(result["scan"]["status"], "partial")
+        self.assertEqual(result["scan"]["requests_succeeded"], "1")
+        self.assertEqual(result["scan"]["requests_failed"], "1")
+        self.assertTrue(result["company"]["last_check_status"].startswith("partial:"))
+        self.assertEqual(repository.read_company_career_scans(company["id"])[0], result["scan"])
+
+    def test_check_company_postings_rediscoveries_successful_zero_candidate_source(self):
+        sqlite_store.initialize()
+        careers_url = "https://example.com/careers"
+        company = companies.upsert_company("", {"name": "Example", "careers_url": careers_url})
+        original_source = companies.save_company_career_source(
+            company["id"], careers_url, "next_static_jobs", status="verified"
+        )
+        rediscovered_source = {
+            **original_source,
+            "platform_type": "endpoint_json_jobs",
+            "config_json": '{"endpoint_url":"https://example.com/jobs.json"}',
+        }
+        extracted = [
+            {
+                "title": "Technical Program Manager",
+                "url": "https://example.com/jobs/12345678-technical-program-manager",
+                "location": "Remote",
+            }
+        ]
+
+        with (
+            patch.object(
+                companies,
+                "fetch_career_candidates_with_source",
+                side_effect=[([], 1, []), (extracted, 1, [])],
+            ),
+            patch.object(companies, "discover_company_career_source", return_value=rediscovered_source),
+        ):
+            result = companies.check_company_postings(company["id"], fetcher=Mock())
+
+        self.assertEqual([row["title"] for row in result["new"]], ["Technical Program Manager"])
+        self.assertEqual(result["scan"]["requests_succeeded"], "2")
+        self.assertEqual(result["scan"]["unique_candidate_count"], "1")
 
     def test_check_company_postings_persists_structured_job_location(self):
         sqlite_store.initialize()
@@ -255,8 +339,11 @@ class HunterCompaniesTest(unittest.TestCase):
         )
 
         statuses = {row["title"]: row["status"] for row in result["candidates"]}
+        scan_states = {row["title"]: row["scan_state"] for row in result["candidates"]}
         self.assertEqual(statuses["Old Role"], "new")
         self.assertEqual(statuses["New Role"], "new")
+        self.assertEqual(scan_states["Old Role"], "not-seen")
+        self.assertEqual(scan_states["New Role"], "current")
         self.assertNotIn("unavailable", result["company"]["last_check_status"])
         self.assertEqual(result["verification_count"], 1)
         self.assertEqual(result["unavailable_count"], 0)
@@ -544,9 +631,13 @@ class HunterCompaniesTest(unittest.TestCase):
             if "q=technical+program+manager" in url and "page=2" in url:
                 html = """
                 <base href="https://www.google.com/about/careers/applications/">
-                <a href="jobs/results/91051814228501190-senior-technical-program-manager-customer-engagement-applied-ai">
-                  91051814228501190 Senior Technical Program Manager, Customer Engagement, Applied AI
-                </a>
+                <li class="lLd3Je">
+                  <h3 class="QJPWVe">Senior Technical Program Manager, Customer Engagement, Applied AI</h3>
+                  <span class="r0wTof">Mountain View, CA, USA</span>
+                  <span class="r0wTof p3oCrc">; New York, NY, USA</span>
+                  <span class="BVHzed">; +2 more</span>
+                  <a href="jobs/results/91051814228501190-senior-technical-program-manager-customer-engagement-applied-ai"></a>
+                </li>
                 """
             else:
                 html = "<html></html>"
@@ -560,6 +651,38 @@ class HunterCompaniesTest(unittest.TestCase):
         self.assertTrue(any("page=2" in url for url in calls))
         self.assertEqual(len(result["new"]), 1)
         self.assertEqual(result["new"][0]["title"], "Senior Technical Program Manager, Customer Engagement, Applied AI")
+        self.assertEqual(result["new"][0]["location"], "Mountain View, CA, USA; New York, NY, USA")
+
+    def test_extract_google_careers_candidates_reads_job_card_locations_only(self):
+        html = """
+        <base href="https://www.google.com/about/careers/applications/">
+        <a href="jobs/results">Jobs</a>
+        <li class="lLd3Je" ssk="18:126510179461014214">
+          <h3 class="QJPWVe">Technical Program Manager, Infrastructure</h3>
+          <span class="r0wTof">Papillion, NE, USA</span>
+          <span class="r0wTof p3oCrc">; New Albany, OH, USA</span>
+          <span class="BVHzed">; +4 more</span>
+          <a href="jobs/results/126510179461014214-technical-program-manager-infrastructure?location=United+States"></a>
+          <p>
+            <span class="r0wTof">Papillion, NE, USA</span>
+            <span class="r0wTof p3oCrc">; New Albany, OH, USA</span>
+          </p>
+        </li>
+        """
+
+        self.assertEqual(
+            companies.extract_google_careers_candidates(
+                html,
+                "https://www.google.com/about/careers/applications/jobs/results?location=United+States",
+            ),
+            [
+                {
+                    "title": "Technical Program Manager, Infrastructure",
+                    "url": "https://www.google.com/about/careers/applications/jobs/results/126510179461014214-technical-program-manager-infrastructure",
+                    "location": "Papillion, NE, USA; New Albany, OH, USA",
+                }
+            ],
+        )
 
     def test_amazon_jobs_check_uses_search_json_and_scores_descriptions(self):
         sqlite_store.initialize()
@@ -596,6 +719,14 @@ class HunterCompaniesTest(unittest.TestCase):
                             "city": "Seattle",
                             "state": "WA",
                             "country_code": "USA",
+                            "locations": [
+                                json.dumps({
+                                    "normalizedLocation": "Seattle, Washington, USA",
+                                    "location": "US, WA, Seattle",
+                                    "buildingCodeList": ["SEA71"],
+                                }),
+                                {"normalizedLocation": "Austin, Texas, USA", "type": "ONSITE"},
+                            ],
                             "business_category": "aws",
                             "job_category": "Project/Program/Product Management--Technical",
                             "company_name": "Amazon.com Services LLC",
@@ -631,6 +762,7 @@ class HunterCompaniesTest(unittest.TestCase):
         self.assertTrue(any(call["headers"].get("Accept") == "application/json" for call in calls))
         self.assertEqual([row["title"] for row in result["new"]], ["Product Manager - Technical"])
         self.assertEqual(result["new"][0]["url"], "https://www.amazon.jobs/en/jobs/10499999/product-manager-technical")
+        self.assertEqual(result["new"][0]["location"], "Seattle, Washington, USA; Austin, Texas, USA")
         self.assertGreaterEqual(int(result["new"][0]["fit_score"]), companies.FIT_RECOMMENDATION_THRESHOLD)
         self.assertNotIn("Account Executive", [row["title"] for row in result["candidates"]])
 
@@ -717,7 +849,64 @@ class HunterCompaniesTest(unittest.TestCase):
             result["new"][0]["url"],
             "https://apply.careers.microsoft.com/careers/job/1970393556870311?jobId=200038666",
         )
+        self.assertEqual(result["new"][0]["location"], "United States, Washington, Redmond")
         self.assertGreaterEqual(int(result["new"][0]["fit_score"]), companies.FIT_RECOMMENDATION_THRESHOLD)
+
+    def test_eightfold_pcs_separates_standardized_location_and_work_mode(self):
+        settings.save_resume_upload(
+            "resume.txt",
+            base64.b64encode(b"Senior Technical Program Manager").decode(),
+        )
+        payload = {
+            "data": {
+                "positions": [
+                    {
+                        "id": 123456789,
+                        "name": "Senior Technical Program Manager",
+                        "positionUrl": "/careers/job/123456789",
+                        "locations": ["US, CA, Santa Clara"],
+                        "standardizedLocations": ["Santa Clara, CA, US"],
+                        "workLocationOption": "onsite",
+                    }
+                ]
+            }
+        }
+
+        candidates = companies.extract_eightfold_pcs_candidates(
+            json.dumps(payload),
+            "https://jobs.nvidia.com/careers",
+        )
+
+        self.assertEqual(candidates[0]["location"], "Santa Clara, CA, US")
+        normalized = companies.normalize_extracted_candidates(candidates, "eightfold_pcs")[0]
+        self.assertEqual(normalized["work_mode"], "On-site")
+
+    def test_repeated_company_checks_keep_distinct_scan_history(self):
+        sqlite_store.initialize()
+        careers_url = "https://example.com/careers"
+        company = companies.upsert_company("", {"name": "Example", "careers_url": careers_url})
+        companies.save_company_career_source(company["id"], careers_url, "generic_html", status="verified")
+        html = '<a href="/jobs/12345678-program-manager">Program Manager</a>'
+
+        with patch.object(
+            companies,
+            "now_scan_iso",
+            side_effect=["2026-07-17T10:00:00.000001", "2026-07-17T10:00:00.000002"],
+        ):
+            companies.check_company_postings(
+                company["id"],
+                fetcher=lambda url: {"status": 200, "final_url": url, "html": html, "error": ""},
+            )
+            companies.check_company_postings(
+                company["id"],
+                fetcher=lambda url: {"status": 200, "final_url": url, "html": html, "error": ""},
+            )
+
+        scans = repository.read_company_career_scans(company["id"])
+        self.assertEqual([row["checked_at"] for row in scans], [
+            "2026-07-17T10:00:00.000002",
+            "2026-07-17T10:00:00.000001",
+        ])
 
     def test_eightfold_smartapply_check_uses_jobs_api_and_skips_existing_netflix_posting(self):
         sqlite_store.initialize()
@@ -1847,6 +2036,7 @@ class HunterCompaniesTest(unittest.TestCase):
             result["new"][0]["url"],
             "https://jobs.bestbuy.com/bby?id=job_details&req_id=1021639BR",
         )
+        self.assertEqual(result["new"][0]["location"], "New York, United States")
 
     def test_phenom_careers_check_searches_resume_terms_from_preloaded_results(self):
         sqlite_store.initialize()
@@ -2445,6 +2635,7 @@ class HunterCompaniesTest(unittest.TestCase):
         self.assertIn("company_contacts", payload)
         self.assertIn("company_career_sources", payload)
         self.assertIn("company_posting_candidates", payload)
+        self.assertIn("company_career_scans", payload)
         self.assertIn("hunter_list_companies", tool_names)
         self.assertIn("hunter_upsert_company", tool_names)
         self.assertIn("hunter_archive_company", tool_names)
@@ -2487,6 +2678,14 @@ class HunterCompaniesTest(unittest.TestCase):
                 "status": "new",
             }
         ])
+        repository.write_company_career_scan(
+            {
+                "company_id": company["id"],
+                "checked_at": "2026-07-17T10:00:00",
+                "platform_type": "html",
+                "status": "ok",
+            }
+        )
 
         result = companies.write_company_export(company["id"])
         payload = json.loads(result["path"].read_text(encoding="utf-8"))
@@ -2499,8 +2698,10 @@ class HunterCompaniesTest(unittest.TestCase):
         self.assertEqual(payload["companies"][0]["actions"][0]["id"], "T0001")
         self.assertEqual(payload["companies"][0]["career_sources"][0]["source_url"], "https://example.com/careers")
         self.assertEqual(payload["companies"][0]["posting_candidates"][0]["id"], "CP0001")
+        self.assertEqual(payload["companies"][0]["career_scans"][0]["status"], "ok")
         self.assertEqual([row["id"] for row in payload["tables"]["applications"]], ["A0001"])
         self.assertEqual([row["id"] for row in payload["tables"]["actions"]], ["T0001"])
+        self.assertEqual(payload["tables"]["company_career_scans"][0]["company_id"], company["id"])
 
 
 def table_names(connection):

@@ -36,6 +36,7 @@ The older files in `scripts/` are still supported as thin wrappers and implement
 - `hunter/workflow.py`: SQLite-backed workflow stage and action-type definitions.
 - `hunter/actions.py`: action storage operations shared by the app server and scripts.
 - `hunter/applications.py`: posting/application update operations.
+- `hunter/companies.py`: career-site adapters, canonical candidate normalization, deduplication, availability verification, and scan telemetry.
 - `hunter/app_state.py`: runtime JSON serialization for the dashboard API.
 - `hunter/mcp_server.py`: dependency-free stdio MCP server for agent access.
 - `hunter/commands.py`: top-level command dispatcher used by `hunter.py`.
@@ -88,6 +89,20 @@ Runtime reads and writes use SQLite. CSV remains a portability format and can be
 ```bash
 python3 hunter.py export-csv
 ```
+
+Company career extraction persists two related record types:
+
+- `company_posting_candidates` stores the current candidate plus extraction,
+  normalization, scoring, and verification provenance.
+- `company_career_scans` stores one summary per check, including adapter type,
+  request successes and failures, extracted and unique counts, availability
+  changes, verification skips, and structured errors.
+
+The canonical normalization step is shared across adapters. Adapter-specific
+code should return the most structured title, URL, location, work mode,
+category, source ID, matched query, and description it can find; normalization
+then cleans location noise, rejects navigation records, computes provenance
+hashes, and deduplicates before persistence and scoring.
 
 The active local workspace only creates `data/`, `app/`, `exports/`, and `templates/`. Folders such as `postings/`, `resumes/`, `cover-letters/`, and `interviews/` are not created by default; those concepts should live in SQLite or be produced later by explicit export workflows.
 

@@ -1,6 +1,7 @@
 """Company management operations for Hunter."""
 
 import html
+import hashlib
 import json
 import re
 import ssl
@@ -88,6 +89,10 @@ DEFAULT_ACCEPT = "text/html,application/xhtml+xml,application/xml;q=0.9,applicat
 
 def now_iso():
     return datetime.now().isoformat(timespec="seconds")
+
+
+def now_scan_iso():
+    return datetime.now().isoformat(timespec="microseconds")
 
 
 def normalized_key(value):
@@ -398,6 +403,148 @@ def clean_html_text(value):
     return storage.clean(html.unescape(value))
 
 
+def split_list_text(value):
+    values = []
+    raw_values = value if isinstance(value, list) else re.split(r"[,;]", str(value or ""))
+    for raw in raw_values:
+        cleaned = storage.clean(str(raw or ""))
+        if cleaned and cleaned.lower() not in {item.lower() for item in values}:
+            values.append(cleaned)
+    return values
+
+
+def candidate_source_job_id(url):
+    keys = posting_identity_keys(url)
+    preferred_prefixes = [
+        "greenhouse:",
+        "apple:",
+        "microsoft:",
+        "smartrecruiters:",
+        "external-job-id:",
+        "job-id:",
+        "query:",
+        "path:",
+    ]
+    for prefix in preferred_prefixes:
+        matches = sorted(key for key in keys if key.startswith(prefix))
+        if matches:
+            return matches[0]
+    return ""
+
+
+def candidate_score_context():
+    return {
+        "fit_signals": settings_store.read_fit_signals(),
+        "fit_context_hash": hashlib.sha256(fit_context_text().encode("utf-8")).hexdigest(),
+    }
+
+
+def candidate_score_inputs_hash(candidate, score_context=None):
+    payload = {
+        "candidate_text": candidate_search_text(candidate),
+        "exclusion_text": candidate_exclusion_text(candidate),
+        **(score_context or candidate_score_context()),
+    }
+    encoded = json.dumps(payload, sort_keys=True, ensure_ascii=True).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def normalized_candidate(item, platform_type, score_context=None):
+    candidate = dict(item or {})
+    candidate["title"] = storage.clean(str(candidate.get("title", "") or ""))
+    candidate["url"] = normalize_url(candidate.get("url", ""))
+    location = storage.clean(str(candidate.get("location", "") or ""))
+    work_mode = storage.clean(str(candidate.get("work_mode", "") or ""))
+    mode_match = re.search(r"(?:,|;)\s*(on-?site|onsite|hybrid|remote_local|remote)\s*$", location, re.I)
+    if mode_match:
+        if not work_mode:
+            work_mode = mode_match.group(1)
+        location = storage.clean(location[: mode_match.start()].rstrip(",; "))
+    work_mode_aliases = {
+        "onsite": "On-site",
+        "on-site": "On-site",
+        "hybrid": "Hybrid",
+        "remote": "Remote",
+        "remote_local": "Remote (local)",
+    }
+    candidate["location"] = location
+    candidate["work_mode"] = work_mode_aliases.get(work_mode.lower(), work_mode)
+    candidate["category"] = storage.clean(
+        str(candidate.get("category", "") or candidate.get("categories", "") or "")
+    )
+    candidate["source_platform"] = storage.clean(platform_type)
+    candidate["source_job_id"] = storage.clean(
+        str(candidate.get("source_job_id", "") or candidate_source_job_id(candidate["url"]))
+    )
+    candidate["matched_queries"] = ", ".join(split_list_text(candidate.get("matched_queries", "")))
+    description = clean_html_text(str(candidate.get("description", "") or ""))
+    candidate["description"] = description
+    candidate["description_excerpt"] = description[:1000]
+    candidate["description_hash"] = hashlib.sha256(description.encode("utf-8")).hexdigest() if description else ""
+    warnings = []
+    if not location:
+        warnings.append("missing-location")
+    if "{" in location or "}" in location:
+        warnings.append("structured-location-text")
+    if len(location) > 200:
+        warnings.append("long-location")
+    if normalized_key(candidate["title"]) in {"career", "careers", "job alert", "create a job alert"}:
+        warnings.append("navigation-title")
+    candidate["normalization_warnings"] = ", ".join(warnings)
+    candidate["score_inputs_hash"] = candidate_score_inputs_hash(candidate, score_context)
+    return candidate
+
+
+def candidate_identity_key(candidate):
+    identity_keys = sorted(
+        key for key in posting_identity_keys(candidate.get("url", "")) if not key.startswith("url:")
+    )
+    return identity_keys[0] if identity_keys else f"url:{normalize_url(candidate.get('url', ''))}"
+
+
+def merge_candidate_values(existing, candidate):
+    for field in [
+        "title",
+        "url",
+        "location",
+        "work_mode",
+        "category",
+        "source_platform",
+        "source_job_id",
+        "description",
+        "description_excerpt",
+        "description_hash",
+        "score_inputs_hash",
+        "normalization_warnings",
+    ]:
+        if not existing.get(field) and candidate.get(field):
+            existing[field] = candidate[field]
+    queries = split_list_text([*split_list_text(existing.get("matched_queries", "")), *split_list_text(candidate.get("matched_queries", ""))])
+    existing["matched_queries"] = ", ".join(queries)
+    return existing
+
+
+def normalize_extracted_candidates(rows, platform_type):
+    candidates = []
+    by_identity = {}
+    score_context = candidate_score_context()
+    for row in rows:
+        candidate = normalized_candidate(row, platform_type, score_context)
+        if (
+            not candidate.get("title")
+            or not candidate.get("url")
+            or "navigation-title" in candidate.get("normalization_warnings", "")
+        ):
+            continue
+        identity = candidate_identity_key(candidate)
+        if identity in by_identity:
+            merge_candidate_values(by_identity[identity], candidate)
+            continue
+        by_identity[identity] = candidate
+        candidates.append(candidate)
+    return candidates
+
+
 def title_from_url(url):
     path = urlparse(url).path.rstrip("/")
     piece = path.split("/")[-1] if path else ""
@@ -430,6 +577,53 @@ def candidate_location_near_link(page_html, match_start, match_end):
         if value and value.lower() not in {item.lower() for item in values}:
             values.append(value)
     return "; ".join(values)
+
+
+def extract_google_careers_candidates(page_html, base_url):
+    card_matches = list(
+        re.finditer(
+            r"<li\b[^>]*class\s*=\s*(['\"])[^'\"]*\blLd3Je\b[^'\"]*\1[^>]*>",
+            page_html or "",
+            re.I | re.S,
+        )
+    )
+    candidates = []
+    seen = set()
+    link_base_url = html_base_url(page_html, base_url)
+    for index, card_match in enumerate(card_matches):
+        card_end = card_matches[index + 1].start() if index + 1 < len(card_matches) else len(page_html or "")
+        card = (page_html or "")[card_match.start() : card_end]
+        link_match = re.search(
+            r"<a\b[^>]*href\s*=\s*(['\"])([^'\"]*jobs/results/\d{8,}[^'\"]*)\1",
+            card,
+            re.I | re.S,
+        )
+        title_match = re.search(
+            r"<h3\b[^>]*class\s*=\s*(['\"])[^'\"]*\bQJPWVe\b[^'\"]*\1[^>]*>(.*?)</h3>",
+            card,
+            re.I | re.S,
+        )
+        if not link_match or not title_match:
+            continue
+        url = normalize_url(urljoin(link_base_url, html.unescape(link_match.group(2)).strip()))
+        title = clean_candidate_title(clean_link_text(title_match.group(2)), url)
+        if not url or not title or url in seen:
+            continue
+        seen.add(url)
+        locations = []
+        for location_match in re.finditer(
+            r"<span\b[^>]*class\s*=\s*(['\"])[^'\"]*\br0wTof\b[^'\"]*\1[^>]*>(.*?)</span>",
+            card,
+            re.I | re.S,
+        ):
+            location = clean_link_text(location_match.group(2)).lstrip("; ")
+            if location and location.lower() not in {value.lower() for value in locations}:
+                locations.append(location)
+        candidate = {"title": title, "url": url}
+        if locations:
+            candidate["location"] = "; ".join(locations)
+        candidates.append(candidate)
+    return candidates
 
 
 def extract_candidate_links(page_html, base_url):
@@ -787,7 +981,14 @@ def detail_page_says_unavailable(fetched):
     return any(pattern.search(page_text) for pattern in UNAVAILABLE_DETAIL_PATTERNS)
 
 
-def verify_unseen_candidate_availability(company_candidates, seen_urls, seen_identity_keys, fetch, limit=CANDIDATE_DETAIL_VERIFY_LIMIT):
+def verify_unseen_candidate_availability(
+    company_candidates,
+    seen_urls,
+    seen_identity_keys,
+    fetch,
+    checked_at="",
+    limit=CANDIDATE_DETAIL_VERIFY_LIMIT,
+):
     verification_count = 0
     unavailable_count = 0
     skipped_count = 0
@@ -800,13 +1001,18 @@ def verify_unseen_candidate_availability(company_candidates, seen_urls, seen_ide
         if not url:
             continue
         if verification_count >= limit:
+            candidate["scan_state"] = "verification-pending"
             skipped_count += 1
             continue
         verification_count += 1
         fetched = fetch_with_optional_headers(fetch, url)
+        candidate["last_verified_at"] = checked_at or now_iso()
         if detail_page_says_unavailable(fetched):
             candidate["status"] = "unavailable"
+            candidate["scan_state"] = "unavailable"
             unavailable_count += 1
+        else:
+            candidate["scan_state"] = "not-seen"
     return {
         "verification_count": verification_count,
         "verification_skipped_count": skipped_count,
@@ -1595,17 +1801,48 @@ def amazon_jobs_text_value(value):
     return storage.clean(str(value or ""))
 
 
+def amazon_jobs_location_values(value):
+    if isinstance(value, list):
+        values = []
+        for item in value:
+            values.extend(amazon_jobs_location_values(item))
+        return values
+    if isinstance(value, dict):
+        normalized = storage.clean(str(value.get("normalizedLocation", "") or ""))
+        if normalized:
+            return [normalized]
+        city = storage.clean(str(value.get("city", "") or value.get("normalizedCityName", "") or ""))
+        state = storage.clean(str(value.get("normalizedStateName", "") or value.get("region", "") or ""))
+        country = storage.clean(
+            str(value.get("normalizedCountryCode", "") or value.get("country_code", "") or "")
+        )
+        parts = [part for part in [city, state, country] if part]
+        if parts:
+            return [", ".join(parts)]
+        fallback = storage.clean(str(value.get("locationNonStemming", "") or value.get("location", "") or ""))
+        return [fallback] if fallback else []
+    cleaned = storage.clean(str(value or ""))
+    if not cleaned:
+        return []
+    if cleaned.startswith(("{", "[")):
+        try:
+            decoded = json.loads(cleaned)
+        except json.JSONDecodeError:
+            return [cleaned]
+        return amazon_jobs_location_values(decoded)
+    return [cleaned]
+
+
 def amazon_jobs_location(job):
-    parts = []
-    for field in ["location", "city", "state", "country_code"]:
-        value = storage.clean(str(job.get(field, "") or ""))
-        if value:
-            parts.append(value)
-    for location in job.get("locations") or []:
-        text = amazon_jobs_text_value(location)
-        if text:
-            parts.append(text)
-    return ", ".join(dict.fromkeys(parts))
+    parts = amazon_jobs_location_values(job.get("locations") or [])
+    if not parts:
+        city = storage.clean(str(job.get("city", "") or ""))
+        state = storage.clean(str(job.get("state", "") or ""))
+        country = storage.clean(str(job.get("country_code", "") or ""))
+        parts = [", ".join(part for part in [city, state, country] if part)]
+    if not any(parts):
+        parts = amazon_jobs_location_values(job.get("location"))
+    return "; ".join(dict.fromkeys(part for part in parts if part))
 
 
 def amazon_jobs_category(job):
@@ -1771,11 +2008,12 @@ def extract_eightfold_pcs_candidates(payload, careers_url, config=None):
         url = eightfold_pcs_position_url(position, careers_url, config)
         if not title or not url or url in seen:
             continue
-        location = ", ".join(
+        location_source = position.get("standardizedLocations") or position.get("locations") or []
+        location = "; ".join(
             dict.fromkeys(
-                eightfold_pcs_text_value(position.get(field))
-                for field in ["locations", "standardizedLocations", "workLocationOption", "locationFlexibility"]
-                if position.get(field)
+                storage.clean(str(entry.get("name", "") if isinstance(entry, dict) else entry))
+                for entry in (location_source if isinstance(location_source, list) else [location_source])
+                if storage.clean(str(entry.get("name", "") if isinstance(entry, dict) else entry))
             )
         )
         category = ", ".join(
@@ -1789,6 +2027,9 @@ def extract_eightfold_pcs_candidates(payload, careers_url, config=None):
             "title": title,
             "url": url,
             "location": location,
+            "work_mode": storage.clean(
+                str(position.get("workLocationOption", "") or position.get("locationFlexibility", "") or "")
+            ),
             "category": category,
             "search_text": " ".join(
                 storage.clean(str(position.get(field, "") or ""))
@@ -2747,7 +2988,7 @@ def extract_servicenow_candidates(payload, config):
         location = ", ".join(
             dict.fromkeys(
                 storage.clean(str(properties.get(field, "") or ""))
-                for field in ["city", "state", "country", "sites"]
+                for field in ["city", "state", "country"]
                 if storage.clean(str(properties.get(field, "") or ""))
             )
         )
@@ -2796,7 +3037,9 @@ def fetch_servicenow_portal_candidates(careers_url, fetch, config=None):
             errors.append(f"{term}: {fetched.get('error') or 'empty response'}")
             continue
         searched += 1
-        extracted.extend(extract_servicenow_candidates(fetched.get("html", ""), config))
+        for candidate in extract_servicenow_candidates(fetched.get("html", ""), config):
+            candidate["matched_queries"] = term
+            extracted.append(candidate)
     return extracted, searched, errors
 
 
@@ -3787,8 +4030,19 @@ def fetch_algolia_jobs_candidates(careers_url, fetch, config=None):
             errors.append(f"{url}: {fetched.get('error') or 'empty response'}")
             continue
         searched += 1
-        extracted.extend(extract_algolia_jobs_candidates(fetched.get("html", ""), careers_url))
+        for candidate in extract_algolia_jobs_candidates(fetched.get("html", ""), careers_url):
+            candidate["matched_queries"] = query
+            extracted.append(candidate)
     return extracted, searched, errors
+
+
+def search_query_label(url):
+    query = dict(parse_qsl(urlparse(url).query, keep_blank_values=False))
+    for key in ["q", "base_query", "query", "keywords", "keyword", "searchText"]:
+        value = storage.clean(str(query.get(key, "") or ""))
+        if value:
+            return value
+    return ""
 
 
 def fetch_candidate_search_pages(urls, fetch, extractor, headers=None):
@@ -3802,7 +4056,13 @@ def fetch_candidate_search_pages(urls, fetch, extractor, headers=None):
             continue
         searched += 1
         final_url = fetched.get("final_url") or url
-        extracted.extend(extractor(fetched.get("html", ""), final_url))
+        query_label = search_query_label(url)
+        for candidate in extractor(fetched.get("html", ""), final_url):
+            if query_label:
+                candidate["matched_queries"] = ", ".join(
+                    split_list_text([*split_list_text(candidate.get("matched_queries", "")), query_label])
+                )
+            extracted.append(candidate)
     return extracted, searched, errors
 
 
@@ -3811,7 +4071,7 @@ def fetch_google_careers_candidates(careers_url, fetch, config=None):
     return fetch_candidate_search_pages(
         google_careers_search_urls(careers_url),
         fetch,
-        lambda page_html, final_url: extract_candidate_links(page_html, final_url),
+        extract_google_careers_candidates,
     )
 
 
@@ -3964,7 +4224,9 @@ def fetch_workday_cxs_candidates(careers_url, fetch, config=None):
             if not candidate_matches_resume_role(candidate, resume_text):
                 continue
             seen.add(candidate["url"])
-            extracted.append(enrich_workday_cxs_candidate(candidate, fetch))
+            enriched = enrich_workday_cxs_candidate(candidate, fetch)
+            enriched["matched_queries"] = storage.clean(str(payload.get("searchText", "") or ""))
+            extracted.append(enriched)
     return extracted, searched, errors
 
 
@@ -4265,20 +4527,40 @@ def check_company_postings(company_id, fetcher=None):
     if not careers_url:
         raise ValueError("Company careers_url is required before checking postings.")
 
-    checked_at = now_iso()
+    checked_at = now_scan_iso()
     fetch = fetcher or fetch_careers_page
     source = current_company_career_source(company, fetch)
-    extracted, search_count, errors = fetch_career_candidates_with_source(source, fetch)
-    if search_count == 0:
+    raw_extracted, search_count, errors = fetch_career_candidates_with_source(source, fetch)
+    extracted = normalize_extracted_candidates(raw_extracted, source.get("platform_type", ""))
+    if search_count == 0 or not extracted:
         try:
             rediscovered = discover_company_career_source(company, fetch)
         except ValueError:
             rediscovered = None
         if rediscovered and not career_sources_equivalent(source, rediscovered):
             source = rediscovered
-            extracted, search_count, errors = fetch_career_candidates_with_source(source, fetch)
+            rediscovered_rows, rediscovered_search_count, rediscovered_errors = fetch_career_candidates_with_source(
+                source, fetch
+            )
+            raw_extracted = [*raw_extracted, *rediscovered_rows]
+            search_count += rediscovered_search_count
+            errors = [*errors, *rediscovered_errors]
+            extracted = normalize_extracted_candidates(rediscovered_rows, source.get("platform_type", ""))
     if search_count == 0:
         status = f"error: {'; '.join(errors) or 'empty response'}"
+        scan = repository.write_company_career_scan(
+            {
+                "company_id": company.get("id", ""),
+                "checked_at": checked_at,
+                "platform_type": source.get("platform_type", ""),
+                "status": "error",
+                "requests_succeeded": "0",
+                "requests_failed": str(max(1, len(errors))),
+                "extracted_count": str(len(raw_extracted)),
+                "unique_candidate_count": str(len(extracted)),
+                "errors_json": json.dumps(errors or ["empty response"]),
+            }
+        )
         update_check_status(company.get("id", ""), checked_at, status)
         raise ValueError(status)
     mark_company_career_source_verified(company.get("id", ""))
@@ -4321,10 +4603,23 @@ def check_company_postings(company_id, fetcher=None):
                 None,
             )
         if existing:
-            existing["title"] = item.get("title", "") or existing.get("title", "")
-            existing["url"] = url
-            existing["location"] = item.get("location", "") or existing.get("location", "")
+            for field in [
+                "title",
+                "url",
+                "location",
+                "work_mode",
+                "category",
+                "source_platform",
+                "source_job_id",
+                "matched_queries",
+                "description_excerpt",
+                "description_hash",
+                "score_inputs_hash",
+                "normalization_warnings",
+            ]:
+                existing[field] = item.get(field, "") or existing.get(field, "")
             existing["last_seen_at"] = checked_at
+            existing["scan_state"] = "current"
             if candidate_is_tracked(item, tracked):
                 existing["status"] = "ingested"
             elif existing.get("status") in {"new", "unavailable"}:
@@ -4341,6 +4636,16 @@ def check_company_postings(company_id, fetcher=None):
                 "title": item.get("title", ""),
                 "url": url,
                 "location": item.get("location", ""),
+                "work_mode": item.get("work_mode", ""),
+                "category": item.get("category", ""),
+                "source_platform": item.get("source_platform", ""),
+                "source_job_id": item.get("source_job_id", ""),
+                "matched_queries": item.get("matched_queries", ""),
+                "description_excerpt": item.get("description_excerpt", ""),
+                "description_hash": item.get("description_hash", ""),
+                "score_inputs_hash": item.get("score_inputs_hash", ""),
+                "normalization_warnings": item.get("normalization_warnings", ""),
+                "scan_state": "current",
                 "status": "new",
                 "first_seen_at": checked_at,
                 "last_seen_at": checked_at,
@@ -4355,27 +4660,75 @@ def check_company_postings(company_id, fetcher=None):
         for row in candidates
         if row.get("company_id", "").upper() == company.get("id", "").upper()
     ]
+    for candidate in company_candidates:
+        if candidate_seen_in_scan(candidate, seen_urls, seen_identity_keys):
+            candidate["scan_state"] = "current"
+        elif candidate.get("status") == "unavailable":
+            candidate["scan_state"] = "unavailable"
+        else:
+            candidate["scan_state"] = "not-seen"
     invalid_candidate_count = 0
     for candidate in company_candidates:
         if candidate.get("status", "new") != "new" or candidate_seen_in_scan(candidate, seen_urls, seen_identity_keys):
             continue
-        if looks_like_job_link(candidate.get("title", ""), candidate.get("url", ""), careers_url):
+        is_navigation_title = normalized_key(candidate.get("title", "")) in {
+            "career",
+            "careers",
+            "job alert",
+            "create a job alert",
+        }
+        if not is_navigation_title and looks_like_job_link(
+            candidate.get("title", ""), candidate.get("url", ""), careers_url
+        ):
             continue
         candidate["status"] = "unavailable"
+        candidate["scan_state"] = "unavailable"
         invalid_candidate_count += 1
-    verification = verify_unseen_candidate_availability(company_candidates, seen_urls, seen_identity_keys, fetch)
+    verification = verify_unseen_candidate_availability(
+        company_candidates,
+        seen_urls,
+        seen_identity_keys,
+        fetch,
+        checked_at=checked_at,
+    )
     verification["unavailable_count"] += invalid_candidate_count
     annotate_candidate_fit(candidates, company.get("id", ""), checked_at, only_missing=True)
     current_candidates = [row for row in company_candidates if row.get("last_seen_at") == checked_at]
     recommended = recommended_candidates(current_candidates)
     repository.write_company_posting_candidates(candidates)
-    status = f"ok: {len(new_rows)} new, {len(extracted)} found, {len(recommended)} recommended, {search_count} searched"
+    scan_status = "partial" if errors else "ok"
+    status = (
+        f"{scan_status}: {len(new_rows)} new, {len(extracted)} found, "
+        f"{len(recommended)} recommended, {search_count} searched"
+    )
+    if len(raw_extracted) != len(extracted):
+        status += f", {len(raw_extracted)} extracted"
+    if errors:
+        status += f", {len(errors)} request errors"
     if verification["unavailable_count"]:
         status += f", {verification['unavailable_count']} unavailable"
     if verification["verification_count"]:
         status += f", {verification['verification_count']} detail checked"
     if verification["verification_skipped_count"]:
         status += f", {verification['verification_skipped_count']} detail skipped"
+    scan = repository.write_company_career_scan(
+        {
+            "company_id": company.get("id", ""),
+            "checked_at": checked_at,
+            "platform_type": source.get("platform_type", ""),
+            "status": scan_status,
+            "requests_succeeded": str(search_count),
+            "requests_failed": str(len(errors)),
+            "extracted_count": str(len(raw_extracted)),
+            "unique_candidate_count": str(len(extracted)),
+            "new_count": str(len(new_rows)),
+            "recommended_count": str(len(recommended)),
+            "unavailable_count": str(verification["unavailable_count"]),
+            "verification_count": str(verification["verification_count"]),
+            "verification_skipped_count": str(verification["verification_skipped_count"]),
+            "errors_json": json.dumps(errors),
+        }
+    )
     update_check_status(company.get("id", ""), checked_at, status)
     return {
         "company": get_company(company.get("id", "")),
@@ -4383,6 +4736,7 @@ def check_company_postings(company_id, fetcher=None):
         "candidates": candidates_for_company(company.get("id", "")),
         "new": new_rows,
         "recommended": recommended,
+        "scan": scan,
         **verification,
     }
 
@@ -4517,6 +4871,7 @@ def build_company_export_payload(company_id=""):
     contact_links = repository.read_company_contacts()
     career_sources = repository.read_company_career_sources()
     candidates = repository.read_company_posting_candidates()
+    career_scans = repository.read_company_career_scans(limit=1000)
 
     contacts_by_id = {row.get("id", "").upper(): row for row in contacts}
     actions_by_application_id = {}
@@ -4558,6 +4913,11 @@ def build_company_export_payload(company_id=""):
                     for row in candidates
                     if row.get("company_id", "").upper() == current_company_id
                 ],
+                "career_scans": [
+                    row
+                    for row in career_scans
+                    if row.get("company_id", "").upper() == current_company_id
+                ],
             }
         )
 
@@ -4591,6 +4951,7 @@ def build_company_export_payload(company_id=""):
             ],
             "company_career_sources": [row for row in career_sources if row.get("company_id", "").upper() in selected_ids],
             "company_posting_candidates": [row for row in candidates if row.get("company_id", "").upper() in selected_ids],
+            "company_career_scans": [row for row in career_scans if row.get("company_id", "").upper() in selected_ids],
         },
     }
 

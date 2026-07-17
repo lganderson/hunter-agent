@@ -8,6 +8,7 @@ import type {
   Application,
   ApplicationUpdates,
   Company,
+  CompanyCareerScan,
   CompanyCareerSource,
   CompanyPostingCandidate,
   CompanyUpdates,
@@ -174,6 +175,7 @@ export type CompanyCheckResult = {
   unavailable_count: number;
   verification_count: number;
   verification_skipped_count: number;
+  scan: CompanyCareerScan;
 };
 
 export type CompanyCheckAllResult = {

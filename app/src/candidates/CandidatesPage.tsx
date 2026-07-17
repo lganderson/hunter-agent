@@ -104,6 +104,12 @@ export function CandidatesPage({ data, refresh }: CandidateReviewPageProps) {
           candidate.title,
           candidate.url,
           candidate.location,
+          candidate.work_mode,
+          candidate.category,
+          candidate.source_platform,
+          candidate.source_job_id,
+          candidate.matched_queries,
+          candidate.scan_state,
           candidate.status,
           candidate.fit_score,
           candidate.fit_summary,
@@ -329,7 +335,7 @@ export function CandidatesPage({ data, refresh }: CandidateReviewPageProps) {
                 <tr key={candidate.id}>
                   <td className="role-cell candidate-title-cell">
                     <strong>{candidate.title || candidate.url}</strong>
-                    <span className="cell-subtle">{candidate.location || "Location unknown"}</span>
+                    <span className="cell-subtle">{candidateLocationLabel(candidate)}</span>
                   </td>
                   <td>
                     {company ? <Link to={routes.companyDetail(company.id)}>{company.name}</Link> : candidate.company_id || "Unknown"}
@@ -415,6 +421,11 @@ function candidateDate(row: CandidateRow) {
 function candidateDateLabel(candidate: CompanyPostingCandidate) {
   const value = candidate.last_seen_at || candidate.first_seen_at || "";
   return value ? dateOnlyLabel(value) : "Not checked";
+}
+
+function candidateLocationLabel(candidate: CompanyPostingCandidate) {
+  const location = candidate.location || "Location unknown";
+  return candidate.work_mode ? `${location} · ${candidate.work_mode}` : location;
 }
 
 function matchesSelection(value: string, selected: string[], values: string[]) {

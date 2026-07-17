@@ -123,6 +123,23 @@ def write_company_posting_candidates(rows):
         sqlite_store.write_company_posting_candidates(rows)
 
 
+def read_company_career_scans(company_id="", limit=200):
+    if using_sqlite():
+        return sqlite_store.read_company_career_scans(company_id, limit)
+    return []
+
+
+def write_company_career_scan(row):
+    if using_sqlite():
+        return sqlite_store.write_company_career_scan(row)
+    return row
+
+
+def clear_company_career_scans():
+    if using_sqlite():
+        sqlite_store.clear_company_career_scans()
+
+
 def read_posting_note(application_id):
     if using_sqlite():
         return sqlite_store.read_posting_note(application_id)

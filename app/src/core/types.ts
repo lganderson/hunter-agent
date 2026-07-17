@@ -112,6 +112,17 @@ export type CompanyPostingCandidate = {
   title: string;
   url: string;
   location: string;
+  work_mode: string;
+  category: string;
+  source_platform: string;
+  source_job_id: string;
+  matched_queries: string;
+  description_excerpt: string;
+  description_hash: string;
+  score_inputs_hash: string;
+  normalization_warnings: string;
+  scan_state: string;
+  last_verified_at: string;
   status: string;
   first_seen_at: string;
   last_seen_at: string;
@@ -119,6 +130,23 @@ export type CompanyPostingCandidate = {
   fit_summary: string;
   fit_checked_at: string;
   notes: string;
+};
+
+export type CompanyCareerScan = {
+  company_id: string;
+  checked_at: string;
+  platform_type: string;
+  status: string;
+  requests_succeeded: string;
+  requests_failed: string;
+  extracted_count: string;
+  unique_candidate_count: string;
+  new_count: string;
+  recommended_count: string;
+  unavailable_count: string;
+  verification_count: string;
+  verification_skipped_count: string;
+  errors_json: string;
 };
 
 export type WorkflowStage = {
@@ -158,6 +186,7 @@ export type AppState = {
   company_contacts: CompanyContact[];
   company_career_sources: CompanyCareerSource[];
   company_posting_candidates: CompanyPostingCandidate[];
+  company_career_scans: CompanyCareerScan[];
 };
 
 export type SettingsStatus = {

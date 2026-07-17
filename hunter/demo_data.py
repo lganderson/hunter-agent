@@ -47,6 +47,7 @@ def _posting_note_count():
 
 def _clear_related_tables():
     chat_history.clear_messages()
+    repository.clear_company_career_scans()
     with sqlite_store.connect() as connection:
         connection.execute("DELETE FROM application_contacts")
         connection.execute("DELETE FROM company_contacts")

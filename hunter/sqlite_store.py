@@ -330,7 +330,27 @@ def initialize():
         )
         ensure_text_columns(connection, "company_posting_candidates", schema.COMPANY_POSTING_CANDIDATE_FIELDS)
         connection.execute(
-            "INSERT INTO meta(key, value) VALUES('schema_version', '4') "
+            "CREATE TABLE IF NOT EXISTS company_career_scans ("
+            "company_id TEXT NOT NULL, "
+            "checked_at TEXT NOT NULL, "
+            "platform_type TEXT NOT NULL DEFAULT '', "
+            "status TEXT NOT NULL DEFAULT '', "
+            "requests_succeeded TEXT NOT NULL DEFAULT '', "
+            "requests_failed TEXT NOT NULL DEFAULT '', "
+            "extracted_count TEXT NOT NULL DEFAULT '', "
+            "unique_candidate_count TEXT NOT NULL DEFAULT '', "
+            "new_count TEXT NOT NULL DEFAULT '', "
+            "recommended_count TEXT NOT NULL DEFAULT '', "
+            "unavailable_count TEXT NOT NULL DEFAULT '', "
+            "verification_count TEXT NOT NULL DEFAULT '', "
+            "verification_skipped_count TEXT NOT NULL DEFAULT '', "
+            "errors_json TEXT NOT NULL DEFAULT '[]', "
+            "PRIMARY KEY(company_id, checked_at)"
+            ")"
+        )
+        ensure_text_columns(connection, "company_career_scans", schema.COMPANY_CAREER_SCAN_FIELDS)
+        connection.execute(
+            "INSERT INTO meta(key, value) VALUES('schema_version', '5') "
             "ON CONFLICT(key) DO UPDATE SET value=excluded.value"
         )
 
@@ -614,6 +634,44 @@ def write_company_posting_candidates(rows):
                 f"INSERT INTO company_posting_candidates ({quoted_fields}) VALUES ({placeholders})",
                 values,
             )
+
+
+def read_company_career_scans(company_id="", limit=200):
+    initialize()
+    fields = schema.COMPANY_CAREER_SCAN_FIELDS
+    quoted_fields = ", ".join(f'"{field}"' for field in fields)
+    query = f"SELECT {quoted_fields} FROM company_career_scans"
+    params = []
+    if storage.clean(company_id):
+        query += " WHERE upper(company_id) = ?"
+        params.append(storage.clean(company_id).upper())
+    query += " ORDER BY checked_at DESC, company_id LIMIT ?"
+    params.append(max(1, min(1000, int(limit or 200))))
+    with connect() as connection:
+        rows = connection.execute(query, params).fetchall()
+    return [{field: storage.clean(row[field]) for field in fields} for row in rows]
+
+
+def write_company_career_scan(row):
+    initialize()
+    fields = schema.COMPANY_CAREER_SCAN_FIELDS
+    quoted_fields = ", ".join(f'"{field}"' for field in fields)
+    placeholders = ", ".join("?" for _ in fields)
+    updates = ", ".join(f'"{field}"=excluded."{field}"' for field in fields[2:])
+    values = [storage.clean(row.get(field, "")) for field in fields]
+    with connect() as connection:
+        connection.execute(
+            f"INSERT INTO company_career_scans ({quoted_fields}) VALUES ({placeholders}) "
+            f"ON CONFLICT(company_id, checked_at) DO UPDATE SET {updates}",
+            values,
+        )
+    return {field: values[index] for index, field in enumerate(fields)}
+
+
+def clear_company_career_scans():
+    initialize()
+    with connect() as connection:
+        connection.execute("DELETE FROM company_career_scans")
 
 
 def read_posting_note(application_id):

@@ -470,7 +470,7 @@ export function CompanyDetailPage({ data, refresh, createNew = false }: CompanyD
                 <div className="company-candidate-copy">
                   <a className="company-candidate-title" href={candidate.url} target="_blank" rel="noreferrer">{candidate.title || candidate.url}</a>
                   <div className="candidate-meta">
-                    <span>{candidate.location || "Location not listed"}</span>
+                    <span>{candidateLocationLabel(candidate)}</span>
                     <span>{titleCase(candidate.status)} · Seen {candidateDateLabel(candidate)}</span>
                     {candidate.fit_score ? <span className={`pill fit-${fitBand(candidate)}`}>Fit {candidate.fit_score}</span> : null}
                   </div>
@@ -591,10 +591,16 @@ function candidateDateLabel(candidate: CompanyPostingCandidate) {
   return value ? dateOnlyLabel(value) : "unknown";
 }
 
+function candidateLocationLabel(candidate: CompanyPostingCandidate) {
+  const location = candidate.location || "Location not listed";
+  return candidate.work_mode ? `${location} · ${candidate.work_mode}` : location;
+}
+
 function lastCheckChip(status: string) {
   const normalized = status.toLowerCase();
   if (!normalized) return { label: "Not checked", tone: "not-checked" };
   if (normalized.startsWith("ok:")) return { label: "OK", tone: "ok" };
+  if (normalized.startsWith("partial:")) return { label: "Partial", tone: "checked" };
   if (normalized.startsWith("error:")) return { label: "Error", tone: "error" };
   return { label: "Checked", tone: "checked" };
 }
