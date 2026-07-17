@@ -302,12 +302,13 @@ function PostingEditor({
     <article className="panel posting-editor-panel">
       <div className="posting-section-header"><div><h2>Posting details</h2><p>Update role, tracking, location, and application timing.</p></div></div>
       <form className="management-form" onSubmit={onSubmit} key={app.id}>
-        <label className={createNew ? "form-field" : "form-field full"}>Role <input name="role" type="text" defaultValue={app.role || ""} required /></label>
-        {createNew ? <><label className="form-field">Company <input name="company" type="text" defaultValue={app.company || ""} /></label>
-        <label className="form-field">Managed company <select name="company_id" defaultValue={app.company_id || ""}>
-          <option value="">None</option>
+        <label className="form-field">Role <input name="role" type="text" defaultValue={app.role || ""} required /></label>
+        <label className="form-field">Company <select name="company_id" defaultValue={app.company_id || ""} required={createNew}>
+          {createNew
+            ? <option value="" disabled>Select company</option>
+            : <option value="">{app.company && !app.company_id ? `${app.company} (not managed)` : "Not managed"}</option>}
           {data.companies.map(company => <option key={company.id} value={company.id}>{company.name}</option>)}
-        </select></label></> : null}
+        </select></label>
         <label className="form-field">Location <input name="location" type="text" defaultValue={app.location || ""} /></label>
         <label className="form-field">Work mode <input name="work_mode" type="text" defaultValue={app.work_mode || ""} placeholder="Remote, hybrid, on-site" /></label>
         <label className="form-field full">Source URL <input name="source_url" type="url" defaultValue={app.source_url || ""} /></label>
