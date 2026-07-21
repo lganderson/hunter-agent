@@ -281,6 +281,8 @@ class IngestPostingsTest(unittest.TestCase):
         self.assertEqual(snapshots[0]["final_url"], url)
         self.assertIn("Own platform product strategy and roadmap.", snapshots[0]["content_text"])
         self.assertIn("Lead cross-functional teams.", snapshots[0]["content_text"])
+        self.assertNotIn("<h2>", snapshots[0]["content_text"])
+        self.assertNotIn("<p>", snapshots[0]["content_text"])
         self.assertIn('"id": 5674511004', snapshots[0]["source_html"])
         self.assertIn("captured posting through the Greenhouse Job Board API", snapshots[0]["warnings"])
         self.assertNotIn("browser verification", snapshots[0]["warnings"])

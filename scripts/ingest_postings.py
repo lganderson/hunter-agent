@@ -174,11 +174,17 @@ def visible_text(page_html):
 
 
 def readable_page_text(page_html):
-    text = re.sub(r"<(script|style)\b.*?</\1>", " ", page_html or "", flags=re.I | re.S)
+    text = page_html or ""
+    for _attempt in range(2):
+        decoded = html.unescape(text)
+        if decoded == text:
+            break
+        text = decoded
+    text = re.sub(r"<(script|style)\b.*?</\1>", " ", text, flags=re.I | re.S)
     text = re.sub(r"<br\s*/?>", "\n", text, flags=re.I)
     text = re.sub(r"</(?:article|div|h[1-6]|li|main|p|section|tr)\s*>", "\n", text, flags=re.I)
     text = re.sub(r"<[^>]+>", " ", text)
-    lines = [clean_text(line) for line in html.unescape(text).splitlines()]
+    lines = [clean_text(line) for line in text.splitlines()]
     return "\n".join(line for line in lines if line)
 
 

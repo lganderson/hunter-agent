@@ -3,7 +3,7 @@ import { Link, useNavigate, useParams } from "react-router-dom";
 import { ActionCommand, Priority, StatusPill, TagList } from "../components/Primitives";
 import { BriefcaseIcon, ExternalIcon, FilterIcon, PlusIcon } from "../components/Icons";
 import { createAction, createApplication, getPostingSnapshots, linkContact, makeNextAction, unlinkContact, updateAction, updateActionFields, updateApplication } from "../core/api";
-import { actionDueLabel, dueLabel, isActionComplete, markdownToHtml, normalizeTag, tagColorClass, tagList, titleCase } from "../core/format";
+import { actionDueLabel, archivedPostingText, dueLabel, isActionComplete, markdownToHtml, normalizeTag, tagColorClass, tagList, titleCase } from "../core/format";
 import type { Action, ActionUpdates, AppState, Application, PostingSnapshot } from "../core/types";
 
 type DetailProps = {
@@ -303,6 +303,7 @@ function PostingArchive({ applicationId }: { applicationId: string }) {
 
   const selected = snapshots.find(snapshot => snapshot.id === selectedId) || snapshots[0];
   const captureLabel = selected?.captured_at ? new Date(selected.captured_at).toLocaleString() : "";
+  const readableContent = archivedPostingText(selected?.content_text || "");
 
   return (
     <details className="panel posting-note-disclosure posting-archive-disclosure">
@@ -317,13 +318,13 @@ function PostingArchive({ applicationId }: { applicationId: string }) {
           <div className="posting-archive-toolbar">
             <div>
               <strong>{captureLabel || "Captured posting"}</strong>
-              <span>HTTP {selected.http_status || "unknown"} · {selected.content_text.length.toLocaleString()} readable characters · {selected.source_html_char_count.toLocaleString()} source characters</span>
+              <span>HTTP {selected.http_status || "unknown"} · {readableContent.length.toLocaleString()} readable characters · {selected.source_html_char_count.toLocaleString()} source characters</span>
             </div>
             {snapshots.length > 1 ? <label>Saved version<select aria-label="Archived posting version" value={selected.id} onChange={event => setSelectedId(event.target.value)}>{snapshots.map(snapshot => <option key={snapshot.id} value={snapshot.id}>{new Date(snapshot.captured_at).toLocaleString()}</option>)}</select></label> : null}
             <a className="button compact" href={selected.final_url || selected.source_url} target="_blank" rel="noreferrer"><ExternalIcon size={14} /> Open source</a>
           </div>
           {selected.warnings ? <p className="posting-archive-warning">{selected.warnings}</p> : null}
-          <pre className="posting-archive-content">{selected.content_text || "No readable page text was captured. The fetch metadata and raw source response remain stored locally."}</pre>
+          <div className="posting-archive-content">{readableContent || "No readable page text was captured. The fetch metadata and raw source response remain stored locally."}</div>
         </> : null}
       </div>
     </details>

@@ -2656,7 +2656,9 @@
       border: 0;
       background: transparent;
       color: var(--text);
-      font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-family: inherit;
+      font-size: 13px;
+      line-height: 1.65;
       white-space: pre-wrap;
       overflow-wrap: anywhere;
     }

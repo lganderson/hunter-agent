@@ -69,6 +69,56 @@ export function dateOnlyLabel(value: string): string {
   });
 }
 
+const ARCHIVE_BLOCK_TAGS = new Set([
+  "ADDRESS", "ARTICLE", "ASIDE", "BLOCKQUOTE", "DIV", "DL", "DT", "DD", "FIGCAPTION", "FIGURE",
+  "FOOTER", "H1", "H2", "H3", "H4", "H5", "H6", "HEADER", "HR", "LI", "MAIN", "NAV", "OL",
+  "P", "PRE", "SECTION", "TABLE", "TBODY", "TD", "TFOOT", "TH", "THEAD", "TR", "UL"
+]);
+
+export function archivedPostingText(value: string): string {
+  const original = value || "";
+  if (!/(?:<[a-z][^>]*>|&lt;[a-z][^&]*&gt;)/i.test(original) || typeof DOMParser === "undefined") {
+    return original;
+  }
+
+  let source = original;
+  let parsed = new DOMParser().parseFromString(source, "text/html");
+  for (let attempt = 0; attempt < 2 && !parsed.body.querySelector("*"); attempt += 1) {
+    const decoded = parsed.body.textContent || "";
+    if (!/<[a-z][^>]*>/i.test(decoded)) break;
+    source = decoded;
+    parsed = new DOMParser().parseFromString(source, "text/html");
+  }
+
+  const parts: string[] = [];
+  function appendBreak() {
+    if (parts.length && parts[parts.length - 1] !== "\n") parts.push("\n");
+  }
+  function visit(node: globalThis.Node) {
+    if (node.nodeType === 3) {
+      parts.push(node.textContent || "");
+      return;
+    }
+    if (node.nodeType !== 1) return;
+    const element = node as HTMLElement;
+    if (element.tagName === "BR") {
+      appendBreak();
+      return;
+    }
+    if (element.tagName === "LI") parts.push("• ");
+    element.childNodes.forEach(visit);
+    if (ARCHIVE_BLOCK_TAGS.has(element.tagName)) appendBreak();
+  }
+  parsed.body.childNodes.forEach(visit);
+
+  return parts.join("")
+    .split("\n")
+    .map(line => line.replace(/\s+/g, " ").trim())
+    .filter(Boolean)
+    .join("\n")
+    .trim();
+}
+
 export function isClosed(app: Application): boolean {
   return normalize(app.stage).toLowerCase() === "closed";
 }
