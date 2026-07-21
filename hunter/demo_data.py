@@ -18,6 +18,7 @@ COUNT_KEYS = [
     "company_career_sources",
     "company_posting_candidates",
     "posting_notes",
+    "posting_snapshots",
 ]
 
 
@@ -36,6 +37,7 @@ def _existing_counts():
         "company_career_sources": len(repository.read_company_career_sources()),
         "company_posting_candidates": len(repository.read_company_posting_candidates()),
         "posting_notes": _posting_note_count(),
+        "posting_snapshots": len(repository.read_posting_snapshots()),
     }
 
 
@@ -52,6 +54,7 @@ def _clear_related_tables():
         connection.execute("DELETE FROM application_contacts")
         connection.execute("DELETE FROM company_contacts")
         connection.execute("DELETE FROM posting_notes")
+        connection.execute("DELETE FROM posting_snapshots")
     repository.write_company_career_sources([])
     repository.write_company_posting_candidates([])
     repository.write_companies([])

@@ -2,9 +2,9 @@ import { useEffect, useMemo, useState, type FormEvent, type KeyboardEvent } from
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { ActionCommand, Priority, StatusPill, TagList } from "../components/Primitives";
 import { BriefcaseIcon, ExternalIcon, FilterIcon, PlusIcon } from "../components/Icons";
-import { createAction, createApplication, linkContact, makeNextAction, unlinkContact, updateAction, updateActionFields, updateApplication } from "../core/api";
+import { createAction, createApplication, getPostingSnapshots, linkContact, makeNextAction, unlinkContact, updateAction, updateActionFields, updateApplication } from "../core/api";
 import { actionDueLabel, dueLabel, isActionComplete, markdownToHtml, normalizeTag, tagColorClass, tagList, titleCase } from "../core/format";
-import type { Action, ActionUpdates, AppState, Application } from "../core/types";
+import type { Action, ActionUpdates, AppState, Application, PostingSnapshot } from "../core/types";
 
 type DetailProps = {
   data: AppState;
@@ -223,6 +223,8 @@ export function PostingDetailPage({ data, refresh, createNew = false }: DetailPr
           </div>
         </article> : null}
 
+        {!createNew ? <PostingArchive applicationId={app.id} /> : null}
+
         {!createNew ? <details className="panel posting-note-disclosure">
           <summary><span><strong>Posting note</strong><small>Reference description and captured context</small></span><span className="disclosure-label">Show note</span></summary>
           <div className="note-view" dangerouslySetInnerHTML={{ __html: markdownToHtml(app.posting_markdown || "# No posting note\n\nNo Markdown note is available for this row.") }} />
@@ -270,6 +272,61 @@ export function PostingDetailPage({ data, refresh, createNew = false }: DetailPr
 
       {operationStatus ? <div className="posting-operation-status" role="status" aria-live="polite">{operationStatus}</div> : null}
     </section>
+  );
+}
+
+function PostingArchive({ applicationId }: { applicationId: string }) {
+  const [snapshots, setSnapshots] = useState<PostingSnapshot[]>([]);
+  const [selectedId, setSelectedId] = useState("");
+  const [status, setStatus] = useState("Loading archived posting…");
+
+  useEffect(() => {
+    let cancelled = false;
+    setStatus("Loading archived posting…");
+    getPostingSnapshots(applicationId)
+      .then(nextSnapshots => {
+        if (cancelled) return;
+        setSnapshots(nextSnapshots);
+        setSelectedId(nextSnapshots[0]?.id || "");
+        setStatus("");
+      })
+      .catch(error => {
+        if (cancelled) return;
+        setSnapshots([]);
+        setSelectedId("");
+        setStatus(`Could not load archived posting. ${error instanceof Error ? error.message : String(error)}`);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [applicationId]);
+
+  const selected = snapshots.find(snapshot => snapshot.id === selectedId) || snapshots[0];
+  const captureLabel = selected?.captured_at ? new Date(selected.captured_at).toLocaleString() : "";
+
+  return (
+    <details className="panel posting-note-disclosure posting-archive-disclosure">
+      <summary>
+        <span><strong>Archived posting</strong><small>{snapshots.length ? `${snapshots.length} saved source ${snapshots.length === 1 ? "copy" : "copies"}` : "Full source captured during ingestion"}</small></span>
+        <span className="disclosure-label">Show archive</span>
+      </summary>
+      <div className="posting-archive-view">
+        {status ? <p className="posting-archive-status">{status}</p> : null}
+        {!status && !selected ? <p className="posting-archive-status">No archived source is available for this posting yet.</p> : null}
+        {selected ? <>
+          <div className="posting-archive-toolbar">
+            <div>
+              <strong>{captureLabel || "Captured posting"}</strong>
+              <span>HTTP {selected.http_status || "unknown"} · {selected.content_text.length.toLocaleString()} readable characters · {selected.source_html_char_count.toLocaleString()} source characters</span>
+            </div>
+            {snapshots.length > 1 ? <label>Saved version<select aria-label="Archived posting version" value={selected.id} onChange={event => setSelectedId(event.target.value)}>{snapshots.map(snapshot => <option key={snapshot.id} value={snapshot.id}>{new Date(snapshot.captured_at).toLocaleString()}</option>)}</select></label> : null}
+            <a className="button compact" href={selected.final_url || selected.source_url} target="_blank" rel="noreferrer"><ExternalIcon size={14} /> Open source</a>
+          </div>
+          {selected.warnings ? <p className="posting-archive-warning">{selected.warnings}</p> : null}
+          <pre className="posting-archive-content">{selected.content_text || "No readable page text was captured. The fetch metadata and raw source response remain stored locally."}</pre>
+        </> : null}
+      </div>
+    </details>
   );
 }
 

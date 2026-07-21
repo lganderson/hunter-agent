@@ -260,6 +260,8 @@ detail page; completing or reopening actions recomputes the posting summary.
 - `templates/`: reusable note and message templates.
 - `exports/`: generated exports or reports.
 
+Posting ingestion saves an immutable local source snapshot in SQLite alongside the editable posting note. Each distinct capture keeps the original and final URL, capture time, HTTP status, readable page text, raw fetched HTML, warnings, and a content hash. Re-ingesting unchanged content is deduplicated; changed source pages remain available as separate saved versions in the posting detail view and company-data exports.
+
 ## Workflow Stages
 
 - `needs-direct-url`: source is not yet a canonical employer posting.

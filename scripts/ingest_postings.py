@@ -6,7 +6,7 @@ import html
 import json
 import re
 import sys
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
@@ -129,6 +129,36 @@ def visible_text(page_html):
     text = re.sub(r"<(script|style)\b.*?</\1>", " ", page_html, flags=re.I | re.S)
     text = re.sub(r"<[^>]+>", " ", text)
     return clean_text(text)
+
+
+def readable_page_text(page_html):
+    text = re.sub(r"<(script|style)\b.*?</\1>", " ", page_html or "", flags=re.I | re.S)
+    text = re.sub(r"<br\s*/?>", "\n", text, flags=re.I)
+    text = re.sub(r"</(?:article|div|h[1-6]|li|main|p|section|tr)\s*>", "\n", text, flags=re.I)
+    text = re.sub(r"<[^>]+>", " ", text)
+    lines = [clean_text(line) for line in html.unescape(text).splitlines()]
+    return "\n".join(line for line in lines if line)
+
+
+def posting_snapshot_text(page_html, job_json):
+    structured_parts = []
+    for field in [
+        "title",
+        "description",
+        "responsibilities",
+        "qualifications",
+        "skills",
+        "experienceRequirements",
+        "educationRequirements",
+        "jobBenefits",
+    ]:
+        value = job_json.get(field) if isinstance(job_json, dict) else None
+        if isinstance(value, (dict, list)):
+            value = json.dumps(value, ensure_ascii=False)
+        if value:
+            structured_parts.append(str(value))
+    structured_text = readable_page_text("\n".join(structured_parts))
+    return structured_text or readable_page_text(page_html)
 
 
 def json_ld_items(page_html):
@@ -370,6 +400,15 @@ def extract_posting(url, args):
         "closed_detected": closed,
         "active_detected": active,
         "warnings": warnings,
+        "posting_snapshot": {
+            "source_url": url,
+            "final_url": final_url,
+            "captured_at": datetime.now().isoformat(timespec="seconds"),
+            "http_status": str(fetched["status"] or ""),
+            "content_text": posting_snapshot_text(page_html, job_json),
+            "source_html": page_html,
+            "warnings": "\n".join(warnings),
+        },
     }
 
 
@@ -467,6 +506,8 @@ def upsert(url, args):
     row["posting_file"] = note_path
     tracker.write_rows(tracker.APPLICATIONS, tracker.APPLICATION_FIELDS, rows)
     row = associate_company(row)
+    snapshot = repository.write_posting_snapshot(row.get("id", ""), data.get("posting_snapshot", {}))
+    data["posting_snapshot_id"] = snapshot.get("id", "") if snapshot else ""
     return created, row, data
 
 
@@ -517,6 +558,9 @@ def main(argv=None):
         print(f"{action} {row['id']}: {row.get('company', '')} - {row.get('role', '')}")
         if action_count:
             print(f"  created {action_count} actions")
+        if data.get("posting_snapshot_id"):
+            content_length = len(data.get("posting_snapshot", {}).get("content_text", ""))
+            print(f"  captured posting snapshot ({content_length} readable characters)")
         for warning in data["warnings"]:
             print(f"  warning: {warning}")
         if action_warning:

@@ -13,6 +13,7 @@ if str(ROOT_FOR_IMPORTS) not in sys.path:
     sys.path.insert(0, str(ROOT_FOR_IMPORTS))
 
 from hunter import paths as hunter_paths
+from hunter import repository
 from hunter import agent as hunter_agent
 from hunter import app_state
 from hunter import actions as action_store
@@ -98,6 +99,26 @@ class AppHandler(SimpleHTTPRequestHandler):
         query = parse_qs(parsed.query)
         if path == "/api/app-state":
             self.send_json(app_state.build_payload())
+            return
+        if path == "/api/postings/snapshots":
+            application_id = (query.get("id") or [""])[0].strip().upper()
+            if not application_id:
+                self.send_json({"error": "Posting id is required."}, status=400)
+                return
+            posting = next(
+                (row for row in repository.read_applications() if row.get("id", "").upper() == application_id),
+                None,
+            )
+            if posting is None:
+                self.send_json({"error": f"No posting found with id {application_id}."}, status=404)
+                return
+            snapshots = []
+            for snapshot in repository.read_posting_snapshots(application_id):
+                snapshots.append({
+                    **{field: snapshot.get(field, "") for field in snapshot if field != "source_html"},
+                    "source_html_char_count": len(snapshot.get("source_html", "")),
+                })
+            self.send_json({"snapshots": snapshots})
             return
         if path == "/api/agent/history":
             self.send_json({"api_version": chat_history.API_VERSION, "messages": chat_history.list_messages()})

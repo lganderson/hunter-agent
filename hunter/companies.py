@@ -4872,6 +4872,7 @@ def build_company_export_payload(company_id=""):
     career_sources = repository.read_company_career_sources()
     candidates = repository.read_company_posting_candidates()
     career_scans = repository.read_company_career_scans(limit=1000)
+    posting_snapshots = repository.read_posting_snapshots()
 
     contacts_by_id = {row.get("id", "").upper(): row for row in contacts}
     actions_by_application_id = {}
@@ -4892,6 +4893,12 @@ def build_company_export_payload(company_id=""):
             for posting in linked_postings
             for action in actions_by_application_id.get(posting.get("id", "").upper(), [])
         ]
+        linked_posting_ids = {posting.get("id", "").upper() for posting in linked_postings}
+        linked_snapshots = [
+            snapshot
+            for snapshot in posting_snapshots
+            if snapshot.get("application_id", "").upper() in linked_posting_ids
+        ]
         records.append(
             {
                 "company": company,
@@ -4903,6 +4910,7 @@ def build_company_export_payload(company_id=""):
                 ],
                 "postings": linked_postings,
                 "actions": linked_actions,
+                "posting_snapshots": linked_snapshots,
                 "career_sources": [
                     row
                     for row in career_sources
@@ -4943,6 +4951,16 @@ def build_company_export_payload(company_id=""):
                 action
                 for action in actions
                 if action.get("application_id", "").upper()
+                in {
+                    app.get("id", "").upper()
+                    for app in applications
+                    if app.get("company_id", "").upper() in selected_ids
+                }
+            ],
+            "posting_snapshots": [
+                snapshot
+                for snapshot in posting_snapshots
+                if snapshot.get("application_id", "").upper()
                 in {
                     app.get("id", "").upper()
                     for app in applications

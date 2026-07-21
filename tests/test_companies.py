@@ -2662,6 +2662,13 @@ class HunterCompaniesTest(unittest.TestCase):
             action_row({"id": "T0001", "application_id": "A0001", "title": "Research company"}),
             action_row({"id": "T0002", "application_id": "A0002", "title": "Unrelated action"}),
         ])
+        repository.write_posting_snapshot("A0001", {
+            "source_url": "https://example.com/jobs/engineer",
+            "captured_at": "2026-07-21T12:00:00",
+            "http_status": "200",
+            "content_text": "Engineer\nBuild durable systems.",
+            "source_html": "<main><h1>Engineer</h1><p>Build durable systems.</p></main>",
+        })
         repository.write_company_career_sources([
             {field: "" for field in schema.COMPANY_CAREER_SOURCE_FIELDS} | {
                 "company_id": company["id"],
@@ -2693,6 +2700,8 @@ class HunterCompaniesTest(unittest.TestCase):
         self.assertTrue(result["path"].name.startswith(f"company-data-{company['id']}-"))
         self.assertEqual(payload["scope"]["company_count"], 1)
         self.assertEqual(payload["companies"][0]["company"]["name"], "Example")
+        self.assertEqual(payload["companies"][0]["posting_snapshots"][0]["application_id"], "A0001")
+        self.assertEqual(payload["tables"]["posting_snapshots"][0]["content_text"], "Engineer\nBuild durable systems.")
         self.assertEqual(payload["companies"][0]["contacts"][0]["name"], "Ada")
         self.assertEqual(payload["companies"][0]["postings"][0]["id"], "A0001")
         self.assertEqual(payload["companies"][0]["actions"][0]["id"], "T0001")

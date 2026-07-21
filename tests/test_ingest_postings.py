@@ -190,6 +190,44 @@ class IngestPostingsTest(unittest.TestCase):
         self.assertEqual(row["tags"], "")
         self.assertEqual(app["tags"], "")
 
+    def test_ingest_archives_full_posting_source_and_readable_text(self):
+        sqlite_store.initialize()
+        args = ingest_postings.build_parser().parse_args([
+            "--company",
+            "Example",
+            "--role",
+            "Platform Product Manager",
+            "https://example.com/jobs/platform-product-manager",
+        ])
+        page_html = (
+            "<html><head><title>Platform Product Manager</title></head><body><main>"
+            "<h1>Platform Product Manager</h1>"
+            "<p>Own the complete platform roadmap.</p>"
+            "<h2>Requirements</h2><ul><li>Lead cross-functional teams.</li></ul>"
+            "</main></body></html>"
+        )
+        original_fetch = ingest_postings.fetch
+        ingest_postings.fetch = lambda url: {
+            "status": 200,
+            "final_url": f"{url}?canonical=1",
+            "html": page_html,
+            "error": "",
+        }
+        try:
+            _created, row, data = ingest_postings.upsert(args.urls[0], args)
+            ingest_postings.upsert(args.urls[0], args)
+        finally:
+            ingest_postings.fetch = original_fetch
+
+        snapshots = repository.read_posting_snapshots(row["id"])
+        self.assertEqual(len(snapshots), 1)
+        self.assertEqual(data["posting_snapshot_id"], snapshots[0]["id"])
+        self.assertEqual(snapshots[0]["source_html"], page_html)
+        self.assertEqual(snapshots[0]["http_status"], "200")
+        self.assertIn("Own the complete platform roadmap.", snapshots[0]["content_text"])
+        self.assertIn("Lead cross-functional teams.", snapshots[0]["content_text"])
+        self.assertTrue(snapshots[0]["content_hash"])
+
 
 if __name__ == "__main__":
     unittest.main()

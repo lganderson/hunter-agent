@@ -26,6 +26,19 @@ APPLICATION_FIELDS = [
     "notes",
 ]
 
+POSTING_SNAPSHOT_FIELDS = [
+    "id",
+    "application_id",
+    "source_url",
+    "final_url",
+    "captured_at",
+    "http_status",
+    "content_hash",
+    "content_text",
+    "source_html",
+    "warnings",
+]
+
 CONTACT_FIELDS = [
     "id",
     "name",

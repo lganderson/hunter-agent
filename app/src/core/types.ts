@@ -33,6 +33,19 @@ export type Application = {
   sort_due: string;
 };
 
+export type PostingSnapshot = {
+  id: string;
+  application_id: string;
+  source_url: string;
+  final_url: string;
+  captured_at: string;
+  http_status: string;
+  content_hash: string;
+  content_text: string;
+  warnings: string;
+  source_html_char_count: number;
+};
+
 export type Action = {
   id: string;
   application_id: string;

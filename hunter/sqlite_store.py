@@ -4,6 +4,7 @@ The database uses plain TEXT columns for the CSV-backed entities so import and
 export stay lossless while the app gets local transactional persistence.
 """
 
+import hashlib
 import json
 import sqlite3
 from datetime import datetime
@@ -259,6 +260,21 @@ def initialize():
             ")"
         )
         connection.execute(
+            "CREATE TABLE IF NOT EXISTS posting_snapshots ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "application_id TEXT NOT NULL, "
+            "source_url TEXT NOT NULL DEFAULT '', "
+            "final_url TEXT NOT NULL DEFAULT '', "
+            "captured_at TEXT NOT NULL, "
+            "http_status TEXT NOT NULL DEFAULT '', "
+            "content_hash TEXT NOT NULL, "
+            "content_text TEXT NOT NULL DEFAULT '', "
+            "source_html TEXT NOT NULL DEFAULT '', "
+            "warnings TEXT NOT NULL DEFAULT '', "
+            "UNIQUE(application_id, content_hash)"
+            ")"
+        )
+        connection.execute(
             "CREATE TABLE IF NOT EXISTS agent_messages ("
             "id INTEGER PRIMARY KEY AUTOINCREMENT, "
             "role TEXT NOT NULL, "
@@ -350,7 +366,7 @@ def initialize():
         )
         ensure_text_columns(connection, "company_career_scans", schema.COMPANY_CAREER_SCAN_FIELDS)
         connection.execute(
-            "INSERT INTO meta(key, value) VALUES('schema_version', '5') "
+            "INSERT INTO meta(key, value) VALUES('schema_version', '6') "
             "ON CONFLICT(key) DO UPDATE SET value=excluded.value"
         )
 
@@ -735,6 +751,75 @@ def posting_note_count():
     initialize()
     with connect() as connection:
         return connection.execute("SELECT COUNT(*) AS total FROM posting_notes").fetchone()["total"]
+
+
+def read_posting_snapshots(application_id=""):
+    initialize()
+    params = []
+    where = ""
+    wanted = storage.clean(application_id).upper()
+    if wanted:
+        where = " WHERE upper(application_id) = ?"
+        params.append(wanted)
+    with connect() as connection:
+        rows = connection.execute(
+            "SELECT id, application_id, source_url, final_url, captured_at, http_status, "
+            "content_hash, content_text, source_html, warnings FROM posting_snapshots"
+            f"{where} ORDER BY captured_at DESC, id DESC",
+            params,
+        ).fetchall()
+    preserved_fields = {"content_text", "source_html", "warnings"}
+    return [
+        {
+            field: (row[field] or "") if field in preserved_fields else storage.clean(row[field])
+            for field in schema.POSTING_SNAPSHOT_FIELDS
+        }
+        for row in rows
+    ]
+
+
+def write_posting_snapshot(application_id, values):
+    application_id = storage.clean(application_id).upper()
+    if not application_id:
+        raise ValueError("Posting snapshot application id is required.")
+    values = values or {}
+    content_text = values.get("content_text", "") or ""
+    source_html = values.get("source_html", "") or ""
+    fingerprint = source_html or content_text or "|".join(
+        storage.clean(values.get(field, ""))
+        for field in ["source_url", "final_url", "http_status", "warnings"]
+    )
+    content_hash = hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()
+    captured_at = storage.clean(values.get("captured_at")) or datetime.now().isoformat(timespec="seconds")
+    row = {
+        "application_id": application_id,
+        "source_url": storage.clean(values.get("source_url")),
+        "final_url": storage.clean(values.get("final_url")),
+        "captured_at": captured_at,
+        "http_status": storage.clean(values.get("http_status")),
+        "content_hash": content_hash,
+        "content_text": content_text,
+        "source_html": source_html,
+        "warnings": values.get("warnings", "") or "",
+    }
+    with connect() as connection:
+        connection.execute(
+            "INSERT INTO posting_snapshots("
+            "application_id, source_url, final_url, captured_at, http_status, content_hash, content_text, source_html, warnings"
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(application_id, content_hash) DO NOTHING",
+            tuple(row[field] for field in schema.POSTING_SNAPSHOT_FIELDS[1:]),
+        )
+        saved = connection.execute(
+            "SELECT id, application_id, source_url, final_url, captured_at, http_status, "
+            "content_hash, content_text, source_html, warnings FROM posting_snapshots "
+            "WHERE application_id = ? AND content_hash = ?",
+            (application_id, content_hash),
+        ).fetchone()
+    preserved_fields = {"content_text", "source_html", "warnings"}
+    return {
+        field: (saved[field] or "") if field in preserved_fields else storage.clean(saved[field])
+        for field in schema.POSTING_SNAPSHOT_FIELDS
+    }
 
 
 def record_event(entity_type, entity_id, event_type, data):

@@ -1,7 +1,14 @@
 import json
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+
+SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "scripts"
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
+
+import action_engine
 
 from hunter import actions, app_state, applications, mcp_server, paths, repository, schema, sqlite_store, workflow
 
@@ -147,6 +154,25 @@ class HunterWorkflowTest(unittest.TestCase):
         self.assertEqual(payload["posting"]["next_action"], "Prepare portfolio examples")
         self.assertIn("hunter_create_action", mcp_server.TOOLS)
 
+    def test_mcp_get_posting_returns_readable_snapshot_without_raw_html(self):
+        sqlite_store.initialize()
+        repository.write_applications([application_row({"id": "A0001"})])
+        repository.write_posting_snapshot("A0001", {
+            "source_url": "https://example.com/jobs/engineer",
+            "final_url": "https://example.com/jobs/engineer",
+            "captured_at": "2026-07-21T12:00:00",
+            "http_status": "200",
+            "content_text": "Engineer\nBuild durable systems.",
+            "source_html": "<main><h1>Engineer</h1><p>Build durable systems.</p></main>",
+        })
+
+        result = mcp_server.call_named_tool("hunter_get_posting", {"id": "A0001"})
+        payload = json.loads(result["content"][0]["text"])
+
+        self.assertEqual(payload["posting_snapshots"][0]["content_text"], "Engineer\nBuild durable systems.")
+        self.assertGreater(payload["posting_snapshots"][0]["source_html_char_count"], 0)
+        self.assertNotIn("source_html", payload["posting_snapshots"][0])
+
     def test_application_company_update_syncs_related_actions(self):
         sqlite_store.initialize()
         repository.write_applications([
@@ -196,6 +222,21 @@ class HunterWorkflowTest(unittest.TestCase):
         created, row = actions.upsert_action(rows, action_row({"type": "review-posting"}))
         self.assertTrue(created)
         self.assertEqual(row["type"], "review-fit")
+
+    def test_generated_actions_skip_archived_action_types(self):
+        sqlite_store.initialize()
+        workflow.archive_action_type("verify-source")
+        app = application_row({"id": "A0001", "notes": "Requires browser verification."})
+        repository.write_applications([app])
+
+        created, warning = action_engine.create_actions_for_application(
+            app,
+            warnings=["Browser verification is recommended."],
+        )
+
+        self.assertEqual(warning, "")
+        self.assertEqual([row["type"] for row in created], ["review-fit"])
+        self.assertEqual([row["type"] for row in repository.read_actions()], ["review-fit"])
 
     def test_action_completion_syncs_posting_next_action(self):
         sqlite_store.initialize()

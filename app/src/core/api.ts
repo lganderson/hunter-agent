@@ -14,6 +14,7 @@ import type {
   CompanyUpdates,
   Contact,
   ContactUpdates,
+  PostingSnapshot,
   ResumeText,
   SettingsStatus,
   Workflow,
@@ -76,6 +77,14 @@ async function fetchWithLocalRetry(url: string, init: RequestInit): Promise<Resp
 
 export async function getAppState(): Promise<AppState> {
   return readJson<AppState>(await fetch("/api/app-state", { cache: "no-store" }));
+}
+
+export async function getPostingSnapshots(applicationId: string): Promise<PostingSnapshot[]> {
+  const query = new URLSearchParams({ id: applicationId });
+  const result = await readJson<{ snapshots: PostingSnapshot[] }>(
+    await fetch(`/api/postings/snapshots?${query.toString()}`, { cache: "no-store" })
+  );
+  return result.snapshots;
 }
 
 export async function getSettings(): Promise<SettingsStatus> {
