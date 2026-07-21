@@ -4,7 +4,7 @@ CSV remains an import/export format. Once the SQLite database is initialized,
 runtime reads and writes use SQLite as the local app store.
 """
 
-from . import paths, schema, sqlite_store, storage
+from . import paths, posting_snapshots, schema, sqlite_store, storage
 
 
 def using_sqlite():
@@ -157,7 +157,13 @@ def write_posting_note(application_id, path, content):
 
 def read_posting_snapshots(application_id=""):
     if using_sqlite():
-        return sqlite_store.read_posting_snapshots(application_id)
+        snapshots = sqlite_store.read_posting_snapshots(application_id)
+        for snapshot in snapshots:
+            snapshot["content_text"] = posting_snapshots.readable_content(
+                snapshot.get("final_url") or snapshot.get("source_url"),
+                snapshot.get("content_text", ""),
+            )
+        return snapshots
     return []
 
 

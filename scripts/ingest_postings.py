@@ -196,7 +196,7 @@ def readable_page_text(page_html):
     return "\n".join(line for line in lines if line)
 
 
-def posting_snapshot_text(page_html, job_json):
+def posting_snapshot_text(page_html, job_json, source_url=""):
     structured_parts = []
     for field in [
         "title",
@@ -214,7 +214,10 @@ def posting_snapshot_text(page_html, job_json):
         if value:
             structured_parts.append(str(value))
     structured_text = readable_page_text("\n".join(structured_parts))
-    return structured_text or readable_page_text(page_html)
+    return posting_snapshot_store.readable_content(
+        source_url,
+        structured_text or readable_page_text(page_html),
+    )
 
 
 def json_ld_items(page_html):
@@ -485,7 +488,7 @@ def extract_posting(url, args):
             "final_url": final_url,
             "captured_at": datetime.now().isoformat(timespec="seconds"),
             "http_status": str(fetched["status"] or ""),
-            "content_text": posting_snapshot_text(page_html, job_json),
+            "content_text": posting_snapshot_text(page_html, job_json, final_url),
             "source_html": archive_source,
             "warnings": "\n".join(warnings),
         },
@@ -670,11 +673,11 @@ def save_manual_posting_snapshot(application_id, content):
     raw_content = content if isinstance(content, str) else ""
     if not raw_content.strip():
         raise ValueError("Paste the posting content before saving it.")
-    readable_content = readable_page_text(raw_content)
+    source_url = tracker.clean(row.get("source_url", ""))
+    readable_content = posting_snapshot_store.readable_content(source_url, readable_page_text(raw_content))
     if not readable_content:
         raise ValueError("The pasted content did not contain readable posting text.")
 
-    source_url = tracker.clean(row.get("source_url", ""))
     existing_ids = {item.get("id", "") for item in repository.read_posting_snapshots(wanted)}
     snapshot = repository.write_posting_snapshot(wanted, {
         "source_url": source_url,

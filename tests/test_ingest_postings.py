@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from hunter import companies, paths, repository, sqlite_store
+from hunter import companies, paths, posting_snapshots, repository, sqlite_store
 
 
 SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "scripts"
@@ -426,6 +426,76 @@ class IngestPostingsTest(unittest.TestCase):
             ingest_postings.save_manual_posting_snapshot("A0045", "  \n  ")
 
         self.assertEqual(repository.read_posting_snapshots("A0045"), [])
+
+    def test_google_careers_archive_focuses_the_job_detail(self):
+        noisy_content = "\n".join([
+            "Careers Careers",
+            "## Jobs search results",
+            "3,442 jobs matched",
+            "### Staff Software Developer, Embedded Systems/Firmware",
+            "Waterloo, ON, Canada",
+            "## Senior Technical Program Manager, Software Engineering, Core Systems",
+            "share",
+            "- Copy link",
+            "corporate_fare Google place San Jose, CA, USA",
+            "bar_chart Advanced",
+            "## Advanced",
+            "Experience owning outcomes and decision making.",
+            "Apply",
+            "### Minimum qualifications:",
+            "- 8 years of experience in program management.",
+            "### Preferred qualifications:",
+            "- Experience managing cross-functional projects.",
+            "### About the job",
+            "Lead complex, multi-disciplinary projects from start to finish.",
+            "### Responsibilities",
+            "- Establish a reliable cadence for program reviews.",
+            "Information collected and processed as part of your Google Careers profile.",
+            "## Follow Life at Google on",
+        ])
+
+        focused = posting_snapshots.readable_content(
+            "https://www.google.com/about/careers/applications/jobs/results/123-senior-tpm",
+            noisy_content,
+        )
+
+        self.assertTrue(focused.startswith("# Senior Technical Program Manager"))
+        self.assertIn("Google · San Jose, CA, USA", focused)
+        self.assertIn("**Experience level:** Advanced", focused)
+        self.assertIn("## Minimum qualifications:", focused)
+        self.assertIn("## Responsibilities", focused)
+        self.assertNotIn("Jobs search results", focused)
+        self.assertNotIn("Staff Software Developer", focused)
+        self.assertNotIn("Information collected and processed", focused)
+        self.assertNotIn("Follow Life at Google", focused)
+
+    def test_repository_normalizes_existing_google_archive_content(self):
+        sqlite_store.initialize()
+        repository.write_posting_snapshot("A0047", {
+            "source_url": "https://www.google.com/about/careers/applications/jobs/results/123-role",
+            "final_url": "https://www.google.com/about/careers/applications/jobs/results/123-role",
+            "http_status": "200",
+            "content_text": "\n".join([
+                "## Jobs search results",
+                "3,442 jobs matched",
+                "## Product Manager, Search",
+                "### Minimum qualifications:",
+                "- Product management experience.",
+                "### Responsibilities",
+                "- Define product strategy.",
+                "Information collected and processed as part of your Google Careers profile.",
+            ]),
+            "source_html": "<main>stored raw Google source</main>",
+        })
+
+        snapshot = repository.read_posting_snapshots("A0047")[0]
+
+        self.assertTrue(snapshot["content_text"].startswith("# Product Manager, Search"))
+        self.assertNotIn("Jobs search results", snapshot["content_text"])
+        self.assertEqual(
+            sqlite_store.read_posting_snapshots("A0047")[0]["source_html"],
+            "<main>stored raw Google source</main>",
+        )
 
 
 if __name__ == "__main__":

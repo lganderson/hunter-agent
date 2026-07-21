@@ -2564,6 +2564,11 @@
       list-style: none;
     }
 
+    .posting-archive-disclosure {
+      min-width: 0;
+      overflow: hidden;
+    }
+
     .posting-note-disclosure > summary::-webkit-details-marker {
       display: none;
     }
@@ -4229,6 +4234,32 @@
       .posting-hero-main {
         align-items: flex-start;
         flex-direction: column;
+      }
+
+      .posting-archive-disclosure > summary {
+        align-items: flex-start;
+        flex-direction: column;
+        gap: 10px;
+      }
+
+      .posting-archive-summary-actions {
+        width: 100%;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+
+      .posting-archive-summary-actions .disclosure-label {
+        margin-left: auto;
+      }
+
+      .posting-archive-toolbar {
+        align-items: flex-start;
+        flex-direction: column;
+      }
+
+      .posting-archive-content {
+        max-height: none;
+        overflow: visible;
       }
 
       .detail-topline .detail-actions {
