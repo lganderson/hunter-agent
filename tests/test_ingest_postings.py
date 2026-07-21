@@ -295,6 +295,58 @@ class IngestPostingsTest(unittest.TestCase):
             ],
         )
 
+    def test_archive_existing_posting_captures_snapshot_without_generating_note(self):
+        sqlite_store.initialize()
+        repository.write_applications([{
+            "id": "A0042",
+            "company": "Example",
+            "role": "Platform Product Manager",
+            "source_url": "https://example.com/jobs/platform-product-manager",
+        }])
+        original_fetch = ingest_postings.fetch
+        ingest_postings.fetch = lambda url: {
+            "status": 200,
+            "final_url": url,
+            "html": "<main><h1>Platform Product Manager</h1><p>Own the roadmap.</p></main>",
+            "error": "",
+        }
+        try:
+            first = ingest_postings.archive_application_posting("A0042")
+            second = ingest_postings.archive_application_posting("A0042")
+        finally:
+            ingest_postings.fetch = original_fetch
+
+        self.assertTrue(first["created"])
+        self.assertFalse(second["created"])
+        self.assertEqual(first["snapshot"]["http_status"], "200")
+        self.assertIn("Own the roadmap.", first["snapshot"]["content_text"])
+        self.assertNotIn("source_html", first["snapshot"])
+        self.assertGreater(first["snapshot"]["source_html_char_count"], 0)
+        self.assertIsNone(repository.read_posting_note("A0042"))
+
+    def test_archive_existing_posting_rejects_unreachable_demo_url(self):
+        sqlite_store.initialize()
+        repository.write_applications([{
+            "id": "A0043",
+            "company": "Example",
+            "role": "Demo Product Manager",
+            "source_url": "https://example.invalid/demo-job",
+        }])
+        original_fetch = ingest_postings.fetch
+        ingest_postings.fetch = lambda url: {
+            "status": 0,
+            "final_url": url,
+            "html": "",
+            "error": "Name or service not known",
+        }
+        try:
+            with self.assertRaisesRegex(ValueError, "demo placeholder URL cannot be archived"):
+                ingest_postings.archive_application_posting("A0043")
+        finally:
+            ingest_postings.fetch = original_fetch
+
+        self.assertEqual(repository.read_posting_snapshots("A0043"), [])
+
 
 if __name__ == "__main__":
     unittest.main()

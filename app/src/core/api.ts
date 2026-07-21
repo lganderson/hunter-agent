@@ -87,6 +87,10 @@ export async function getPostingSnapshots(applicationId: string): Promise<Postin
   return result.snapshots;
 }
 
+export function archivePosting(applicationId: string): Promise<{ created: boolean; snapshot: PostingSnapshot; warnings: string[] }> {
+  return postJson("/api/postings/archive", { id: applicationId });
+}
+
 export async function getSettings(): Promise<SettingsStatus> {
   return readJson<SettingsStatus>(await fetch("/api/settings"));
 }

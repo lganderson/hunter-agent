@@ -11,6 +11,7 @@ import sys
 from . import actions as action_store
 from . import app_state
 from . import applications as application_store
+from . import posting_snapshots as posting_snapshot_store
 from . import companies as company_store
 from . import contacts as contact_store
 from . import paths, repository, schema, settings as settings_store, sqlite_store, storage
@@ -203,9 +204,10 @@ def tool_get_posting(args):
     app = next((item for item in app_state.read_applications() if item.get("id", "").upper() == wanted), None)
     if not app:
         raise ValueError(f"No posting found with id {wanted}.")
-    note = repository.read_posting_note(wanted)
     snapshots = []
     for snapshot in repository.read_posting_snapshots(wanted):
+        if not posting_snapshot_store.is_usable(snapshot):
+            continue
         snapshots.append({
             **{field: snapshot.get(field, "") for field in schema.POSTING_SNAPSHOT_FIELDS if field != "source_html"},
             "source_html_char_count": len(snapshot.get("source_html", "")),
@@ -218,7 +220,6 @@ def tool_get_posting(args):
     return text_result(
         {
             "posting": compact_application(app, detail=True),
-            "posting_note": note or None,
             "posting_snapshots": snapshots,
             "actions": [compact_action(action, detail=True) for action in related_actions],
         }
@@ -589,7 +590,7 @@ TOOLS = {
         "handler": tool_list_postings,
     },
     "hunter_get_posting": {
-        "description": "Get one Hunter posting, its SQLite-backed note, captured posting snapshots, and related actions.",
+        "description": "Get one Hunter posting, its captured source snapshots, and related actions.",
         "inputSchema": {
             "type": "object",
             "properties": {"id": {"type": "string"}},

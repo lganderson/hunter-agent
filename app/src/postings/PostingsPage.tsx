@@ -64,8 +64,7 @@ export function PostingsPage({ data }: { data: AppState }) {
         app.tags,
         tagList(app).join(" "),
         app.next_action,
-        app.notes,
-        app.posting_markdown
+        app.notes
       ].join(" ").toLowerCase();
       const query = search.toLowerCase();
       if (query && !haystack.includes(query)) return false;

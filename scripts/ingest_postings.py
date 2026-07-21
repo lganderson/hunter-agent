@@ -16,6 +16,7 @@ import tracker
 import action_engine
 from hunter import applications as application_store
 from hunter import companies as company_store
+from hunter import posting_snapshots as posting_snapshot_store
 from hunter import repository
 
 try:
@@ -581,13 +582,61 @@ def upsert(url, args):
     if args.dry_run:
         return created, row, data
 
-    note_path, _created_note = tracker.make_posting_note(row, force=args.force_note)
-    row["posting_file"] = note_path
     tracker.write_rows(tracker.APPLICATIONS, tracker.APPLICATION_FIELDS, rows)
     row = associate_company(row)
-    snapshot = repository.write_posting_snapshot(row.get("id", ""), data.get("posting_snapshot", {}))
+    snapshot_values = data.get("posting_snapshot", {})
+    snapshot = (
+        repository.write_posting_snapshot(row.get("id", ""), snapshot_values)
+        if posting_snapshot_store.is_usable(snapshot_values)
+        else None
+    )
     data["posting_snapshot_id"] = snapshot.get("id", "") if snapshot else ""
     return created, row, data
+
+
+def archive_application_posting(application_id):
+    wanted = tracker.clean(application_id).upper()
+    if not wanted:
+        raise ValueError("Posting id is required.")
+    row = next(
+        (item for item in repository.read_applications() if item.get("id", "").upper() == wanted),
+        None,
+    )
+    if row is None:
+        raise ValueError(f"No posting found with id {wanted}.")
+    url = tracker.clean(row.get("source_url", ""))
+    if not url:
+        raise ValueError("Add a source URL before archiving this posting.")
+
+    argv = []
+    for flag, field in [
+        ("--company", "company"),
+        ("--role", "role"),
+        ("--location", "location"),
+        ("--work-mode", "work_mode"),
+        ("--source", "source"),
+        ("--compensation", "compensation"),
+    ]:
+        value = tracker.clean(row.get(field, ""))
+        if value:
+            argv.extend([flag, value])
+    argv.append(url)
+    data = extract_posting(url, build_parser().parse_args(argv))
+    snapshot_values = data.get("posting_snapshot", {})
+    if not posting_snapshot_store.is_usable(snapshot_values):
+        raise ValueError(posting_snapshot_store.failure_message(snapshot_values))
+    existing_ids = {item.get("id", "") for item in repository.read_posting_snapshots(wanted)}
+    snapshot = repository.write_posting_snapshot(wanted, snapshot_values)
+    if not snapshot:
+        raise ValueError("The posting source could not be archived.")
+    return {
+        "created": snapshot.get("id", "") not in existing_ids,
+        "snapshot": {
+            **{field: value for field, value in snapshot.items() if field != "source_html"},
+            "source_html_char_count": len(snapshot.get("source_html", "")),
+        },
+        "warnings": data.get("warnings", []),
+    }
 
 
 def build_parser():
@@ -595,7 +644,6 @@ def build_parser():
     parser.add_argument("urls", nargs="+")
     parser.add_argument("--overwrite", action="store_true", help="Overwrite non-empty inferred fields on existing rows.")
     parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument("--force-note", action="store_true", help="Regenerate posting note from the template.")
     parser.add_argument("--mark-closed", action="store_true", help="Trust closed-posting text from the fetch and archive the row.")
     parser.add_argument("--use-ai-actions", action="store_true", help="Use configured AI settings to add posting-specific actions.")
     parser.add_argument("--company")

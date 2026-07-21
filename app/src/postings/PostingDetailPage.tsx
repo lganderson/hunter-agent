@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useState, type FormEvent, type KeyboardEvent } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { ActionCommand, Priority, StatusPill, TagList } from "../components/Primitives";
-import { BriefcaseIcon, ExternalIcon, FilterIcon, PlusIcon } from "../components/Icons";
-import { createAction, createApplication, getPostingSnapshots, linkContact, makeNextAction, unlinkContact, updateAction, updateActionFields, updateApplication } from "../core/api";
+import { BriefcaseIcon, DownloadIcon, ExternalIcon, FilterIcon, PlusIcon } from "../components/Icons";
+import { archivePosting, createAction, createApplication, getPostingSnapshots, linkContact, makeNextAction, unlinkContact, updateAction, updateActionFields, updateApplication } from "../core/api";
 import { actionDueLabel, archivedPostingMarkdown, dueLabel, isActionComplete, markdownToHtml, normalizeTag, tagColorClass, tagList, titleCase } from "../core/format";
 import type { Action, ActionUpdates, AppState, Application, PostingSnapshot } from "../core/types";
 
@@ -17,6 +17,8 @@ export function PostingDetailPage({ data, refresh, createNew = false }: DetailPr
   const navigate = useNavigate();
   const app = createNew ? blankApplication(data) : data.applications.find(item => item.id === id);
   const [operationStatus, setOperationStatus] = useState("");
+  const [archiving, setArchiving] = useState(false);
+  const [archiveRefreshKey, setArchiveRefreshKey] = useState(0);
   const [stageDraft, setStageDraft] = useState(app?.stage || "");
   const [tagDraft, setTagDraft] = useState<string[]>([]);
   const [tagInput, setTagInput] = useState("");
@@ -88,6 +90,22 @@ export function PostingDetailPage({ data, refresh, createNew = false }: DetailPr
       }
     } catch (error) {
       setOperationStatus(`Could not save posting. Run make serve-app. ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  async function attemptArchivePosting() {
+    if (createNew || !app?.id || archiving) return;
+    setArchiving(true);
+    setOperationStatus("Archiving posting source…");
+    try {
+      const result = await archivePosting(app.id);
+      setArchiveRefreshKey(value => value + 1);
+      const warning = result.warnings.length ? ` ${result.warnings.join(" ")}` : "";
+      setOperationStatus(`${result.created ? "Posting archived." : "Posting archive is already current."}${warning}`);
+    } catch (error) {
+      setOperationStatus(`Could not archive posting. ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setArchiving(false);
     }
   }
 
@@ -223,12 +241,7 @@ export function PostingDetailPage({ data, refresh, createNew = false }: DetailPr
           </div>
         </article> : null}
 
-        {!createNew ? <PostingArchive applicationId={app.id} /> : null}
-
-        {!createNew ? <details className="panel posting-note-disclosure">
-          <summary><span><strong>Posting note</strong><small>Reference description and captured context</small></span><span className="disclosure-label">Show note</span></summary>
-          <div className="note-view" dangerouslySetInnerHTML={{ __html: markdownToHtml(app.posting_markdown || "# No posting note\n\nNo Markdown note is available for this row.") }} />
-        </details> : null}
+        {!createNew ? <PostingArchive applicationId={app.id} archiving={archiving} canArchive={Boolean(app.source_url)} onArchive={attemptArchivePosting} refreshKey={archiveRefreshKey} /> : null}
         </div>
 
         {!createNew ? <aside className="posting-workspace-rail">
@@ -275,7 +288,19 @@ export function PostingDetailPage({ data, refresh, createNew = false }: DetailPr
   );
 }
 
-function PostingArchive({ applicationId }: { applicationId: string }) {
+function PostingArchive({
+  applicationId,
+  archiving,
+  canArchive,
+  onArchive,
+  refreshKey
+}: {
+  applicationId: string;
+  archiving: boolean;
+  canArchive: boolean;
+  onArchive: () => void;
+  refreshKey: number;
+}) {
   const [snapshots, setSnapshots] = useState<PostingSnapshot[]>([]);
   const [selectedId, setSelectedId] = useState("");
   const [status, setStatus] = useState("Loading archived posting…");
@@ -299,7 +324,7 @@ function PostingArchive({ applicationId }: { applicationId: string }) {
     return () => {
       cancelled = true;
     };
-  }, [applicationId]);
+  }, [applicationId, refreshKey]);
 
   const selected = snapshots.find(snapshot => snapshot.id === selectedId) || snapshots[0];
   const captureLabel = selected?.captured_at ? new Date(selected.captured_at).toLocaleString() : "";
@@ -308,8 +333,22 @@ function PostingArchive({ applicationId }: { applicationId: string }) {
   return (
     <details className="panel posting-note-disclosure posting-archive-disclosure">
       <summary>
-        <span><strong>Archived posting</strong><small>{snapshots.length ? `${snapshots.length} saved source ${snapshots.length === 1 ? "copy" : "copies"}` : "Full source captured during ingestion"}</small></span>
-        <span className="disclosure-label">Show archive</span>
+        <span><strong>Archived posting</strong><small>{snapshots.length ? `${snapshots.length} saved source ${snapshots.length === 1 ? "copy" : "copies"}` : "No saved source copy"}</small></span>
+        <span className="posting-archive-summary-actions">
+          <button
+            className="button compact"
+            type="button"
+            disabled={archiving || !canArchive}
+            onClick={event => {
+              event.preventDefault();
+              event.stopPropagation();
+              onArchive();
+            }}
+          >
+            <DownloadIcon size={14} /> {archiving ? "Archiving…" : "Archive posting"}
+          </button>
+          <span className="disclosure-label">Show archive</span>
+        </span>
       </summary>
       <div className="posting-archive-view">
         {status ? <p className="posting-archive-status">{status}</p> : null}
@@ -629,9 +668,6 @@ function blankApplication(data: AppState): Application {
     resume_version: "",
     cover_letter: "",
     notes: "",
-    posting_file: "",
-    posting_markdown: "",
-    posting_file_exists: false,
     tag_list: [],
     is_closed: false,
     is_active: true,

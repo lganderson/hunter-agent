@@ -13,6 +13,7 @@ if str(ROOT_FOR_IMPORTS) not in sys.path:
     sys.path.insert(0, str(ROOT_FOR_IMPORTS))
 
 from hunter import paths as hunter_paths
+from hunter import posting_snapshots as posting_snapshot_store
 from hunter import repository
 from hunter import agent as hunter_agent
 from hunter import app_state
@@ -25,6 +26,7 @@ from hunter import settings as settings_store
 from hunter import workflow as workflow_store
 
 import action_engine
+import ingest_postings
 
 
 ROOT = hunter_paths.ROOT
@@ -114,6 +116,8 @@ class AppHandler(SimpleHTTPRequestHandler):
                 return
             snapshots = []
             for snapshot in repository.read_posting_snapshots(application_id):
+                if not posting_snapshot_store.is_usable(snapshot):
+                    continue
                 snapshots.append({
                     **{field: snapshot.get(field, "") for field in snapshot if field != "source_html"},
                     "source_html_char_count": len(snapshot.get("source_html", "")),
@@ -181,6 +185,16 @@ class AppHandler(SimpleHTTPRequestHandler):
             payload = self.read_json()
             created, warnings = action_engine.generate_actions(use_ai=bool(payload.get("use_ai")))
             self.send_json({"created": len(created), "warnings": warnings})
+            return
+
+        if path == "/api/postings/archive":
+            payload = self.read_json()
+            try:
+                result = ingest_postings.archive_application_posting(payload.get("id", ""))
+            except ValueError as exc:
+                self.send_json({"error": str(exc)}, status=400)
+                return
+            self.send_json(result)
             return
 
         if path == "/api/agent/chat":

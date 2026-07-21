@@ -86,7 +86,7 @@ python3 hunter.py migrate-to-sqlite
 python3 hunter.py migrate-postings
 ```
 
-The frontend, local API, posting notes, and action workflows use `data/hunter.sqlite` as the primary local store. CSV files are supported as import/export artifacts:
+The frontend, local API, archived posting sources, and action workflows use `data/hunter.sqlite` as the primary local store. CSV files are supported as import/export artifacts:
 
 ```bash
 python3 hunter.py export-csv
@@ -121,7 +121,7 @@ The current local runtime architecture is documented in `docs/local-architecture
 ## Core Workflow
 
 1. Add an interesting posting from **Postings → Add posting**, with `python3 hunter.py add`, or with `python3 hunter.py ingest`.
-2. Create or refresh the posting note in SQLite from `templates/job-posting.md`.
+2. Archive the employer source from the posting detail page so the description remains available if the live page disappears.
 3. Track each meaningful state change with `stage`, `outcome`, and `tags`.
 4. Keep the next concrete action and due date filled in for every active application.
 5. Review due actions regularly in the dashboard Actions view.
@@ -234,8 +234,7 @@ python3 scripts/tracker.py add \
   --role "Product Manager" \
   --url "https://example.com/job" \
   --source "Company site" \
-  --tags "referral" \
-  --make-note
+  --tags "referral"
 ```
 
 Update an application:
@@ -260,7 +259,7 @@ detail page; completing or reopening actions recomputes the posting summary.
 - `templates/`: reusable note and message templates.
 - `exports/`: generated exports or reports.
 
-Posting ingestion saves an immutable local source snapshot in SQLite alongside the editable posting note. Each distinct capture keeps the original and final URL, capture time, HTTP status, readable page text, raw fetched HTML, warnings, and a content hash. Re-ingesting unchanged content is deduplicated; changed source pages remain available as separate saved versions in the posting detail view and company-data exports.
+Posting ingestion and the posting-detail **Archive posting** action save immutable local source snapshots in SQLite. Each distinct capture keeps the original and final URL, capture time, HTTP status, readable page text, raw fetched HTML, warnings, and a content hash. Re-archiving unchanged content is deduplicated; changed source pages remain available as separate saved versions in the posting detail view and company-data exports. Legacy generated posting-note rows remain stored for backward compatibility but are no longer created or shown by the app.
 
 ## Workflow Stages
 

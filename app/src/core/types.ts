@@ -21,9 +21,6 @@ export type Application = {
   resume_version: string;
   cover_letter: string;
   notes: string;
-  posting_file: string;
-  posting_markdown: string;
-  posting_file_exists: boolean;
   tag_list: string[];
   is_closed: boolean;
   is_active: boolean;

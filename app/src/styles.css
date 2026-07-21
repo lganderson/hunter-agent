@@ -2589,6 +2589,13 @@
       font-size: 0;
     }
 
+    .posting-archive-summary-actions {
+      display: flex;
+      align-items: center;
+      flex: 0 0 auto;
+      gap: 12px;
+    }
+
     .posting-note-disclosure[open] .disclosure-label::after {
       content: "Hide note";
       font-size: 11px;

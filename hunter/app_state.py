@@ -3,7 +3,7 @@
 from datetime import date, datetime
 
 from . import actions as action_store
-from . import paths, repository, schema, storage, workflow
+from . import repository, schema, storage, workflow
 
 
 COMPLETED_ACTION_STATUSES = schema.COMPLETED_ACTION_STATUSES
@@ -29,17 +29,6 @@ def read_applications():
             normalized["next_action_date"] = next_action.get("due_date", "") if next_action else ""
         normalized["tags"] = normalized.get("tags", "")
         normalized["tag_list"] = storage.split_tags(normalized["tags"])
-        posting_file = normalized.get("posting_file", "")
-        stored_note = repository.read_posting_note(normalized.get("id", ""))
-        note_path = paths.ROOT / posting_file if posting_file else None
-        file_exists = bool(note_path and note_path.exists())
-        if stored_note:
-            normalized["posting_markdown"] = stored_note.get("content", "")
-            normalized["posting_file"] = stored_note.get("path") or posting_file
-            normalized["posting_file_exists"] = True
-        else:
-            normalized["posting_markdown"] = note_path.read_text(encoding="utf-8") if file_exists else ""
-            normalized["posting_file_exists"] = file_exists
     return rows
 
 
