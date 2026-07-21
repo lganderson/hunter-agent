@@ -181,8 +181,15 @@ def readable_page_text(page_html):
             break
         text = decoded
     text = re.sub(r"<(script|style)\b.*?</\1>", " ", text, flags=re.I | re.S)
+    for level in range(1, 7):
+        heading_level = min(3, level)
+        text = re.sub(rf"<h{level}\b[^>]*>", f"\n{'#' * heading_level} ", text, flags=re.I)
+        text = re.sub(rf"</h{level}\s*>", "\n", text, flags=re.I)
+    text = re.sub(r"<li\b[^>]*>", "\n- ", text, flags=re.I)
+    text = re.sub(r"<(?:strong|b)\b[^>]*>", "**", text, flags=re.I)
+    text = re.sub(r"</(?:strong|b)\s*>", "**", text, flags=re.I)
     text = re.sub(r"<br\s*/?>", "\n", text, flags=re.I)
-    text = re.sub(r"</(?:article|div|h[1-6]|li|main|p|section|tr)\s*>", "\n", text, flags=re.I)
+    text = re.sub(r"</(?:article|div|li|main|p|section|tr)\s*>", "\n", text, flags=re.I)
     text = re.sub(r"<[^>]+>", " ", text)
     lines = [clean_text(line) for line in text.splitlines()]
     return "\n".join(line for line in lines if line)

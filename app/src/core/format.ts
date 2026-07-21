@@ -69,13 +69,7 @@ export function dateOnlyLabel(value: string): string {
   });
 }
 
-const ARCHIVE_BLOCK_TAGS = new Set([
-  "ADDRESS", "ARTICLE", "ASIDE", "BLOCKQUOTE", "DIV", "DL", "DT", "DD", "FIGCAPTION", "FIGURE",
-  "FOOTER", "H1", "H2", "H3", "H4", "H5", "H6", "HEADER", "HR", "LI", "MAIN", "NAV", "OL",
-  "P", "PRE", "SECTION", "TABLE", "TBODY", "TD", "TFOOT", "TH", "THEAD", "TR", "UL"
-]);
-
-export function archivedPostingText(value: string): string {
+export function archivedPostingMarkdown(value: string): string {
   const original = value || "";
   if (!/(?:<[a-z][^>]*>|&lt;[a-z][^&]*&gt;)/i.test(original) || typeof DOMParser === "undefined") {
     return original;
@@ -90,32 +84,45 @@ export function archivedPostingText(value: string): string {
     parsed = new DOMParser().parseFromString(source, "text/html");
   }
 
-  const parts: string[] = [];
-  function appendBreak() {
-    if (parts.length && parts[parts.length - 1] !== "\n") parts.push("\n");
-  }
-  function visit(node: globalThis.Node) {
-    if (node.nodeType === 3) {
-      parts.push(node.textContent || "");
-      return;
-    }
-    if (node.nodeType !== 1) return;
+  function inlineMarkdown(node: globalThis.Node): string {
+    if (node.nodeType === 3) return node.textContent || "";
+    if (node.nodeType !== 1) return "";
     const element = node as HTMLElement;
-    if (element.tagName === "BR") {
-      appendBreak();
-      return;
-    }
-    if (element.tagName === "LI") parts.push("• ");
-    element.childNodes.forEach(visit);
-    if (ARCHIVE_BLOCK_TAGS.has(element.tagName)) appendBreak();
+    const content = Array.from(element.childNodes).map(inlineMarkdown).join("").replace(/\s+/g, " ").trim();
+    if (!content) return "";
+    if (element.tagName === "STRONG" || element.tagName === "B") return `**${content}**`;
+    if (element.tagName === "CODE") return `\`${content}\``;
+    if (element.tagName === "BR") return "\n";
+    return content;
   }
-  parsed.body.childNodes.forEach(visit);
 
-  return parts.join("")
-    .split("\n")
-    .map(line => line.replace(/\s+/g, " ").trim())
+  function blockMarkdown(node: globalThis.Node): string {
+    if (node.nodeType === 3) return (node.textContent || "").replace(/\s+/g, " ").trim();
+    if (node.nodeType !== 1) return "";
+    const element = node as HTMLElement;
+    const tag = element.tagName;
+    if (/^H[1-6]$/.test(tag)) {
+      const level = Math.min(3, Number.parseInt(tag.slice(1), 10));
+      const heading = (element.textContent || "").replace(/\s+/g, " ").trim();
+      return `${"#".repeat(level)} ${heading}`;
+    }
+    if (tag === "P") return inlineMarkdown(element);
+    if (tag === "PRE") return `\`\`\`\n${element.textContent || ""}\n\`\`\``;
+    if (tag === "UL" || tag === "OL") {
+      return Array.from(element.children)
+        .filter(child => child.tagName === "LI")
+        .map((child, index) => `${tag === "OL" ? `${index + 1}.` : "-"} ${inlineMarkdown(child)}`)
+        .join("\n");
+    }
+    if (tag === "LI") return `- ${inlineMarkdown(element)}`;
+    return Array.from(element.childNodes).map(blockMarkdown).filter(Boolean).join("\n\n");
+  }
+
+  return Array.from(parsed.body.childNodes)
+    .map(blockMarkdown)
     .filter(Boolean)
-    .join("\n")
+    .join("\n\n")
+    .replace(/\n{3,}/g, "\n\n")
     .trim();
 }
 

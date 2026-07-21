@@ -3,7 +3,7 @@ import { Link, useNavigate, useParams } from "react-router-dom";
 import { ActionCommand, Priority, StatusPill, TagList } from "../components/Primitives";
 import { BriefcaseIcon, ExternalIcon, FilterIcon, PlusIcon } from "../components/Icons";
 import { createAction, createApplication, getPostingSnapshots, linkContact, makeNextAction, unlinkContact, updateAction, updateActionFields, updateApplication } from "../core/api";
-import { actionDueLabel, archivedPostingText, dueLabel, isActionComplete, markdownToHtml, normalizeTag, tagColorClass, tagList, titleCase } from "../core/format";
+import { actionDueLabel, archivedPostingMarkdown, dueLabel, isActionComplete, markdownToHtml, normalizeTag, tagColorClass, tagList, titleCase } from "../core/format";
 import type { Action, ActionUpdates, AppState, Application, PostingSnapshot } from "../core/types";
 
 type DetailProps = {
@@ -303,7 +303,7 @@ function PostingArchive({ applicationId }: { applicationId: string }) {
 
   const selected = snapshots.find(snapshot => snapshot.id === selectedId) || snapshots[0];
   const captureLabel = selected?.captured_at ? new Date(selected.captured_at).toLocaleString() : "";
-  const readableContent = archivedPostingText(selected?.content_text || "");
+  const readableContent = archivedPostingMarkdown(selected?.content_text || "");
 
   return (
     <details className="panel posting-note-disclosure posting-archive-disclosure">
@@ -324,7 +324,12 @@ function PostingArchive({ applicationId }: { applicationId: string }) {
             <a className="button compact" href={selected.final_url || selected.source_url} target="_blank" rel="noreferrer"><ExternalIcon size={14} /> Open source</a>
           </div>
           {selected.warnings ? <p className="posting-archive-warning">{selected.warnings}</p> : null}
-          <div className="posting-archive-content">{readableContent || "No readable page text was captured. The fetch metadata and raw source response remain stored locally."}</div>
+          <div
+            className="posting-archive-content"
+            dangerouslySetInnerHTML={{
+              __html: markdownToHtml(readableContent || "No readable page text was captured. The fetch metadata and raw source response remain stored locally.")
+            }}
+          />
         </> : null}
       </div>
     </details>

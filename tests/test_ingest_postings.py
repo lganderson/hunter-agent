@@ -279,6 +279,7 @@ class IngestPostingsTest(unittest.TestCase):
         self.assertEqual(data["location"], "Multiple Locations")
         self.assertEqual(snapshots[0]["http_status"], "200")
         self.assertEqual(snapshots[0]["final_url"], url)
+        self.assertIn("## What you'll do", snapshots[0]["content_text"])
         self.assertIn("Own platform product strategy and roadmap.", snapshots[0]["content_text"])
         self.assertIn("Lead cross-functional teams.", snapshots[0]["content_text"])
         self.assertNotIn("<h2>", snapshots[0]["content_text"])
