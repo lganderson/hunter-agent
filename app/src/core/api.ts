@@ -91,6 +91,10 @@ export function archivePosting(applicationId: string): Promise<{ created: boolea
   return postJson("/api/postings/archive", { id: applicationId });
 }
 
+export function saveManualPostingArchive(applicationId: string, content: string): Promise<{ created: boolean; snapshot: PostingSnapshot }> {
+  return postJson("/api/postings/archive/manual", { id: applicationId, content });
+}
+
 export async function getSettings(): Promise<SettingsStatus> {
   return readJson<SettingsStatus>(await fetch("/api/settings"));
 }

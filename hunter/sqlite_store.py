@@ -267,12 +267,19 @@ def initialize():
             "final_url TEXT NOT NULL DEFAULT '', "
             "captured_at TEXT NOT NULL, "
             "http_status TEXT NOT NULL DEFAULT '', "
+            "capture_method TEXT NOT NULL DEFAULT 'fetch', "
+            "capture_model TEXT NOT NULL DEFAULT '', "
+            "sources_json TEXT NOT NULL DEFAULT '[]', "
             "content_hash TEXT NOT NULL, "
             "content_text TEXT NOT NULL DEFAULT '', "
             "source_html TEXT NOT NULL DEFAULT '', "
             "warnings TEXT NOT NULL DEFAULT '', "
             "UNIQUE(application_id, content_hash)"
             ")"
+        )
+        ensure_text_columns(connection, "posting_snapshots", schema.POSTING_SNAPSHOT_FIELDS[1:])
+        connection.execute(
+            "UPDATE posting_snapshots SET capture_method = 'fetch' WHERE capture_method = ''"
         )
         connection.execute(
             "CREATE TABLE IF NOT EXISTS agent_messages ("
@@ -366,7 +373,7 @@ def initialize():
         )
         ensure_text_columns(connection, "company_career_scans", schema.COMPANY_CAREER_SCAN_FIELDS)
         connection.execute(
-            "INSERT INTO meta(key, value) VALUES('schema_version', '6') "
+            "INSERT INTO meta(key, value) VALUES('schema_version', '8') "
             "ON CONFLICT(key) DO UPDATE SET value=excluded.value"
         )
 
@@ -763,7 +770,8 @@ def read_posting_snapshots(application_id=""):
         params.append(wanted)
     with connect() as connection:
         rows = connection.execute(
-            "SELECT id, application_id, source_url, final_url, captured_at, http_status, "
+            "SELECT id, application_id, source_url, final_url, captured_at, http_status, capture_method, "
+            "capture_model, sources_json, "
             "content_hash, content_text, source_html, warnings FROM posting_snapshots"
             f"{where} ORDER BY captured_at DESC, id DESC",
             params,
@@ -785,7 +793,8 @@ def write_posting_snapshot(application_id, values):
     values = values or {}
     content_text = values.get("content_text", "") or ""
     source_html = values.get("source_html", "") or ""
-    fingerprint = source_html or content_text or "|".join(
+    capture_method = storage.clean(values.get("capture_method")) or "fetch"
+    fingerprint = (content_text if capture_method == "ai-web" else source_html) or content_text or "|".join(
         storage.clean(values.get(field, ""))
         for field in ["source_url", "final_url", "http_status", "warnings"]
     )
@@ -797,6 +806,9 @@ def write_posting_snapshot(application_id, values):
         "final_url": storage.clean(values.get("final_url")),
         "captured_at": captured_at,
         "http_status": storage.clean(values.get("http_status")),
+        "capture_method": capture_method,
+        "capture_model": storage.clean(values.get("capture_model")),
+        "sources_json": values.get("sources_json", "[]") or "[]",
         "content_hash": content_hash,
         "content_text": content_text,
         "source_html": source_html,
@@ -805,12 +817,13 @@ def write_posting_snapshot(application_id, values):
     with connect() as connection:
         connection.execute(
             "INSERT INTO posting_snapshots("
-            "application_id, source_url, final_url, captured_at, http_status, content_hash, content_text, source_html, warnings"
-            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(application_id, content_hash) DO NOTHING",
+            "application_id, source_url, final_url, captured_at, http_status, capture_method, capture_model, sources_json, content_hash, content_text, source_html, warnings"
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(application_id, content_hash) DO NOTHING",
             tuple(row[field] for field in schema.POSTING_SNAPSHOT_FIELDS[1:]),
         )
         saved = connection.execute(
-            "SELECT id, application_id, source_url, final_url, captured_at, http_status, "
+            "SELECT id, application_id, source_url, final_url, captured_at, http_status, capture_method, "
+            "capture_model, sources_json, "
             "content_hash, content_text, source_html, warnings FROM posting_snapshots "
             "WHERE application_id = ? AND content_hash = ?",
             (application_id, content_hash),

@@ -197,6 +197,19 @@ class AppHandler(SimpleHTTPRequestHandler):
             self.send_json(result)
             return
 
+        if path == "/api/postings/archive/manual":
+            payload = self.read_json()
+            try:
+                result = ingest_postings.save_manual_posting_snapshot(
+                    payload.get("id", ""),
+                    payload.get("content", ""),
+                )
+            except ValueError as exc:
+                self.send_json({"error": str(exc)}, status=400)
+                return
+            self.send_json(result)
+            return
+
         if path == "/api/agent/chat":
             payload = self.read_json()
             if payload.get("api_version") != chat_history.API_VERSION:

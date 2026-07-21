@@ -548,6 +548,23 @@ def associate_company(row):
     return application_store.update_application(row.get("id", ""), {"company_id": company.get("id", "")})
 
 
+def recover_snapshot_with_openai(row, data):
+    snapshot_values = data.get("posting_snapshot", {})
+    if posting_snapshot_store.is_usable(snapshot_values):
+        return snapshot_values, ""
+    recovered, recovery_error = action_engine.recover_posting_with_openai(row)
+    if not recovered:
+        return snapshot_values, recovery_error
+
+    recovery_warning = recovered.get("warnings", "")
+    original_warnings = [item for item in [snapshot_values.get("warnings", ""), recovery_warning] if item]
+    recovered["warnings"] = "\n".join(original_warnings)
+    data["posting_snapshot"] = recovered
+    if recovery_warning and recovery_warning not in data.get("warnings", []):
+        data.setdefault("warnings", []).append(recovery_warning)
+    return recovered, ""
+
+
 def upsert(url, args):
     rows = tracker.read_rows(tracker.APPLICATIONS, tracker.APPLICATION_FIELDS)
     data = extract_posting(url, args)
@@ -582,9 +599,9 @@ def upsert(url, args):
     if args.dry_run:
         return created, row, data
 
+    snapshot_values, _recovery_error = recover_snapshot_with_openai(row, data)
     tracker.write_rows(tracker.APPLICATIONS, tracker.APPLICATION_FIELDS, rows)
     row = associate_company(row)
-    snapshot_values = data.get("posting_snapshot", {})
     snapshot = (
         repository.write_posting_snapshot(row.get("id", ""), snapshot_values)
         if posting_snapshot_store.is_usable(snapshot_values)
@@ -622,9 +639,10 @@ def archive_application_posting(application_id):
             argv.extend([flag, value])
     argv.append(url)
     data = extract_posting(url, build_parser().parse_args(argv))
-    snapshot_values = data.get("posting_snapshot", {})
+    snapshot_values, recovery_error = recover_snapshot_with_openai(row, data)
     if not posting_snapshot_store.is_usable(snapshot_values):
-        raise ValueError(posting_snapshot_store.failure_message(snapshot_values))
+        messages = [posting_snapshot_store.failure_message(snapshot_values), recovery_error]
+        raise ValueError(" ".join(message for message in messages if message))
     existing_ids = {item.get("id", "") for item in repository.read_posting_snapshots(wanted)}
     snapshot = repository.write_posting_snapshot(wanted, snapshot_values)
     if not snapshot:
@@ -636,6 +654,41 @@ def archive_application_posting(application_id):
             "source_html_char_count": len(snapshot.get("source_html", "")),
         },
         "warnings": data.get("warnings", []),
+    }
+
+
+def save_manual_posting_snapshot(application_id, content):
+    wanted = tracker.clean(application_id).upper()
+    if not wanted:
+        raise ValueError("Posting id is required.")
+    row = next(
+        (item for item in repository.read_applications() if item.get("id", "").upper() == wanted),
+        None,
+    )
+    if row is None:
+        raise ValueError(f"No posting found with id {wanted}.")
+    raw_content = content if isinstance(content, str) else ""
+    if not raw_content.strip():
+        raise ValueError("Paste the posting content before saving it.")
+    readable_content = readable_page_text(raw_content)
+    if not readable_content:
+        raise ValueError("The pasted content did not contain readable posting text.")
+
+    source_url = tracker.clean(row.get("source_url", ""))
+    existing_ids = {item.get("id", "") for item in repository.read_posting_snapshots(wanted)}
+    snapshot = repository.write_posting_snapshot(wanted, {
+        "source_url": source_url,
+        "final_url": source_url,
+        "capture_method": "manual",
+        "content_text": readable_content,
+        "source_html": raw_content,
+    })
+    return {
+        "created": snapshot.get("id", "") not in existing_ids,
+        "snapshot": {
+            **{field: value for field, value in snapshot.items() if field != "source_html"},
+            "source_html_char_count": len(snapshot.get("source_html", "")),
+        },
     }
 
 

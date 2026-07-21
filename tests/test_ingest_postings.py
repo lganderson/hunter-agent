@@ -225,6 +225,7 @@ class IngestPostingsTest(unittest.TestCase):
         self.assertEqual(data["posting_snapshot_id"], snapshots[0]["id"])
         self.assertEqual(snapshots[0]["source_html"], page_html)
         self.assertEqual(snapshots[0]["http_status"], "200")
+        self.assertEqual(snapshots[0]["capture_method"], "fetch")
         self.assertIn("Own the complete platform roadmap.", snapshots[0]["content_text"])
         self.assertIn("Lead cross-functional teams.", snapshots[0]["content_text"])
         self.assertTrue(snapshots[0]["content_hash"])
@@ -346,6 +347,85 @@ class IngestPostingsTest(unittest.TestCase):
             ingest_postings.fetch = original_fetch
 
         self.assertEqual(repository.read_posting_snapshots("A0043"), [])
+
+    def test_archive_existing_posting_recovers_with_openai_web_search(self):
+        sqlite_store.initialize()
+        repository.write_applications([{
+            "id": "A0046",
+            "company": "Example",
+            "role": "Platform Product Manager",
+            "source_url": "https://example.com/jobs/platform-product-manager",
+        }])
+        original_fetch = ingest_postings.fetch
+        original_recovery = ingest_postings.action_engine.recover_posting_with_openai
+        ingest_postings.fetch = lambda url: {
+            "status": 403,
+            "final_url": url,
+            "html": "<html><body>Enable JavaScript and cookies to continue</body></html>",
+            "error": "HTTP Error 403: Forbidden",
+        }
+        ingest_postings.action_engine.recover_posting_with_openai = lambda app: ({
+            "source_url": app["source_url"],
+            "final_url": app["source_url"],
+            "capture_method": "ai-web",
+            "capture_model": "gpt-5.5",
+            "sources_json": json.dumps([{"url": app["source_url"], "title": "Platform PM"}]),
+            "content_text": "# Platform Product Manager\n\nOwn the complete platform roadmap and partner across functions.",
+            "source_html": json.dumps({"id": "response-test"}),
+            "warnings": "Cited AI reconstruction, not raw source HTML.",
+        }, "")
+        try:
+            result = ingest_postings.archive_application_posting("A0046")
+        finally:
+            ingest_postings.fetch = original_fetch
+            ingest_postings.action_engine.recover_posting_with_openai = original_recovery
+
+        snapshot = repository.read_posting_snapshots("A0046")[0]
+        self.assertTrue(result["created"])
+        self.assertEqual(snapshot["capture_method"], "ai-web")
+        self.assertEqual(snapshot["capture_model"], "gpt-5.5")
+        self.assertEqual(json.loads(snapshot["sources_json"])[0]["title"], "Platform PM")
+        self.assertIn("Own the complete platform roadmap", snapshot["content_text"])
+        self.assertIn("HTTP Error 403", snapshot["warnings"])
+        self.assertIn("not raw source HTML", snapshot["warnings"])
+
+    def test_manual_posting_archive_preserves_pasted_content_and_deduplicates(self):
+        sqlite_store.initialize()
+        repository.write_applications([{
+            "id": "A0044",
+            "company": "Example",
+            "role": "Platform Product Manager",
+            "source_url": "https://example.com/jobs/platform-product-manager",
+        }])
+        content = (
+            "<h1>Platform Product Manager</h1>"
+            "<p>Own the roadmap.</p>"
+            "<h2>What you'll do</h2><ul><li>Lead cross-functional teams.</li></ul>"
+        )
+
+        first = ingest_postings.save_manual_posting_snapshot("A0044", content)
+        second = ingest_postings.save_manual_posting_snapshot("A0044", content)
+
+        snapshots = repository.read_posting_snapshots("A0044")
+        self.assertTrue(first["created"])
+        self.assertFalse(second["created"])
+        self.assertEqual(len(snapshots), 1)
+        self.assertEqual(snapshots[0]["capture_method"], "manual")
+        self.assertEqual(snapshots[0]["http_status"], "")
+        self.assertEqual(snapshots[0]["source_html"], content)
+        self.assertIn("# Platform Product Manager", snapshots[0]["content_text"])
+        self.assertIn("- Lead cross-functional teams.", snapshots[0]["content_text"])
+        self.assertEqual(first["snapshot"]["source_html_char_count"], len(content))
+        self.assertNotIn("source_html", first["snapshot"])
+
+    def test_manual_posting_archive_rejects_blank_content(self):
+        sqlite_store.initialize()
+        repository.write_applications([{"id": "A0045", "company": "Example", "role": "Manager"}])
+
+        with self.assertRaisesRegex(ValueError, "Paste the posting content"):
+            ingest_postings.save_manual_posting_snapshot("A0045", "  \n  ")
+
+        self.assertEqual(repository.read_posting_snapshots("A0045"), [])
 
 
 if __name__ == "__main__":

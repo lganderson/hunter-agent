@@ -37,6 +37,9 @@ export type PostingSnapshot = {
   final_url: string;
   captured_at: string;
   http_status: string;
+  capture_method: "fetch" | "manual" | "ai-web" | string;
+  capture_model: string;
+  sources_json: string;
   content_hash: string;
   content_text: string;
   warnings: string;

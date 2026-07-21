@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState, type FormEvent, type KeyboardEvent } from
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { ActionCommand, Priority, StatusPill, TagList } from "../components/Primitives";
 import { BriefcaseIcon, DownloadIcon, ExternalIcon, FilterIcon, PlusIcon } from "../components/Icons";
-import { archivePosting, createAction, createApplication, getPostingSnapshots, linkContact, makeNextAction, unlinkContact, updateAction, updateActionFields, updateApplication } from "../core/api";
+import { archivePosting, createAction, createApplication, getPostingSnapshots, linkContact, makeNextAction, saveManualPostingArchive, unlinkContact, updateAction, updateActionFields, updateApplication } from "../core/api";
 import { actionDueLabel, archivedPostingMarkdown, dueLabel, isActionComplete, markdownToHtml, normalizeTag, tagColorClass, tagList, titleCase } from "../core/format";
 import type { Action, ActionUpdates, AppState, Application, PostingSnapshot } from "../core/types";
 
@@ -18,6 +18,7 @@ export function PostingDetailPage({ data, refresh, createNew = false }: DetailPr
   const app = createNew ? blankApplication(data) : data.applications.find(item => item.id === id);
   const [operationStatus, setOperationStatus] = useState("");
   const [archiving, setArchiving] = useState(false);
+  const [savingManualArchive, setSavingManualArchive] = useState(false);
   const [archiveRefreshKey, setArchiveRefreshKey] = useState(0);
   const [stageDraft, setStageDraft] = useState(app?.stage || "");
   const [tagDraft, setTagDraft] = useState<string[]>([]);
@@ -106,6 +107,23 @@ export function PostingDetailPage({ data, refresh, createNew = false }: DetailPr
       setOperationStatus(`Could not archive posting. ${error instanceof Error ? error.message : String(error)}`);
     } finally {
       setArchiving(false);
+    }
+  }
+
+  async function savePastedPosting(content: string) {
+    if (createNew || !app?.id || savingManualArchive) return false;
+    setSavingManualArchive(true);
+    setOperationStatus("Saving pasted posting content…");
+    try {
+      const result = await saveManualPostingArchive(app.id, content);
+      setArchiveRefreshKey(value => value + 1);
+      setOperationStatus(result.created ? "Pasted posting content archived." : "That pasted content is already archived.");
+      return true;
+    } catch (error) {
+      setOperationStatus(`Could not save pasted posting content. ${error instanceof Error ? error.message : String(error)}`);
+      return false;
+    } finally {
+      setSavingManualArchive(false);
     }
   }
 
@@ -241,7 +259,7 @@ export function PostingDetailPage({ data, refresh, createNew = false }: DetailPr
           </div>
         </article> : null}
 
-        {!createNew ? <PostingArchive applicationId={app.id} archiving={archiving} canArchive={Boolean(app.source_url)} onArchive={attemptArchivePosting} refreshKey={archiveRefreshKey} /> : null}
+        {!createNew ? <PostingArchive applicationId={app.id} archiving={archiving} canArchive={Boolean(app.source_url)} onArchive={attemptArchivePosting} onSavePasted={savePastedPosting} refreshKey={archiveRefreshKey} savingPasted={savingManualArchive} /> : null}
         </div>
 
         {!createNew ? <aside className="posting-workspace-rail">
@@ -293,20 +311,28 @@ function PostingArchive({
   archiving,
   canArchive,
   onArchive,
-  refreshKey
+  onSavePasted,
+  refreshKey,
+  savingPasted
 }: {
   applicationId: string;
   archiving: boolean;
   canArchive: boolean;
   onArchive: () => void;
+  onSavePasted: (content: string) => Promise<boolean>;
   refreshKey: number;
+  savingPasted: boolean;
 }) {
   const [snapshots, setSnapshots] = useState<PostingSnapshot[]>([]);
   const [selectedId, setSelectedId] = useState("");
   const [status, setStatus] = useState("Loading archived posting…");
+  const [showPasteForm, setShowPasteForm] = useState(false);
+  const [pastedContent, setPastedContent] = useState("");
 
   useEffect(() => {
     let cancelled = false;
+    setShowPasteForm(false);
+    setPastedContent("");
     setStatus("Loading archived posting…");
     getPostingSnapshots(applicationId)
       .then(nextSnapshots => {
@@ -329,12 +355,36 @@ function PostingArchive({
   const selected = snapshots.find(snapshot => snapshot.id === selectedId) || snapshots[0];
   const captureLabel = selected?.captured_at ? new Date(selected.captured_at).toLocaleString() : "";
   const readableContent = archivedPostingMarkdown(selected?.content_text || "");
+  const recoverySources = postingSnapshotSources(selected);
+
+  async function submitPastedContent(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!pastedContent.trim() || savingPasted) return;
+    const saved = await onSavePasted(pastedContent);
+    if (saved) {
+      setPastedContent("");
+      setShowPasteForm(false);
+    }
+  }
 
   return (
     <details className="panel posting-note-disclosure posting-archive-disclosure">
       <summary>
-        <span><strong>Archived posting</strong><small>{snapshots.length ? `${snapshots.length} saved source ${snapshots.length === 1 ? "copy" : "copies"}` : "No saved source copy"}</small></span>
+        <span><strong>Archived posting</strong><small>{snapshots.length ? `${snapshots.length} saved archive ${snapshots.length === 1 ? "version" : "versions"}` : "No saved archive version"}</small></span>
         <span className="posting-archive-summary-actions">
+          <button
+            className="button compact quiet"
+            type="button"
+            disabled={savingPasted}
+            onClick={event => {
+              event.preventDefault();
+              event.stopPropagation();
+              event.currentTarget.closest("details")?.setAttribute("open", "");
+              setShowPasteForm(true);
+            }}
+          >
+            Paste content
+          </button>
           <button
             className="button compact"
             type="button"
@@ -351,18 +401,38 @@ function PostingArchive({
         </span>
       </summary>
       <div className="posting-archive-view">
+        {showPasteForm ? (
+          <form className="posting-archive-paste-form" onSubmit={submitPastedContent}>
+            <label htmlFor={`posting-archive-content-${applicationId}`}>
+              <strong>Paste posting content</strong>
+              <span>Use this when Hunter cannot retrieve the employer page. Plain text or copied HTML will be formatted for the archive.</span>
+            </label>
+            <textarea
+              id={`posting-archive-content-${applicationId}`}
+              autoFocus
+              value={pastedContent}
+              onChange={event => setPastedContent(event.target.value)}
+              placeholder="Paste the full job description here…"
+            />
+            <div className="posting-archive-paste-actions">
+              <button className="button compact primary" type="submit" disabled={savingPasted || !pastedContent.trim()}>{savingPasted ? "Saving…" : "Save to archive"}</button>
+              <button className="button compact quiet" type="button" disabled={savingPasted} onClick={() => { setShowPasteForm(false); setPastedContent(""); }}>Cancel</button>
+            </div>
+          </form>
+        ) : null}
         {status ? <p className="posting-archive-status">{status}</p> : null}
         {!status && !selected ? <p className="posting-archive-status">No archived source is available for this posting yet.</p> : null}
         {selected ? <>
           <div className="posting-archive-toolbar">
             <div>
               <strong>{captureLabel || "Captured posting"}</strong>
-              <span>HTTP {selected.http_status || "unknown"} · {readableContent.length.toLocaleString()} readable characters · {selected.source_html_char_count.toLocaleString()} source characters</span>
+              <span>{postingSnapshotMethodLabel(selected)} · {readableContent.length.toLocaleString()} readable characters · {selected.source_html_char_count.toLocaleString()} {selected.capture_method === "manual" ? "pasted" : selected.capture_method === "ai-web" ? "response" : "source"} characters</span>
             </div>
-            {snapshots.length > 1 ? <label>Saved version<select aria-label="Archived posting version" value={selected.id} onChange={event => setSelectedId(event.target.value)}>{snapshots.map(snapshot => <option key={snapshot.id} value={snapshot.id}>{new Date(snapshot.captured_at).toLocaleString()}</option>)}</select></label> : null}
-            <a className="button compact" href={selected.final_url || selected.source_url} target="_blank" rel="noreferrer"><ExternalIcon size={14} /> Open source</a>
+            {snapshots.length > 1 ? <label>Saved version<select aria-label="Archived posting version" value={selected.id} onChange={event => setSelectedId(event.target.value)}>{snapshots.map(snapshot => <option key={snapshot.id} value={snapshot.id}>{new Date(snapshot.captured_at).toLocaleString()}{snapshot.capture_method === "manual" ? " · Pasted" : snapshot.capture_method === "ai-web" ? " · AI recovered" : ""}</option>)}</select></label> : null}
+            {selected.final_url || selected.source_url ? <a className="button compact" href={selected.final_url || selected.source_url} target="_blank" rel="noreferrer"><ExternalIcon size={14} /> Open source</a> : null}
           </div>
           {selected.warnings ? <p className="posting-archive-warning">{selected.warnings}</p> : null}
+          {recoverySources.length ? <details className="posting-archive-sources"><summary>Recovery sources · {recoverySources.length}</summary><div>{recoverySources.map(source => <a key={source.url} href={source.url} target="_blank" rel="noreferrer">{source.title || source.url}</a>)}</div></details> : null}
           <div
             className="posting-archive-content"
             dangerouslySetInnerHTML={{
@@ -373,6 +443,25 @@ function PostingArchive({
       </div>
     </details>
   );
+}
+
+function postingSnapshotMethodLabel(snapshot: PostingSnapshot) {
+  if (snapshot.capture_method === "manual") return "Manually pasted";
+  if (snapshot.capture_method === "ai-web") return `AI recovered${snapshot.capture_model ? ` · ${snapshot.capture_model}` : ""}`;
+  return `HTTP ${snapshot.http_status || "unknown"}`;
+}
+
+function postingSnapshotSources(snapshot?: PostingSnapshot): Array<{ url: string; title: string }> {
+  if (!snapshot?.sources_json) return [];
+  try {
+    const values = JSON.parse(snapshot.sources_json) as Array<{ url?: unknown; title?: unknown }>;
+    if (!Array.isArray(values)) return [];
+    return values
+      .filter(value => typeof value?.url === "string" && /^https?:\/\//i.test(value.url))
+      .map(value => ({ url: String(value.url), title: typeof value.title === "string" ? value.title : "" }));
+  } catch {
+    return [];
+  }
 }
 
 function PostingEditor({

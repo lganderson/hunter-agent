@@ -54,7 +54,7 @@ class HunterAgentHistoryTest(unittest.TestCase):
         self.assertEqual(result["cleared"], 2)
         self.assertEqual(chat_history.list_messages(), [])
 
-    def test_initialize_creates_agent_messages_and_posting_snapshots_schema_version_six(self):
+    def test_initialize_creates_agent_messages_and_posting_snapshots_schema_version_eight(self):
         sqlite_store.initialize()
 
         with sqlite_store.connect() as connection:
@@ -65,11 +65,39 @@ class HunterAgentHistoryTest(unittest.TestCase):
                 "SELECT name FROM sqlite_master WHERE type='table' AND name='posting_snapshots'"
             ).fetchone()
             version = connection.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
+            snapshot_columns = {
+                row["name"] for row in connection.execute("PRAGMA table_info(posting_snapshots)").fetchall()
+            }
 
         self.assertEqual(table["name"], "agent_messages")
         self.assertEqual(snapshot_table["name"], "posting_snapshots")
-        self.assertEqual(version["value"], "6")
+        self.assertEqual(version["value"], "8")
+        self.assertIn("capture_method", snapshot_columns)
+        self.assertIn("capture_model", snapshot_columns)
+        self.assertIn("sources_json", snapshot_columns)
         self.assertEqual(chat_history.API_VERSION, 2)
+
+    def test_initialize_marks_existing_posting_snapshots_as_fetched(self):
+        paths.DATA_DIR.mkdir(parents=True, exist_ok=True)
+        with sqlite_store.connect() as connection:
+            connection.execute(
+                "CREATE TABLE posting_snapshots ("
+                "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                "application_id TEXT NOT NULL, source_url TEXT NOT NULL DEFAULT '', "
+                "final_url TEXT NOT NULL DEFAULT '', captured_at TEXT NOT NULL, "
+                "http_status TEXT NOT NULL DEFAULT '', content_hash TEXT NOT NULL, "
+                "content_text TEXT NOT NULL DEFAULT '', source_html TEXT NOT NULL DEFAULT '', "
+                "warnings TEXT NOT NULL DEFAULT '', UNIQUE(application_id, content_hash))"
+            )
+            connection.execute(
+                "INSERT INTO posting_snapshots(application_id, captured_at, http_status, content_hash, content_text, source_html) "
+                "VALUES ('A0001', '2026-07-21T12:00:00', '200', 'legacy', 'Role', '<h1>Role</h1>')"
+            )
+
+        sqlite_store.initialize()
+
+        snapshot = sqlite_store.read_posting_snapshots("A0001")[0]
+        self.assertEqual(snapshot["capture_method"], "fetch")
 
 
 if __name__ == "__main__":

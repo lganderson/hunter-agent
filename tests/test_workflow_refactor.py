@@ -3,6 +3,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
@@ -237,6 +238,78 @@ class HunterWorkflowTest(unittest.TestCase):
         self.assertEqual(warning, "")
         self.assertEqual([row["type"] for row in created], ["review-fit"])
         self.assertEqual([row["type"] for row in repository.read_actions()], ["review-fit"])
+
+    def test_openai_posting_recovery_returns_cited_snapshot_without_personal_context(self):
+        paths.SETTINGS_FILE.write_text(json.dumps({
+            "provider": "openai",
+            "model": "gpt-5.5",
+            "api_token": "test-token",
+        }), encoding="utf-8")
+        response = {
+            "model": "gpt-5.5",
+            "output": [
+                {
+                    "type": "web_search_call",
+                    "action": {
+                        "type": "open_page",
+                        "sources": [{"url": "https://example.com/jobs/platform", "title": "Platform PM"}],
+                    },
+                },
+                {
+                    "type": "message",
+                    "content": [{
+                        "type": "output_text",
+                        "text": "# Platform Product Manager\n\nLead the platform roadmap across customer experiences.\n\n## Responsibilities\n\n- Define strategy and priorities.\n- Partner with engineering and design.\n\n## Qualifications\n\n- Product leadership experience.",
+                        "annotations": [{
+                            "type": "url_citation",
+                            "url": "https://example.com/jobs/platform",
+                            "title": "Platform PM",
+                        }],
+                    }],
+                },
+            ],
+        }
+
+        with patch.object(action_engine, "request_json", return_value=response) as request:
+            snapshot, warning = action_engine.recover_posting_with_openai({
+                "source_url": "https://example.com/jobs/platform",
+                "company": "Example",
+                "role": "Platform Product Manager",
+                "location": "Remote",
+                "notes": "Private application note must not be sent.",
+            })
+
+        self.assertEqual(warning, "")
+        self.assertEqual(snapshot["capture_method"], "ai-web")
+        self.assertEqual(snapshot["capture_model"], "gpt-5.5")
+        self.assertIn("Define strategy and priorities", snapshot["content_text"])
+        self.assertEqual(json.loads(snapshot["sources_json"])[0]["url"], "https://example.com/jobs/platform")
+        payload = request.call_args.args[2]
+        self.assertEqual(payload["tools"], [{"type": "web_search", "search_context_size": "high"}])
+        self.assertEqual(payload["tool_choice"], "required")
+        self.assertFalse(payload["store"])
+        self.assertNotIn("Private application note", payload["input"])
+
+    def test_openai_posting_recovery_rejects_uncited_content(self):
+        paths.SETTINGS_FILE.write_text(json.dumps({
+            "provider": "openai",
+            "model": "gpt-5.5",
+            "api_token": "test-token",
+        }), encoding="utf-8")
+        response = {
+            "output_text": "# Product Manager\n\n" + ("Potential posting content. " * 20),
+            "output": [],
+        }
+
+        with patch.object(action_engine, "request_json", return_value=response):
+            snapshot, warning = action_engine.recover_posting_with_openai({
+                "source_url": "https://example.com/jobs/product",
+                "company": "Example",
+                "role": "Product Manager",
+            })
+
+        self.assertIsNone(snapshot)
+        self.assertIn("uncited content", warning)
 
     def test_action_completion_syncs_posting_next_action(self):
         sqlite_store.initialize()
