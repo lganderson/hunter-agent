@@ -217,15 +217,21 @@ def posting_snapshot_text(page_html, job_json, source_url=""):
     return posting_snapshot_store.readable_content(
         source_url,
         structured_text or readable_page_text(page_html),
+        page_html,
     )
 
 
 def json_ld_items(page_html):
     items = []
     for raw in re.findall(r"<script[^>]+type=['\"]application/ld\+json['\"][^>]*>(.*?)</script>", page_html, re.I | re.S):
-        try:
-            data = json.loads(html.unescape(raw.strip()))
-        except json.JSONDecodeError:
+        data = None
+        for candidate in [raw.strip(), html.unescape(raw.strip())]:
+            try:
+                data = json.loads(candidate)
+                break
+            except json.JSONDecodeError:
+                continue
+        if data is None:
             continue
         if isinstance(data, list):
             items.extend(data)
@@ -553,7 +559,7 @@ def associate_company(row):
 
 def recover_snapshot_with_openai(row, data):
     snapshot_values = data.get("posting_snapshot", {})
-    if posting_snapshot_store.is_usable(snapshot_values):
+    if posting_snapshot_store.is_relevant(snapshot_values, row.get("role", "")):
         return snapshot_values, ""
     recovered, recovery_error = action_engine.recover_posting_with_openai(row)
     if not recovered:
@@ -607,7 +613,7 @@ def upsert(url, args):
     row = associate_company(row)
     snapshot = (
         repository.write_posting_snapshot(row.get("id", ""), snapshot_values)
-        if posting_snapshot_store.is_usable(snapshot_values)
+        if posting_snapshot_store.is_relevant(snapshot_values, row.get("role", ""))
         else None
     )
     data["posting_snapshot_id"] = snapshot.get("id", "") if snapshot else ""
@@ -643,7 +649,7 @@ def archive_application_posting(application_id):
     argv.append(url)
     data = extract_posting(url, build_parser().parse_args(argv))
     snapshot_values, recovery_error = recover_snapshot_with_openai(row, data)
-    if not posting_snapshot_store.is_usable(snapshot_values):
+    if not posting_snapshot_store.is_relevant(snapshot_values, row.get("role", "")):
         messages = [posting_snapshot_store.failure_message(snapshot_values), recovery_error]
         raise ValueError(" ".join(message for message in messages if message))
     existing_ids = {item.get("id", "") for item in repository.read_posting_snapshots(wanted)}
@@ -674,7 +680,11 @@ def save_manual_posting_snapshot(application_id, content):
     if not raw_content.strip():
         raise ValueError("Paste the posting content before saving it.")
     source_url = tracker.clean(row.get("source_url", ""))
-    readable_content = posting_snapshot_store.readable_content(source_url, readable_page_text(raw_content))
+    readable_content = posting_snapshot_store.readable_content(
+        source_url,
+        readable_page_text(raw_content),
+        raw_content,
+    )
     if not readable_content:
         raise ValueError("The pasted content did not contain readable posting text.")
 

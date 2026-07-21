@@ -162,6 +162,7 @@ def read_posting_snapshots(application_id=""):
             snapshot["content_text"] = posting_snapshots.readable_content(
                 snapshot.get("final_url") or snapshot.get("source_url"),
                 snapshot.get("content_text", ""),
+                snapshot.get("source_html", ""),
             )
         return snapshots
     return []

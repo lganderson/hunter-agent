@@ -497,6 +497,216 @@ class IngestPostingsTest(unittest.TestCase):
             "<main>stored raw Google source</main>",
         )
 
+    def test_apple_archive_reads_job_details_from_hydration_data(self):
+        hydration = {
+            "loaderData": {
+                "jobDetails": {
+                    "jobsData": {
+                        "postingTitle": "Product Manager, Agentic Platform Integration",
+                        "jobNumber": "200670301-0836",
+                        "jobSummary": "Build intelligent shopping experiences.\n\nPartner across Apple.",
+                        "description": "Define the product roadmap.",
+                        "responsibilities": "Research platform capabilities.\nTranslate them into requirements.",
+                        "minimumQualifications": "5+ years of product management.\nExperience with web technologies.",
+                        "preferredQualifications": "Experience with technical integrations.",
+                        "selectedLocation": {
+                            "city": "Cupertino",
+                            "stateProvince": "California",
+                            "countryName": "United States",
+                        },
+                        "teamNames": ["Corporate Functions"],
+                        "postingDate": "Jul 01, 2026",
+                    }
+                }
+            }
+        }
+        encoded = json.dumps(json.dumps(hydration))
+        source_html = f'<script>window.__staticRouterHydrationData = JSON.parse({encoded});</script>'
+
+        focused = posting_snapshots.readable_content(
+            "https://jobs.apple.com/en-us/details/200670301-0836/product-manager",
+            "Apple Footer\n- Store\n- Mac",
+            source_html,
+        )
+
+        self.assertTrue(focused.startswith("# Product Manager, Agentic Platform Integration"))
+        self.assertIn("Apple · Cupertino, California, United States · Corporate Functions", focused)
+        self.assertIn("## Summary", focused)
+        self.assertIn("- Research platform capabilities.", focused)
+        self.assertIn("## Minimum Qualifications", focused)
+        self.assertNotIn("Apple Footer", focused)
+
+    def test_amazon_archive_removes_navigation_and_share_footer(self):
+        noisy_content = "\n".join([
+            "Senior Product Manager - Amazon.jobs",
+            "- Home",
+            "- Teams",
+            "# Senior Product Manager",
+            "Job ID: 123 | Amazon.com Services LLC",
+            "Apply now",
+            "## Description",
+            "Build customer-facing products.",
+            "Key job responsibilities",
+            "- Define the product strategy.",
+            "## Basic Qualifications",
+            "- 5+ years of product management experience.",
+            "## Job details",
+            "- Seattle, WA",
+            "## Share this job",
+            "JOIN US ON",
+            "Find Careers",
+        ])
+
+        focused = posting_snapshots.readable_content(
+            "https://www.amazon.jobs/en/jobs/123/senior-product-manager",
+            noisy_content,
+        )
+
+        self.assertTrue(focused.startswith("# Senior Product Manager"))
+        self.assertIn("## Key job responsibilities", focused)
+        self.assertIn("## Job details", focused)
+        self.assertNotIn("- Home", focused)
+        self.assertNotIn("Apply now", focused)
+        self.assertNotIn("Share this job", focused)
+        self.assertNotIn("Find Careers", focused)
+
+    def test_greenhouse_archive_removes_application_form(self):
+        focused = posting_snapshots.readable_content(
+            "https://job-boards.greenhouse.io/example/jobs/123",
+            "\n".join([
+                "Example careers",
+                "# Senior Product Manager",
+                "## About the role",
+                "Build a durable product strategy.",
+                "## Responsibilities",
+                "- Lead cross-functional teams.",
+                "# Apply for this job",
+                "First name",
+                "Voluntary self-identification",
+            ]),
+        )
+
+        self.assertTrue(focused.startswith("# Senior Product Manager"))
+        self.assertIn("Lead cross-functional teams", focused)
+        self.assertNotIn("First name", focused)
+        self.assertNotIn("self-identification", focused)
+
+    def test_linkedin_archive_removes_sign_in_shell_and_similar_jobs(self):
+        focused = posting_snapshots.readable_content(
+            "https://www.linkedin.com/jobs/view/123",
+            "\n".join([
+                "LinkedIn",
+                "# Technical Program Manager",
+                "Example · United States",
+                "Sign in to apply",
+                "Report this job",
+                "About the job",
+                "Lead platform delivery from strategy through launch.",
+                "Responsibilities",
+                "- Partner with engineering and product.",
+                "Show more",
+                "Similar jobs",
+                "Program Manager at Another Company",
+            ]),
+        )
+
+        self.assertTrue(focused.startswith("# Technical Program Manager"))
+        self.assertIn("## Responsibilities", focused)
+        self.assertNotIn("Sign in to apply", focused)
+        self.assertNotIn("Similar jobs", focused)
+
+    def test_riot_archive_removes_translation_and_footer_content(self):
+        focused = posting_snapshots.readable_content(
+            "https://www.riotgames.com/en/work-with-us/job/123",
+            "\n".join([
+                "translationDictionary: {...}",
+                "# Senior Technical Program Manager",
+                "## Responsibilities",
+                "- Lead complex game technology programs.",
+                "## Required Qualifications",
+                "- Program leadership experience.",
+                "More posting detail.",
+                "Apply",
+                "Careers",
+                "Privacy",
+            ]),
+        )
+
+        self.assertTrue(focused.startswith("# Senior Technical Program Manager"))
+        self.assertIn("Required Qualifications", focused)
+        self.assertNotIn("translationDictionary", focused)
+        self.assertNotIn("Privacy", focused)
+
+    def test_ea_archive_reconstructs_split_headings_and_removes_footer(self):
+        focused = posting_snapshots.readable_content(
+            "https://jobs.ea.com/en_US/careers/JobDetail/123",
+            "\n".join([
+                "Electronic Arts careers",
+                "# Electronic Arts",
+                "Open Roles",
+                "##",
+                "Senior Technical Program Manager",
+                "Home",
+                "###",
+                "General Information",
+                "**Locations**: Vancouver, Canada",
+                "###",
+                "Description & Requirements",
+                "Lead large-scale technology programs.",
+                "**Responsibilities:**",
+                "- Define and lead technical programs.",
+                "Post To",
+                "LinkedInID",
+                "Back to Role List",
+            ]),
+        )
+
+        self.assertTrue(focused.startswith("# Senior Technical Program Manager"))
+        self.assertIn("## General Information", focused)
+        self.assertIn("## Description & Requirements", focused)
+        self.assertNotIn("Electronic Arts careers", focused)
+        self.assertNotIn("LinkedInID", focused)
+
+    def test_json_ld_parser_preserves_html_entities_inside_description(self):
+        page_html = (
+            '<script type="application/ld+json">'
+            '{"@context":"https://schema.org","@type":"JobPosting",'
+            '"title":"Technical Program Manager",'
+            '"description":"<p>Build R&amp;D systems&nbsp;at scale.</p>"}'
+            '</script>'
+        )
+
+        job = ingest_postings.first_job_posting_json(page_html)
+
+        self.assertEqual(job["title"], "Technical Program Manager")
+        self.assertIn("R&amp;D", job["description"])
+
+    def test_snapshot_relevance_rejects_shells_and_unavailable_pages(self):
+        base = {
+            "source_url": "https://careers.example.com/jobs/123",
+            "final_url": "https://careers.example.com/jobs/123",
+            "http_status": "200",
+            "capture_method": "fetch",
+            "source_html": "<html>raw source</html>",
+        }
+
+        self.assertTrue(posting_snapshots.is_relevant({
+            **base,
+            "content_text": "# Technical Program Manager\n## Responsibilities\n- Lead platform delivery.",
+        }, "Technical Program Manager"))
+        self.assertFalse(posting_snapshots.is_relevant({
+            **base,
+            "content_text": "Technical Program Manager | Home | Teams | Locations | Search jobs " * 8,
+        }, "Technical Program Manager"))
+        self.assertFalse(posting_snapshots.is_relevant({
+            **base,
+            "content_text": "Sorry, the job you're looking for isn't available. Search for jobs.",
+        }, "Technical Program Manager"))
+        self.assertTrue(posting_snapshots.is_relevant({
+            **base,
+            "content_text": "# Product Manager\nThe Job:\n" + "Own the product roadmap. " * 30,
+        }, "Product Manager"))
+
 
 if __name__ == "__main__":
     unittest.main()
