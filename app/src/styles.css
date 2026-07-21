@@ -1579,6 +1579,13 @@
       flex: 0 0 auto;
     }
 
+    .table-operation-actions {
+      display: flex;
+      align-items: center;
+      flex: 0 0 auto;
+      gap: 8px;
+    }
+
     .table-action-button {
       min-width: 92px;
       justify-content: center;

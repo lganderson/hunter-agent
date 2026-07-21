@@ -1,3 +1,4 @@
+import json
 import sys
 import tempfile
 import unittest
@@ -227,6 +228,69 @@ class IngestPostingsTest(unittest.TestCase):
         self.assertIn("Own the complete platform roadmap.", snapshots[0]["content_text"])
         self.assertIn("Lead cross-functional teams.", snapshots[0]["content_text"])
         self.assertTrue(snapshots[0]["content_hash"])
+
+    def test_ingest_recovers_blocked_epic_posting_from_greenhouse(self):
+        sqlite_store.initialize()
+        url = "https://epicgames.com/careers/jobs/5674511004?gh_jid=5674511004"
+        args = ingest_postings.build_parser().parse_args([
+            "--company",
+            "Epic Games",
+            "--role",
+            "Product Management Director (Platform)",
+            url,
+        ])
+        calls = []
+        greenhouse_payload = {
+            "id": 5674511004,
+            "title": "Product Management Director (Platform)",
+            "absolute_url": url,
+            "location": {"name": "Multiple Locations"},
+            "content": (
+                "<h2>What you'll do</h2><p>Own platform product strategy and roadmap.</p>"
+                "<h2>What we're looking for</h2><p>Lead cross-functional teams.</p>"
+            ),
+        }
+
+        def fake_fetch(request_url):
+            calls.append(request_url)
+            if request_url == url:
+                return {
+                    "status": 403,
+                    "final_url": request_url,
+                    "html": "<html><body>Enable JavaScript and cookies to continue</body></html>",
+                    "error": "HTTP Error 403: Forbidden",
+                }
+            return {
+                "status": 200,
+                "final_url": request_url,
+                "html": json.dumps(greenhouse_payload),
+                "error": "",
+            }
+
+        original_fetch = ingest_postings.fetch
+        ingest_postings.fetch = fake_fetch
+        try:
+            _created, row, data = ingest_postings.upsert(url, args)
+        finally:
+            ingest_postings.fetch = original_fetch
+
+        snapshots = repository.read_posting_snapshots(row["id"])
+        self.assertEqual(len(snapshots), 1)
+        self.assertEqual(data["location"], "Multiple Locations")
+        self.assertEqual(snapshots[0]["http_status"], "200")
+        self.assertEqual(snapshots[0]["final_url"], url)
+        self.assertIn("Own platform product strategy and roadmap.", snapshots[0]["content_text"])
+        self.assertIn("Lead cross-functional teams.", snapshots[0]["content_text"])
+        self.assertIn('"id": 5674511004', snapshots[0]["source_html"])
+        self.assertIn("captured posting through the Greenhouse Job Board API", snapshots[0]["warnings"])
+        self.assertNotIn("browser verification", snapshots[0]["warnings"])
+        self.assertEqual(
+            calls,
+            [
+                url,
+                "https://boards-api.greenhouse.io/v1/boards/epicgames/jobs/5674511004?content=true",
+            ],
+        )
 
 
 if __name__ == "__main__":
