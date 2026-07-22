@@ -141,6 +141,10 @@ def compact_company_candidate(candidate, detail=False):
         "title",
         "url",
         "location",
+        "work_mode",
+        "source_platform",
+        "scan_state",
+        "normalization_warnings",
         "status",
         "last_seen_at",
         "fit_score",
@@ -200,6 +204,12 @@ def tool_get_posting(args):
     if not app:
         raise ValueError(f"No posting found with id {wanted}.")
     note = repository.read_posting_note(wanted)
+    snapshots = []
+    for snapshot in repository.read_posting_snapshots(wanted):
+        snapshots.append({
+            **{field: snapshot.get(field, "") for field in schema.POSTING_SNAPSHOT_FIELDS if field != "source_html"},
+            "source_html_char_count": len(snapshot.get("source_html", "")),
+        })
     related_actions = [
         action
         for action in repository.read_actions()
@@ -209,6 +219,7 @@ def tool_get_posting(args):
         {
             "posting": compact_application(app, detail=True),
             "posting_note": note or None,
+            "posting_snapshots": snapshots,
             "actions": [compact_action(action, detail=True) for action in related_actions],
         }
     )
@@ -425,6 +436,7 @@ def tool_check_company_postings(args):
             "new_count": len(new_rows),
             "recommended_count": len(recommended_rows),
             "candidate_count": len(candidates),
+            "scan": result.get("scan", {}),
             "new": new_rows[:candidate_limit],
             "recommended": recommended_rows[:candidate_limit],
             "candidates": candidates[:candidate_limit],
@@ -577,7 +589,7 @@ TOOLS = {
         "handler": tool_list_postings,
     },
     "hunter_get_posting": {
-        "description": "Get one Hunter posting, its SQLite-backed posting note, and related actions.",
+        "description": "Get one Hunter posting, its SQLite-backed note, captured posting snapshots, and related actions.",
         "inputSchema": {
             "type": "object",
             "properties": {"id": {"type": "string"}},

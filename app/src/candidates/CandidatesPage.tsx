@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
-import { ExternalIcon, FilterIcon, SearchIcon, XIcon } from "../components/Icons";
+import { BriefcaseIcon, ExternalIcon, FilterIcon, SearchIcon, XIcon } from "../components/Icons";
 import { checkCompanyPostings, ingestCompanyCandidate, updateCompanyCandidate } from "../core/api";
 import { dateOnlyLabel, titleCase } from "../core/format";
 import { routes } from "../core/routes";
@@ -43,6 +43,8 @@ export function CandidatesPage({ data, refresh }: CandidateReviewPageProps) {
   const [latestOnly, setLatestOnly] = useState(() => searchParams.get("latest") === "true");
   const [sortBy, setSortBy] = useState("fit");
   const [operationStatus, setOperationStatus] = useState("");
+  const [operationPending, setOperationPending] = useState(false);
+  const [ingestedPostingId, setIngestedPostingId] = useState("");
   const [checkingAll, setCheckingAll] = useState(false);
   const [checkProgress, setCheckProgress] = useState<{ completed: number; total: number } | null>(null);
   const checkAbortController = useRef<AbortController | null>(null);
@@ -104,6 +106,12 @@ export function CandidatesPage({ data, refresh }: CandidateReviewPageProps) {
           candidate.title,
           candidate.url,
           candidate.location,
+          candidate.work_mode,
+          candidate.category,
+          candidate.source_platform,
+          candidate.source_job_id,
+          candidate.matched_queries,
+          candidate.scan_state,
           candidate.status,
           candidate.fit_score,
           candidate.fit_summary,
@@ -142,6 +150,8 @@ export function CandidatesPage({ data, refresh }: CandidateReviewPageProps) {
 
   async function setCandidateStatus(candidateId: string, status: string) {
     setCheckProgress(null);
+    setIngestedPostingId("");
+    setOperationPending(true);
     setOperationStatus(status === "ignored" ? "Ignoring candidate..." : "Updating candidate...");
     try {
       await updateCompanyCandidate(candidateId, status);
@@ -149,18 +159,25 @@ export function CandidatesPage({ data, refresh }: CandidateReviewPageProps) {
       setOperationStatus(status === "ignored" ? "Candidate ignored." : "Candidate returned to New.");
     } catch (error) {
       setOperationStatus(`Could not update candidate. ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setOperationPending(false);
     }
   }
 
   async function ingestCandidate(candidateId: string) {
     setCheckProgress(null);
+    setIngestedPostingId("");
+    setOperationPending(true);
     setOperationStatus("Ingesting candidate...");
     try {
-      await ingestCompanyCandidate(candidateId);
+      const result = await ingestCompanyCandidate(candidateId);
       await refresh();
+      setIngestedPostingId(result.posting?.id || "");
       setOperationStatus("Candidate ingested.");
     } catch (error) {
       setOperationStatus(`Could not ingest candidate. ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setOperationPending(false);
     }
   }
 
@@ -182,6 +199,7 @@ export function CandidatesPage({ data, refresh }: CandidateReviewPageProps) {
     let canceled = false;
 
     checkAbortController.current = abortController;
+    setIngestedPostingId("");
     setCheckingAll(true);
     setOperationStatus("Checking careers pages for all companies...");
     setCheckProgress({ completed: 0, total: companiesToCheck.length });
@@ -229,6 +247,12 @@ export function CandidatesPage({ data, refresh }: CandidateReviewPageProps) {
   function cancelCheckAllCompanies() {
     setOperationStatus("Canceling careers-page checks...");
     checkAbortController.current?.abort();
+  }
+
+  function dismissOperationStatus() {
+    setOperationStatus("");
+    setCheckProgress(null);
+    setIngestedPostingId("");
   }
 
   function clearFilters() {
@@ -295,16 +319,23 @@ export function CandidatesPage({ data, refresh }: CandidateReviewPageProps) {
                 </div>
               ) : null}
             </div>
-            {checkProgress && checkingAll ? (
-              <button className="button compact" type="button" onClick={cancelCheckAllCompanies}>
-                Cancel
-              </button>
-            ) : null}
-            {checkProgress && !checkingAll ? (
-              <button className="icon-button table-operation-close" type="button" onClick={() => { setOperationStatus(""); setCheckProgress(null); }} aria-label="Close check results">
-                <XIcon size={15} />
-              </button>
-            ) : null}
+            <div className="table-operation-actions">
+              {ingestedPostingId ? (
+                <Link className="button compact" to={routes.postingDetail(ingestedPostingId)}>
+                  <BriefcaseIcon size={15} /> View posting
+                </Link>
+              ) : null}
+              {checkProgress && checkingAll ? (
+                <button className="button compact" type="button" onClick={cancelCheckAllCompanies}>
+                  Cancel
+                </button>
+              ) : null}
+              {!checkingAll && !operationPending ? (
+                <button className="icon-button table-operation-close" type="button" onClick={dismissOperationStatus} aria-label="Dismiss status message">
+                  <XIcon size={15} />
+                </button>
+              ) : null}
+            </div>
           </div>
         ) : null}
         <div className="candidate-review-summary">
@@ -329,7 +360,7 @@ export function CandidatesPage({ data, refresh }: CandidateReviewPageProps) {
                 <tr key={candidate.id}>
                   <td className="role-cell candidate-title-cell">
                     <strong>{candidate.title || candidate.url}</strong>
-                    <span className="cell-subtle">{candidate.location || "Location unknown"}</span>
+                    <span className="cell-subtle">{candidateLocationLabel(candidate)}</span>
                   </td>
                   <td>
                     {company ? <Link to={routes.companyDetail(company.id)}>{company.name}</Link> : candidate.company_id || "Unknown"}
@@ -415,6 +446,11 @@ function candidateDate(row: CandidateRow) {
 function candidateDateLabel(candidate: CompanyPostingCandidate) {
   const value = candidate.last_seen_at || candidate.first_seen_at || "";
   return value ? dateOnlyLabel(value) : "Not checked";
+}
+
+function candidateLocationLabel(candidate: CompanyPostingCandidate) {
+  const location = candidate.location || "Location unknown";
+  return candidate.work_mode ? `${location} · ${candidate.work_mode}` : location;
 }
 
 function matchesSelection(value: string, selected: string[], values: string[]) {

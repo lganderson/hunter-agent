@@ -123,6 +123,23 @@ def write_company_posting_candidates(rows):
         sqlite_store.write_company_posting_candidates(rows)
 
 
+def read_company_career_scans(company_id="", limit=200):
+    if using_sqlite():
+        return sqlite_store.read_company_career_scans(company_id, limit)
+    return []
+
+
+def write_company_career_scan(row):
+    if using_sqlite():
+        return sqlite_store.write_company_career_scan(row)
+    return row
+
+
+def clear_company_career_scans():
+    if using_sqlite():
+        sqlite_store.clear_company_career_scans()
+
+
 def read_posting_note(application_id):
     if using_sqlite():
         return sqlite_store.read_posting_note(application_id)
@@ -136,3 +153,27 @@ def write_posting_note(application_id, path, content):
     note_path.parent.mkdir(parents=True, exist_ok=True)
     note_path.write_text(content or "", encoding="utf-8")
     return {"application_id": application_id, "path": path, "content": content or ""}
+
+
+def read_posting_snapshots(application_id=""):
+    if using_sqlite():
+        return sqlite_store.read_posting_snapshots(application_id)
+    return []
+
+
+def write_posting_snapshot(application_id, values):
+    if using_sqlite():
+        return sqlite_store.write_posting_snapshot(application_id, values)
+    return None
+
+
+def read_resume_versions(application_id=""):
+    if using_sqlite():
+        return sqlite_store.read_resume_versions(application_id)
+    return []
+
+
+def write_resume_version(row):
+    if not using_sqlite():
+        raise ValueError("Resume versions require the local SQLite store.")
+    return sqlite_store.write_resume_version(row)

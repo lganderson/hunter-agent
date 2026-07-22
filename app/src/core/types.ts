@@ -33,6 +33,19 @@ export type Application = {
   sort_due: string;
 };
 
+export type PostingSnapshot = {
+  id: string;
+  application_id: string;
+  source_url: string;
+  final_url: string;
+  captured_at: string;
+  http_status: string;
+  content_hash: string;
+  content_text: string;
+  warnings: string;
+  source_html_char_count: number;
+};
+
 export type Action = {
   id: string;
   application_id: string;
@@ -112,6 +125,17 @@ export type CompanyPostingCandidate = {
   title: string;
   url: string;
   location: string;
+  work_mode: string;
+  category: string;
+  source_platform: string;
+  source_job_id: string;
+  matched_queries: string;
+  description_excerpt: string;
+  description_hash: string;
+  score_inputs_hash: string;
+  normalization_warnings: string;
+  scan_state: string;
+  last_verified_at: string;
   status: string;
   first_seen_at: string;
   last_seen_at: string;
@@ -119,6 +143,23 @@ export type CompanyPostingCandidate = {
   fit_summary: string;
   fit_checked_at: string;
   notes: string;
+};
+
+export type CompanyCareerScan = {
+  company_id: string;
+  checked_at: string;
+  platform_type: string;
+  status: string;
+  requests_succeeded: string;
+  requests_failed: string;
+  extracted_count: string;
+  unique_candidate_count: string;
+  new_count: string;
+  recommended_count: string;
+  unavailable_count: string;
+  verification_count: string;
+  verification_skipped_count: string;
+  errors_json: string;
 };
 
 export type WorkflowStage = {
@@ -158,6 +199,7 @@ export type AppState = {
   company_contacts: CompanyContact[];
   company_career_sources: CompanyCareerSource[];
   company_posting_candidates: CompanyPostingCandidate[];
+  company_career_scans: CompanyCareerScan[];
 };
 
 export type SettingsStatus = {
@@ -196,6 +238,45 @@ export type ResumeText = {
   text: string;
   text_char_count: number;
   configured: boolean;
+};
+
+export type ResumeChange = {
+  id: string;
+  old_text: string;
+  new_text: string;
+  reason: string;
+  keywords: string[];
+};
+
+export type ResumePlan = {
+  application_id: string;
+  source_filename: string;
+  source_hash: string;
+  summary: string;
+  matched_keywords: string[];
+  missing_keywords: string[];
+  changes: ResumeChange[];
+};
+
+export type ResumeVersion = {
+  id: string;
+  application_id: string;
+  created_at: string;
+  guidance: string;
+  source_filename: string;
+  changes: ResumeChange[];
+  warnings: string[];
+  docx_available: boolean;
+  pdf_available: boolean;
+};
+
+export type ResumeTailoringStatus = {
+  base_resume: {
+    configured: boolean;
+    filename: string;
+    format_preserving_supported: boolean;
+  };
+  versions: ResumeVersion[];
 };
 
 export type ApplicationUpdates = Partial<

@@ -298,7 +298,10 @@ def call_anthropic(token, model, prompt, app, api_base=""):
 def create_actions_for_application(app, warnings=None, use_ai=False):
     rows = repository.read_actions()
     created = []
+    active_types = workflow.active_action_type_ids() if repository.using_sqlite() else None
     for action in base_actions_for_application(app, warnings=warnings):
+        if active_types is not None and action_store.normalize_action_type(action.get("type", "")) not in active_types:
+            continue
         was_created, row = upsert_action(rows, action)
         if was_created:
             created.append(row)

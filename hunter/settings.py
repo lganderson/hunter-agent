@@ -219,9 +219,10 @@ def save_resume_upload(filename, content_base64):
         extraction_status = extraction_status or "No text could be extracted."
 
     resume_dir = resume_dir_path()
-    if resume_dir.exists():
-        shutil.rmtree(resume_dir)
     resume_dir.mkdir(parents=True, exist_ok=True)
+    for previous in resume_dir.glob("current*"):
+        if previous.is_file():
+            previous.unlink()
     original_path = resume_dir / f"current{extension or '.txt'}"
     text_path = resume_dir / "current.txt"
     original_path.write_bytes(content)

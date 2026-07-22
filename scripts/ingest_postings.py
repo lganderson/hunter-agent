@@ -6,7 +6,7 @@ import html
 import json
 import re
 import sys
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
@@ -94,6 +94,48 @@ def fetch(url):
         return {"status": 0, "final_url": url, "html": "", "error": str(exc)}
 
 
+def greenhouse_job_reference(url, company=""):
+    parsed = urlparse(url)
+    parts = [part for part in parsed.path.split("/") if part]
+    query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+    job_id = tracker.clean(query.get("gh_jid", ""))
+    if not job_id:
+        match = re.search(r"/jobs/(\d+)(?:/|$)", parsed.path)
+        job_id = match.group(1) if match else ""
+    if not re.fullmatch(r"\d+", job_id):
+        return "", ""
+
+    host = parsed.netloc.lower()
+    board_token = ""
+    if host == "boards-api.greenhouse.io":
+        try:
+            board_token = parts[parts.index("boards") + 1]
+        except (ValueError, IndexError):
+            board_token = ""
+    elif host in company_store.GREENHOUSE_BOARD_HOSTS and parts:
+        board_token = parts[0]
+    if not board_token:
+        board_token = company_store.greenhouse_token_value(company)
+    return board_token, job_id
+
+
+def recover_greenhouse_posting(url, company=""):
+    board_token, job_id = greenhouse_job_reference(url, company)
+    if not board_token or not job_id:
+        return None
+    api_url = company_store.greenhouse_api_url(board_token, f"jobs/{job_id}?content=true")
+    fetched = fetch(api_url)
+    if fetched.get("status") != 200 or fetched.get("error") or not fetched.get("html"):
+        return None
+    try:
+        job = json.loads(fetched["html"])
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(job, dict) or str(job.get("id", "")) != job_id or not job.get("content"):
+        return None
+    return {"fetched": fetched, "job": job}
+
+
 def attr_map(tag):
     attrs = {}
     for key, quote, value in re.findall(r"([a-zA-Z_:.-]+)\s*=\s*(['\"])(.*?)\2", tag, re.S):
@@ -129,6 +171,36 @@ def visible_text(page_html):
     text = re.sub(r"<(script|style)\b.*?</\1>", " ", page_html, flags=re.I | re.S)
     text = re.sub(r"<[^>]+>", " ", text)
     return clean_text(text)
+
+
+def readable_page_text(page_html):
+    text = re.sub(r"<(script|style)\b.*?</\1>", " ", page_html or "", flags=re.I | re.S)
+    text = re.sub(r"<br\s*/?>", "\n", text, flags=re.I)
+    text = re.sub(r"</(?:article|div|h[1-6]|li|main|p|section|tr)\s*>", "\n", text, flags=re.I)
+    text = re.sub(r"<[^>]+>", " ", text)
+    lines = [clean_text(line) for line in html.unescape(text).splitlines()]
+    return "\n".join(line for line in lines if line)
+
+
+def posting_snapshot_text(page_html, job_json):
+    structured_parts = []
+    for field in [
+        "title",
+        "description",
+        "responsibilities",
+        "qualifications",
+        "skills",
+        "experienceRequirements",
+        "educationRequirements",
+        "jobBenefits",
+    ]:
+        value = job_json.get(field) if isinstance(job_json, dict) else None
+        if isinstance(value, (dict, list)):
+            value = json.dumps(value, ensure_ascii=False)
+        if value:
+            structured_parts.append(str(value))
+    structured_text = readable_page_text("\n".join(structured_parts))
+    return structured_text or readable_page_text(page_html)
 
 
 def json_ld_items(page_html):
@@ -330,22 +402,46 @@ def build_notes(company, role, text, warnings):
 
 def extract_posting(url, args):
     fetched = fetch(url)
+    direct_fetched = fetched
+    greenhouse_job = {}
+    recovered_from_greenhouse = False
+    direct_text = visible_text(fetched.get("html", ""))
+    if fetched.get("status") in {202, 403} or fetched.get("error") or not direct_text:
+        recovered = recover_greenhouse_posting(url, args.company or "")
+        if recovered:
+            fetched = recovered["fetched"]
+            greenhouse_job = recovered["job"]
+            recovered_from_greenhouse = True
     page_html = fetched["html"]
+    archive_source = page_html
+    if greenhouse_job:
+        page_html = str(greenhouse_job.get("content", ""))
     meta = meta_values(page_html)
     job_json = first_job_posting_json(page_html)
-    title = page_title(page_html) or meta.get("og:title", "") or meta.get("twitter:title", "")
+    if greenhouse_job:
+        job_json = {
+            "title": greenhouse_job.get("title", ""),
+            "description": greenhouse_job.get("content", ""),
+        }
+    title = greenhouse_job.get("title", "") or page_title(page_html) or meta.get("og:title", "") or meta.get("twitter:title", "")
     text = visible_text(page_html)
-    final_url = fetched["final_url"] or url
+    final_url = greenhouse_job.get("absolute_url", "") or fetched["final_url"] or url
     company, role = infer_company_role(final_url, title, meta, job_json)
-    location = infer_location(final_url, title, text, job_json)
+    location = company_store.greenhouse_location(greenhouse_job) if greenhouse_job else ""
+    location = location or infer_location(final_url, title, text, job_json)
     compensation = infer_compensation(text)
     work_mode = infer_work_mode(text)
     warnings = []
 
     parsed = urlparse(final_url)
-    if fetched["error"]:
+    if recovered_from_greenhouse:
+        direct_status = direct_fetched.get("status") or "no response"
+        warnings.append(
+            f"Direct page returned HTTP {direct_status}; captured posting through the Greenhouse Job Board API."
+        )
+    elif fetched["error"]:
         warnings.append(f"Fetch failed: {fetched['error']}")
-    if fetched["status"] in {202, 403} or not text:
+    if not recovered_from_greenhouse and (fetched["status"] in {202, 403} or not text):
         warnings.append("Direct page may require JavaScript/browser verification.")
     closed = bool(re.search(r"job has been closed|oh snap! this job has been closed|position has been filled", text, re.I))
     active = bool(re.search(r"apply now|apply for this job|submit application", text, re.I))
@@ -370,6 +466,15 @@ def extract_posting(url, args):
         "closed_detected": closed,
         "active_detected": active,
         "warnings": warnings,
+        "posting_snapshot": {
+            "source_url": url,
+            "final_url": final_url,
+            "captured_at": datetime.now().isoformat(timespec="seconds"),
+            "http_status": str(fetched["status"] or ""),
+            "content_text": posting_snapshot_text(page_html, job_json),
+            "source_html": archive_source,
+            "warnings": "\n".join(warnings),
+        },
     }
 
 
@@ -467,6 +572,8 @@ def upsert(url, args):
     row["posting_file"] = note_path
     tracker.write_rows(tracker.APPLICATIONS, tracker.APPLICATION_FIELDS, rows)
     row = associate_company(row)
+    snapshot = repository.write_posting_snapshot(row.get("id", ""), data.get("posting_snapshot", {}))
+    data["posting_snapshot_id"] = snapshot.get("id", "") if snapshot else ""
     return created, row, data
 
 
@@ -517,6 +624,9 @@ def main(argv=None):
         print(f"{action} {row['id']}: {row.get('company', '')} - {row.get('role', '')}")
         if action_count:
             print(f"  created {action_count} actions")
+        if data.get("posting_snapshot_id"):
+            content_length = len(data.get("posting_snapshot", {}).get("content_text", ""))
+            print(f"  captured posting snapshot ({content_length} readable characters)")
         for warning in data["warnings"]:
             print(f"  warning: {warning}")
         if action_warning:
