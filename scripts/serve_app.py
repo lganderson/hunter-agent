@@ -14,6 +14,7 @@ if str(ROOT_FOR_IMPORTS) not in sys.path:
 
 from hunter import paths as hunter_paths
 from hunter import repository
+from hunter import resumes as resume_store
 from hunter import agent as hunter_agent
 from hunter import app_state
 from hunter import actions as action_store
@@ -77,6 +78,19 @@ class AppHandler(SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def send_attachment(self, path):
+        if not path.exists() or not path.is_file():
+            self.send_error(404, "File not found")
+            return
+        body = path.read_bytes()
+        content_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Disposition", f'attachment; filename="{path.name}"')
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def send_frontend(self, request_path):
         if not FRONTEND_DIST.exists():
             self.send_error(503, "Frontend build is missing. Run: make frontend-build")
@@ -119,6 +133,23 @@ class AppHandler(SimpleHTTPRequestHandler):
                     "source_html_char_count": len(snapshot.get("source_html", "")),
                 })
             self.send_json({"snapshots": snapshots})
+            return
+        if path == "/api/resumes/status":
+            try:
+                self.send_json(resume_store.tailoring_status((query.get("application_id") or [""])[0]))
+            except ValueError as exc:
+                self.send_json({"error": str(exc)}, status=400)
+            return
+        if path == "/api/resumes/download":
+            try:
+                resume_path = resume_store.version_download(
+                    (query.get("id") or [""])[0],
+                    (query.get("format") or [""])[0],
+                )
+            except ValueError as exc:
+                self.send_json({"error": str(exc)}, status=404)
+                return
+            self.send_attachment(resume_path)
             return
         if path == "/api/agent/history":
             self.send_json({"api_version": chat_history.API_VERSION, "messages": chat_history.list_messages()})
@@ -175,6 +206,37 @@ class AppHandler(SimpleHTTPRequestHandler):
 
         if path == "/api/settings/resume/delete":
             self.send_json(settings_store.delete_resume())
+            return
+
+        if path == "/api/resumes/plan":
+            payload = self.read_json()
+            try:
+                plan = resume_store.propose_changes(
+                    application_id=payload.get("application_id", ""),
+                    guidance=payload.get("guidance", ""),
+                )
+            except ValueError as exc:
+                self.send_json({"error": str(exc)}, status=400)
+                return
+            except Exception as exc:  # noqa: BLE001 - provider failures should be actionable in the local UI.
+                self.send_json({"error": f"Resume tailoring failed: {exc}"}, status=502)
+                return
+            self.send_json({"plan": plan})
+            return
+
+        if path == "/api/resumes/create":
+            payload = self.read_json()
+            try:
+                version = resume_store.create_version(
+                    application_id=payload.get("application_id", ""),
+                    guidance=payload.get("guidance", ""),
+                    source_hash=payload.get("source_hash", ""),
+                    changes=payload.get("changes", []),
+                )
+            except ValueError as exc:
+                self.send_json({"error": str(exc)}, status=400)
+                return
+            self.send_json({"version": version})
             return
 
         if path == "/api/actions/generate":

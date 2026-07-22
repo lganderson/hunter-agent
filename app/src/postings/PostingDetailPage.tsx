@@ -2,9 +2,9 @@ import { useEffect, useMemo, useState, type FormEvent, type KeyboardEvent } from
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { ActionCommand, Priority, StatusPill, TagList } from "../components/Primitives";
 import { BriefcaseIcon, ExternalIcon, FilterIcon, PlusIcon } from "../components/Icons";
-import { createAction, createApplication, getPostingSnapshots, linkContact, makeNextAction, unlinkContact, updateAction, updateActionFields, updateApplication } from "../core/api";
+import { createAction, createApplication, createResumeVersion, getPostingSnapshots, getResumeTailoringStatus, linkContact, makeNextAction, planResumeChanges, resumeDownloadUrl, unlinkContact, updateAction, updateActionFields, updateApplication } from "../core/api";
 import { actionDueLabel, dueLabel, isActionComplete, markdownToHtml, normalizeTag, tagColorClass, tagList, titleCase } from "../core/format";
-import type { Action, ActionUpdates, AppState, Application, PostingSnapshot } from "../core/types";
+import type { Action, ActionUpdates, AppState, Application, PostingSnapshot, ResumePlan, ResumeTailoringStatus } from "../core/types";
 
 type DetailProps = {
   data: AppState;
@@ -199,6 +199,7 @@ export function PostingDetailPage({ data, refresh, createNew = false }: DetailPr
 
       <div className={createNew ? "detail-layout create-posting-layout" : "posting-workspace"}>
         <div className={createNew ? undefined : "posting-workspace-main"}>
+        {!createNew ? <ResumeTailoring app={app} refresh={refresh} /> : null}
         <PostingEditor app={app} createNew={createNew} data={data} existingTags={existingTags} onSubmit={savePosting} setStageDraft={setStageDraft} setTagDraft={setTagDraft} setTagInput={setTagInput} stageDraft={stageDraft} tagDraft={tagDraft} tagInput={tagInput} />
 
         {!createNew ? <article className="panel actions-panel">
@@ -272,6 +273,197 @@ export function PostingDetailPage({ data, refresh, createNew = false }: DetailPr
 
       {operationStatus ? <div className="posting-operation-status" role="status" aria-live="polite">{operationStatus}</div> : null}
     </section>
+  );
+}
+
+function ResumeTailoring({ app, refresh }: { app: Application; refresh: () => Promise<AppState> }) {
+  const [tailoring, setTailoring] = useState<ResumeTailoringStatus | null>(null);
+  const [guidance, setGuidance] = useState("");
+  const [plan, setPlan] = useState<ResumePlan | null>(null);
+  const [selected, setSelected] = useState<string[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [status, setStatus] = useState("Loading resume workspace…");
+
+  useEffect(() => {
+    let cancelled = false;
+    setTailoring(null);
+    setPlan(null);
+    setSelected([]);
+    setGuidance("");
+    setStatus("Loading resume workspace…");
+    getResumeTailoringStatus(app.id)
+      .then(next => {
+        if (cancelled) return;
+        setTailoring(next);
+        setStatus("");
+      })
+      .catch(error => {
+        if (cancelled) return;
+        setStatus(`Could not load resume workspace. ${error instanceof Error ? error.message : String(error)}`);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [app.id]);
+
+  async function generatePlan() {
+    setBusy(true);
+    setStatus("Reviewing the posting and base resume…");
+    try {
+      const result = await planResumeChanges(app.id, guidance);
+      setPlan(result.plan);
+      setSelected(result.plan.changes.map(change => change.id));
+      setStatus(result.plan.changes.length
+        ? `Review ${result.plan.changes.length} proposed change${result.plan.changes.length === 1 ? "" : "s"}. Nothing is saved yet.`
+        : "No safe wording changes were found. Try more specific guidance if needed.");
+    } catch (error) {
+      setPlan(null);
+      setSelected([]);
+      setStatus(`Could not generate a review. ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function saveVersion() {
+    if (!plan) return;
+    const changes = plan.changes.filter(change => selected.includes(change.id));
+    if (!changes.length) {
+      setStatus("Select at least one change before creating a version.");
+      return;
+    }
+    setBusy(true);
+    setStatus("Creating the Word and PDF versions…");
+    try {
+      const result = await createResumeVersion(app.id, guidance, plan.source_hash, changes);
+      const next = await getResumeTailoringStatus(app.id);
+      setTailoring(next);
+      await refresh();
+      setPlan(null);
+      setSelected([]);
+      setStatus(`Created ${result.version.id}. Your base resume was not changed.`);
+    } catch (error) {
+      setStatus(`Could not create the resume version. ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function toggleChange(changeId: string) {
+    setSelected(current => current.includes(changeId)
+      ? current.filter(id => id !== changeId)
+      : [...current, changeId]);
+  }
+
+  const resumeReady = tailoring?.base_resume.format_preserving_supported;
+
+  return (
+    <article className="panel resume-tailoring-panel">
+      <div className="posting-section-header resume-tailoring-header">
+        <div>
+          <h2>Tailored resume</h2>
+          <p>Improve keyword alignment with small, reviewable edits to the original Word file.</p>
+        </div>
+        <span>{tailoring?.base_resume.filename || "Base resume required"}</span>
+      </div>
+
+      {tailoring && !tailoring.base_resume.configured ? (
+        <div className="resume-requirement">
+          <strong>Upload a base resume first.</strong>
+          <p>Hunter needs the original <code>.docx</code> so it can preserve its formatting.</p>
+          <Link className="button compact" to="/settings#settings-resume">Open Resume settings</Link>
+        </div>
+      ) : null}
+
+      {tailoring?.base_resume.configured && !resumeReady ? (
+        <div className="resume-requirement">
+          <strong>A Word source is required.</strong>
+          <p>{tailoring.base_resume.filename} can provide matching context, but only a <code>.docx</code> can be edited while preserving its layout.</p>
+          <Link className="button compact" to="/settings#settings-resume">Upload a DOCX</Link>
+        </div>
+      ) : null}
+
+      {resumeReady ? (
+        <div className="resume-tailoring-workspace">
+          <label className="form-field full">Guidance
+            <textarea
+              value={guidance}
+              onChange={event => setGuidance(event.target.value)}
+              placeholder="Example: Emphasize platform delivery and use the posting's terminology where my experience supports it."
+              rows={3}
+            />
+          </label>
+          <div className="resume-tailoring-actions">
+            <button className="button primary" type="button" disabled={busy} onClick={generatePlan}>
+              {busy ? "Working…" : "Review keyword changes"}
+            </button>
+            <small>Generating a review sends the resume text, posting, and this guidance to your configured OpenAI provider.</small>
+          </div>
+        </div>
+      ) : null}
+
+      {plan ? (
+        <section className="resume-plan" aria-label="Proposed resume changes">
+          <div className="resume-plan-summary">
+            <strong>Proposed alignment</strong>
+            <p>{plan.summary || "Review the proposed wording changes below."}</p>
+            <KeywordGroup label="Already aligned" values={plan.matched_keywords} />
+            <KeywordGroup label="Still missing" values={plan.missing_keywords} muted />
+          </div>
+          <div className="resume-change-list">
+            {plan.changes.map(change => (
+              <label className={`resume-change${selected.includes(change.id) ? " selected" : ""}`} key={change.id}>
+                <input type="checkbox" checked={selected.includes(change.id)} onChange={() => toggleChange(change.id)} />
+                <span className="resume-change-content">
+                  <span className="resume-change-label">Before</span>
+                  <span className="resume-change-before">{change.old_text}</span>
+                  <span className="resume-change-label">After</span>
+                  <span className="resume-change-after">{change.new_text}</span>
+                  <small>{change.reason}{change.keywords.length ? ` · ${change.keywords.join(", ")}` : ""}</small>
+                </span>
+              </label>
+            ))}
+          </div>
+          {plan.changes.length ? (
+            <div className="resume-plan-footer">
+              <span>{selected.length} of {plan.changes.length} selected</span>
+              <button className="button primary" type="button" disabled={busy || !selected.length} onClick={saveVersion}>Create Word + PDF</button>
+            </div>
+          ) : null}
+        </section>
+      ) : null}
+
+      {tailoring?.versions.length ? (
+        <section className="resume-version-list" aria-label="Saved resume versions">
+          <div className="resume-version-list-heading"><strong>Saved versions</strong><span>{tailoring.versions.length}</span></div>
+          {tailoring.versions.map(version => (
+            <div className="resume-version-row" key={version.id}>
+              <div>
+                <strong>{version.id}</strong>
+                <span>{new Date(version.created_at).toLocaleString()} · {version.changes.length} change{version.changes.length === 1 ? "" : "s"}</span>
+                {version.warnings.map(warning => <small key={warning}>{warning}</small>)}
+              </div>
+              <div className="resume-version-downloads">
+                {version.docx_available ? <a className="button compact" href={resumeDownloadUrl(version.id, "docx")}>Word</a> : null}
+                {version.pdf_available ? <a className="button compact" href={resumeDownloadUrl(version.id, "pdf")}>PDF</a> : null}
+              </div>
+            </div>
+          ))}
+        </section>
+      ) : null}
+
+      {status ? <div className="resume-tailoring-status" role="status" aria-live="polite">{status}</div> : null}
+    </article>
+  );
+}
+
+function KeywordGroup({ label, values, muted = false }: { label: string; values: string[]; muted?: boolean }) {
+  if (!values.length) return null;
+  return (
+    <div className={`resume-keywords${muted ? " muted" : ""}`}>
+      <span>{label}</span>
+      <div>{values.map(value => <small key={value}>{value}</small>)}</div>
+    </div>
   );
 }
 

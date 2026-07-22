@@ -54,7 +54,7 @@ class HunterAgentHistoryTest(unittest.TestCase):
         self.assertEqual(result["cleared"], 2)
         self.assertEqual(chat_history.list_messages(), [])
 
-    def test_initialize_creates_agent_messages_and_posting_snapshots_schema_version_six(self):
+    def test_initialize_creates_agent_messages_posting_snapshots_and_resume_versions_schema_version_seven(self):
         sqlite_store.initialize()
 
         with sqlite_store.connect() as connection:
@@ -64,11 +64,15 @@ class HunterAgentHistoryTest(unittest.TestCase):
             snapshot_table = connection.execute(
                 "SELECT name FROM sqlite_master WHERE type='table' AND name='posting_snapshots'"
             ).fetchone()
+            resume_versions_table = connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='resume_versions'"
+            ).fetchone()
             version = connection.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
 
         self.assertEqual(table["name"], "agent_messages")
         self.assertEqual(snapshot_table["name"], "posting_snapshots")
-        self.assertEqual(version["value"], "6")
+        self.assertEqual(resume_versions_table["name"], "resume_versions")
+        self.assertEqual(version["value"], "7")
         self.assertEqual(chat_history.API_VERSION, 2)
 
 

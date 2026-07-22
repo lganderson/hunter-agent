@@ -39,6 +39,18 @@ POSTING_SNAPSHOT_FIELDS = [
     "warnings",
 ]
 
+RESUME_VERSION_FIELDS = [
+    "id",
+    "application_id",
+    "created_at",
+    "guidance",
+    "source_filename",
+    "docx_path",
+    "pdf_path",
+    "changes_json",
+    "warnings_json",
+]
+
 CONTACT_FIELDS = [
     "id",
     "name",

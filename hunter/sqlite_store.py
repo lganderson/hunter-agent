@@ -285,6 +285,19 @@ def initialize():
             ")"
         )
         connection.execute(
+            "CREATE TABLE IF NOT EXISTS resume_versions ("
+            "id TEXT PRIMARY KEY, "
+            "application_id TEXT NOT NULL, "
+            "created_at TEXT NOT NULL, "
+            "guidance TEXT NOT NULL DEFAULT '', "
+            "source_filename TEXT NOT NULL DEFAULT '', "
+            "docx_path TEXT NOT NULL DEFAULT '', "
+            "pdf_path TEXT NOT NULL DEFAULT '', "
+            "changes_json TEXT NOT NULL DEFAULT '[]', "
+            "warnings_json TEXT NOT NULL DEFAULT '[]'"
+            ")"
+        )
+        connection.execute(
             "CREATE TABLE IF NOT EXISTS application_contacts ("
             "application_id TEXT NOT NULL, "
             "contact_id TEXT NOT NULL, "
@@ -366,7 +379,7 @@ def initialize():
         )
         ensure_text_columns(connection, "company_career_scans", schema.COMPANY_CAREER_SCAN_FIELDS)
         connection.execute(
-            "INSERT INTO meta(key, value) VALUES('schema_version', '6') "
+            "INSERT INTO meta(key, value) VALUES('schema_version', '7') "
             "ON CONFLICT(key) DO UPDATE SET value=excluded.value"
         )
 
@@ -820,6 +833,48 @@ def write_posting_snapshot(application_id, values):
         field: (saved[field] or "") if field in preserved_fields else storage.clean(saved[field])
         for field in schema.POSTING_SNAPSHOT_FIELDS
     }
+
+
+def read_resume_versions(application_id=""):
+    initialize()
+    params = []
+    where = ""
+    wanted = storage.clean(application_id).upper()
+    if wanted:
+        where = " WHERE upper(application_id) = ?"
+        params.append(wanted)
+    quoted_fields = ", ".join(f'"{field}"' for field in schema.RESUME_VERSION_FIELDS)
+    with connect() as connection:
+        rows = connection.execute(
+            f"SELECT {quoted_fields} FROM resume_versions{where} ORDER BY created_at DESC, id DESC",
+            params,
+        ).fetchall()
+    return [
+        {
+            field: (row[field] or "") if field in {"guidance", "changes_json", "warnings_json"}
+            else storage.clean(row[field])
+            for field in schema.RESUME_VERSION_FIELDS
+        }
+        for row in rows
+    ]
+
+
+def write_resume_version(row):
+    initialize()
+    fields = schema.RESUME_VERSION_FIELDS
+    values = [
+        (row.get(field, "") or "") if field in {"guidance", "changes_json", "warnings_json"}
+        else storage.clean(row.get(field, ""))
+        for field in fields
+    ]
+    quoted_fields = ", ".join(f'"{field}"' for field in fields)
+    placeholders = ", ".join("?" for _ in fields)
+    with connect() as connection:
+        connection.execute(
+            f"INSERT INTO resume_versions ({quoted_fields}) VALUES ({placeholders})",
+            values,
+        )
+    return {field: values[index] for index, field in enumerate(fields)}
 
 
 def record_event(entity_type, entity_id, event_type, data):

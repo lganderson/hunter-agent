@@ -16,6 +16,10 @@ import type {
   ContactUpdates,
   PostingSnapshot,
   ResumeText,
+  ResumeChange,
+  ResumePlan,
+  ResumeTailoringStatus,
+  ResumeVersion,
   SettingsStatus,
   Workflow,
   WorkflowActionType,
@@ -115,6 +119,37 @@ export function deleteResume(): Promise<SettingsStatus> {
 
 export async function getResumeText(): Promise<ResumeText> {
   return readJson<ResumeText>(await fetch("/api/settings/resume/text", { cache: "no-store" }));
+}
+
+export async function getResumeTailoringStatus(applicationId: string): Promise<ResumeTailoringStatus> {
+  const query = new URLSearchParams({ application_id: applicationId });
+  return readJson<ResumeTailoringStatus>(await fetch(`/api/resumes/status?${query.toString()}`, { cache: "no-store" }));
+}
+
+export function planResumeChanges(applicationId: string, guidance: string): Promise<{ plan: ResumePlan }> {
+  return postJson<{ plan: ResumePlan }>("/api/resumes/plan", {
+    application_id: applicationId,
+    guidance
+  });
+}
+
+export function createResumeVersion(
+  applicationId: string,
+  guidance: string,
+  sourceHash: string,
+  changes: ResumeChange[]
+): Promise<{ version: ResumeVersion }> {
+  return postJson<{ version: ResumeVersion }>("/api/resumes/create", {
+    application_id: applicationId,
+    guidance,
+    source_hash: sourceHash,
+    changes
+  });
+}
+
+export function resumeDownloadUrl(versionId: string, format: "docx" | "pdf"): string {
+  const query = new URLSearchParams({ id: versionId, format });
+  return `/api/resumes/download?${query.toString()}`;
 }
 
 export function generateActions(useAi: boolean): Promise<{ created: number; warnings: string[] }> {

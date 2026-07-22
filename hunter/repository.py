@@ -165,3 +165,15 @@ def write_posting_snapshot(application_id, values):
     if using_sqlite():
         return sqlite_store.write_posting_snapshot(application_id, values)
     return None
+
+
+def read_resume_versions(application_id=""):
+    if using_sqlite():
+        return sqlite_store.read_resume_versions(application_id)
+    return []
+
+
+def write_resume_version(row):
+    if not using_sqlite():
+        raise ValueError("Resume versions require the local SQLite store.")
+    return sqlite_store.write_resume_version(row)
