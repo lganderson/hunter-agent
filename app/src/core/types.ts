@@ -240,6 +240,45 @@ export type ResumeText = {
   configured: boolean;
 };
 
+export type ResumeChange = {
+  id: string;
+  old_text: string;
+  new_text: string;
+  reason: string;
+  keywords: string[];
+};
+
+export type ResumePlan = {
+  application_id: string;
+  source_filename: string;
+  source_hash: string;
+  summary: string;
+  matched_keywords: string[];
+  missing_keywords: string[];
+  changes: ResumeChange[];
+};
+
+export type ResumeVersion = {
+  id: string;
+  application_id: string;
+  created_at: string;
+  guidance: string;
+  source_filename: string;
+  changes: ResumeChange[];
+  warnings: string[];
+  docx_available: boolean;
+  pdf_available: boolean;
+};
+
+export type ResumeTailoringStatus = {
+  base_resume: {
+    configured: boolean;
+    filename: string;
+    format_preserving_supported: boolean;
+  };
+  versions: ResumeVersion[];
+};
+
 export type ApplicationUpdates = Partial<
   Pick<
     Application,
