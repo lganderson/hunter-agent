@@ -140,6 +140,28 @@ def clear_company_career_scans():
         sqlite_store.clear_company_career_scans()
 
 
+def read_discovery_searches():
+    if using_sqlite():
+        return sqlite_store.read_discovery_searches()
+    return []
+
+
+def write_discovery_searches(rows):
+    if using_sqlite():
+        sqlite_store.write_discovery_searches(rows)
+
+
+def read_discovery_candidates():
+    if using_sqlite():
+        return sqlite_store.read_discovery_candidates()
+    return []
+
+
+def write_discovery_candidates(rows):
+    if using_sqlite():
+        sqlite_store.write_discovery_candidates(rows)
+
+
 def read_posting_note(application_id):
     if using_sqlite():
         return sqlite_store.read_posting_note(application_id)

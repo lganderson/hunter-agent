@@ -3,6 +3,7 @@
 from datetime import date, datetime
 
 from . import actions as action_store
+from . import discovery as discovery_store
 from . import repository, schema, storage, workflow
 
 
@@ -77,4 +78,6 @@ def build_payload():
         "company_career_sources": repository.read_company_career_sources(),
         "company_posting_candidates": repository.read_company_posting_candidates(),
         "company_career_scans": repository.read_company_career_scans(limit=200),
+        "discovery_searches": discovery_store.list_searches(),
+        "discovery_candidates": repository.read_discovery_candidates(),
     }

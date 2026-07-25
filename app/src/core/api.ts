@@ -14,6 +14,12 @@ import type {
   CompanyUpdates,
   Contact,
   ContactUpdates,
+  DiscoveryCandidate,
+  DiscoveryCandidateDetails,
+  DiscoveryRunResult,
+  DiscoverySearch,
+  DiscoverySearchLane,
+  DiscoverySearchUpdates,
   PostingSnapshot,
   ResumeText,
   ResumeChange,
@@ -247,6 +253,55 @@ export function checkCompanyPostings(id: string, signal?: AbortSignal): Promise<
 
 export function checkAllCompanyPostings(): Promise<CompanyCheckAllResult> {
   return postJson<CompanyCheckAllResult>("/api/companies/check-all", {});
+}
+
+export function upsertDiscoverySearch(id: string, updates: DiscoverySearchUpdates): Promise<{ search: DiscoverySearch }> {
+  return postJson<{ search: DiscoverySearch }>("/api/discovery/searches/upsert", { id, updates });
+}
+
+export function openLinkedInDiscoverySearch(
+  id: string
+): Promise<{ search: DiscoverySearch; url: string; lanes: DiscoverySearchLane[] }> {
+  return postJson<{ search: DiscoverySearch; url: string; lanes: DiscoverySearchLane[] }>(
+    "/api/discovery/searches/open-linkedin",
+    { id }
+  );
+}
+
+export function runDiscoverySearch(id: string): Promise<DiscoveryRunResult> {
+  return postJson<DiscoveryRunResult>("/api/discovery/searches/run", { id });
+}
+
+export function captureDiscoveryCandidates(
+  searchId: string,
+  captureText: string,
+  details: DiscoveryCandidateDetails = {}
+): Promise<{ captured: DiscoveryCandidate[]; count: number }> {
+  return postJson<{ captured: DiscoveryCandidate[]; count: number }>("/api/discovery/candidates/capture", {
+    search_id: searchId,
+    capture_text: captureText,
+    details
+  });
+}
+
+export function updateDiscoveryCandidateDetails(
+  id: string,
+  updates: DiscoveryCandidateDetails
+): Promise<{ candidate: DiscoveryCandidate }> {
+  return postJson<{ candidate: DiscoveryCandidate }>("/api/discovery/candidates/details", { id, updates });
+}
+
+export function updateDiscoveryCandidate(id: string, status: string): Promise<{ candidate: DiscoveryCandidate }> {
+  return postJson<{ candidate: DiscoveryCandidate }>("/api/discovery/candidates/update", { id, status });
+}
+
+export function ingestDiscoveryCandidate(
+  id: string
+): Promise<{ candidate: DiscoveryCandidate; posting: Application; created: boolean }> {
+  return postJson<{ candidate: DiscoveryCandidate; posting: Application; created: boolean }>(
+    "/api/discovery/candidates/ingest",
+    { id }
+  );
 }
 
 export function linkCompanyContact(companyId: string, contactId: string): Promise<{ link: { company_id: string; contact_id: string } }> {

@@ -37,6 +37,8 @@ The older files in `scripts/` are still supported as thin wrappers and implement
 - `hunter/actions.py`: action storage operations shared by the app server and scripts.
 - `hunter/applications.py`: posting/application update operations.
 - `hunter/companies.py`: career-site adapters, canonical candidate normalization, deduplication, availability verification, and scan telemetry.
+- `hunter/discovery.py`: saved open-web search definitions, automatic multi-source retrieval, optional link capture, employer-page extraction, criteria filtering, fit scoring, and posting ingestion.
+- `hunter/browser_discovery.py`: dedicated Hunter Chrome window discovery, paced Google/LinkedIn search tabs, visible result extraction, challenge detection, and temporary-tab cleanup.
 - `hunter/app_state.py`: runtime JSON serialization for the dashboard API.
 - `hunter/mcp_server.py`: dependency-free stdio MCP server for agent access.
 - `hunter/commands.py`: top-level command dispatcher used by `hunter.py`.
@@ -51,6 +53,7 @@ The older files in `scripts/` are still supported as thin wrappers and implement
 - `app/src/postings/`: postings list and posting detail management.
 - `app/src/actions/`: actions route and action status updates.
 - `app/src/contacts/`: contacts route, contact modal, and posting associations.
+- `app/src/candidates/`: tracked-company candidate review and the Discovery search/capture mode.
 - `app/src/settings/`: local AI/provider settings and workflow management controls.
 
 ## Storage Mode
@@ -97,6 +100,25 @@ Company career extraction persists two related record types:
 - `company_career_scans` stores one summary per check, including adapter type,
   request successes and failures, extracted and unique counts, availability
   changes, verification skips, and structured errors.
+
+Discovery persists saved definitions in `discovery_searches` and one reviewable
+result per saved search and source URL in `discovery_candidates`. Search
+coverage is stored as a `lanes` array on the definition; every lane owns a
+label, location, and selected workplace types. No location or lane combination
+is product-hardcoded. A local run expands every lane into predefined web-search
+strategies for known ATS domains, direct posting pages across the web, and
+LinkedIn job URLs. It does not invoke watched-company career sources or the
+Companies-mode adapters. Retrieval uses the dedicated Hunter Chrome window:
+Google supplies open-web and ATS result links, while LinkedIn uses the signed-in
+jobs search. The bridge identifies that profile by a local Hunter marker tab,
+does not read cookies or credentials, paces requests, closes temporary tabs, and
+stops on verification challenges. Results are deduplicated, challenged and
+collection pages are rejected, individual posting pages are extracted,
+location/work-mode criteria are applied locally, and matches run through the
+shared fit scorer. LinkedIn card details produce a partial result until an
+employer URL or copied posting content is available. Ingestion creates a normal
+posting and retains a manual posting snapshot when description text is
+available.
 
 The canonical normalization step is shared across adapters. Adapter-specific
 code should return the most structured title, URL, location, work mode,

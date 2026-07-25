@@ -23,6 +23,7 @@ from hunter import applications as application_store
 from hunter import chat_history
 from hunter import companies as company_store
 from hunter import contacts as contact_store
+from hunter import discovery as discovery_store
 from hunter import settings as settings_store
 from hunter import workflow as workflow_store
 
@@ -563,6 +564,92 @@ class AppHandler(SimpleHTTPRequestHandler):
             payload = self.read_json()
             try:
                 result = company_store.ingest_candidate(payload.get("id", ""))
+            except ValueError as exc:
+                self.send_json({"error": str(exc)}, status=400)
+                return
+            self.send_json(result)
+            return
+
+        if path == "/api/discovery/searches/upsert":
+            payload = self.read_json()
+            try:
+                search = discovery_store.upsert_search(
+                    search_id=payload.get("id", ""),
+                    updates=payload.get("updates", {}),
+                )
+            except ValueError as exc:
+                self.send_json({"error": str(exc)}, status=400)
+                return
+            self.send_json({"search": search})
+            return
+
+        if path == "/api/discovery/searches/open-linkedin":
+            payload = self.read_json()
+            try:
+                result = discovery_store.open_linkedin_search(payload.get("id", ""))
+            except ValueError as exc:
+                self.send_json({"error": str(exc)}, status=400)
+                return
+            self.send_json(result)
+            return
+
+        if path == "/api/discovery/searches/run":
+            payload = self.read_json()
+            try:
+                result = discovery_store.run_search(payload.get("id", ""))
+            except ValueError as exc:
+                self.send_json({"error": str(exc)}, status=400)
+                return
+            except RuntimeError as exc:
+                self.send_json({"error": str(exc)}, status=502)
+                return
+            self.send_json(result)
+            return
+
+        if path == "/api/discovery/candidates/capture":
+            payload = self.read_json()
+            try:
+                result = discovery_store.capture_candidates(
+                    search_id=payload.get("search_id", ""),
+                    capture_text=payload.get("capture_text", ""),
+                    details=payload.get("details", {}),
+                )
+            except ValueError as exc:
+                self.send_json({"error": str(exc)}, status=400)
+                return
+            self.send_json(result)
+            return
+
+        if path == "/api/discovery/candidates/details":
+            payload = self.read_json()
+            try:
+                candidate = discovery_store.update_candidate_details(
+                    candidate_id=payload.get("id", ""),
+                    updates=payload.get("updates", {}),
+                )
+            except ValueError as exc:
+                self.send_json({"error": str(exc)}, status=400)
+                return
+            self.send_json({"candidate": candidate})
+            return
+
+        if path == "/api/discovery/candidates/update":
+            payload = self.read_json()
+            try:
+                candidate = discovery_store.update_candidate_status(
+                    candidate_id=payload.get("id", ""),
+                    status=payload.get("status", ""),
+                )
+            except ValueError as exc:
+                self.send_json({"error": str(exc)}, status=400)
+                return
+            self.send_json({"candidate": candidate})
+            return
+
+        if path == "/api/discovery/candidates/ingest":
+            payload = self.read_json()
+            try:
+                result = discovery_store.ingest_candidate(payload.get("id", ""))
             except ValueError as exc:
                 self.send_json({"error": str(exc)}, status=400)
                 return

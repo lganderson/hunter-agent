@@ -162,6 +162,73 @@ export type CompanyCareerScan = {
   errors_json: string;
 };
 
+export type DiscoverySearch = {
+  id: string;
+  name: string;
+  keywords: string;
+  lanes: DiscoverySearchLaneDefinition[];
+  created_at: string;
+  updated_at: string;
+  last_opened_at: string;
+};
+
+export type DiscoveryCandidate = {
+  id: string;
+  search_id: string;
+  company: string;
+  title: string;
+  url: string;
+  canonical_url: string;
+  location: string;
+  work_mode: string;
+  source_platform: string;
+  captured_at: string;
+  last_seen_at: string;
+  status: string;
+  processing_status: string;
+  fit_score: string;
+  fit_summary: string;
+  fit_checked_at: string;
+  description_text: string;
+  description_excerpt: string;
+  warnings: string;
+  ingested_application_id: string;
+  notes: string;
+};
+
+export type DiscoverySearchLaneDefinition = {
+  id: string;
+  label: string;
+  location: string;
+  work_modes: Array<"on-site" | "hybrid" | "remote">;
+};
+
+export type DiscoverySearchLane = DiscoverySearchLaneDefinition & {
+  url: string;
+};
+
+export type DiscoverySourceRun = {
+  source: string;
+  label: string;
+  lane_id: string;
+  lane_label: string;
+  query: string;
+  found_count: number;
+  engine: string;
+};
+
+export type DiscoveryRunResult = {
+  search: DiscoverySearch;
+  captured: DiscoveryCandidate[];
+  evaluated_count: number;
+  found_count: number;
+  new_count: number;
+  updated_count: number;
+  skipped_count: number;
+  sources: DiscoverySourceRun[];
+  errors: string[];
+};
+
 export type WorkflowStage = {
   id: string;
   label: string;
@@ -200,6 +267,8 @@ export type AppState = {
   company_career_sources: CompanyCareerSource[];
   company_posting_candidates: CompanyPostingCandidate[];
   company_career_scans: CompanyCareerScan[];
+  discovery_searches: DiscoverySearch[];
+  discovery_candidates: DiscoveryCandidate[];
 };
 
 export type SettingsStatus = {
@@ -308,6 +377,12 @@ export type ActionUpdates = Partial<Pick<Action, "title" | "description" | "type
 export type ContactUpdates = Partial<Omit<Contact, "id">>;
 
 export type CompanyUpdates = Partial<Omit<Company, "id" | "last_checked_at" | "last_check_status">>;
+
+export type DiscoverySearchUpdates = Pick<DiscoverySearch, "name" | "keywords" | "lanes">;
+
+export type DiscoveryCandidateDetails = Partial<
+  Pick<DiscoveryCandidate, "company" | "title" | "canonical_url" | "location" | "work_mode" | "description_text" | "notes">
+>;
 
 export type AgentChatMessage = {
   role: "user" | "assistant";

@@ -43,7 +43,13 @@ export function buildAgentContext(pathname: string, search: string, data: AppSta
   if (segments[0] === "companies") {
     return { ...base, route: segments[1] === "new" ? "company-new" : "companies", label: segments[1] === "new" ? "Add company" : "Companies" };
   }
-  if (segments[0] === "candidates") return { ...base, route: "candidates", label: "Posting candidates" };
+  if (segments[0] === "candidates") {
+    return {
+      ...base,
+      route: "candidates",
+      label: query.mode === "discovery" ? "Discovery" : "Posting candidates"
+    };
+  }
   if (segments[0] === "actions") return { ...base, route: "actions", label: "Actions" };
   if (segments[0] === "contacts") return { ...base, route: "contacts", label: "Contacts" };
   if (segments[0] === "settings") return { ...base, route: "settings", label: "Search goals and settings" };
@@ -87,6 +93,17 @@ export function agentExperience(context: AgentContext, data: AppState): AgentExp
         ]
       };
     case "candidates":
+      if (context.query.mode === "discovery") {
+        return {
+          title: "Discovery",
+          description: "Process found roles, fill evidence gaps, and compare fit.",
+          starters: [
+            { label: "Review strongest fits", prompt: "Review my strongest new Discovery results and explain the evidence behind each fit." },
+            { label: "Find missing details", prompt: "Which Discovery results need more information before I can evaluate them?" },
+            { label: "Choose roles to ingest", prompt: "Which Discovery results should I ingest into my posting pipeline, and why?" }
+          ]
+        };
+      }
       return {
         title: "Candidate review",
         description: "Compare fit and clear the review queue.",

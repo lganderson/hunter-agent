@@ -226,6 +226,23 @@ and verification state. Hunter also records a scan summary for every check so
 successful, partial, and failed scans can be distinguished and raw extraction
 counts can be compared with unique candidates.
 
+The Candidates view also includes **Discovery** for roles outside tracked
+companies. Each saved definition owns one or more search lanes. A lane has its
+own label, location, and any combination of on-site, hybrid, and remote work
+modes. One **Search now** action runs every configured lane through Hunter's
+built-in web strategies for direct posting pages, major ATS boards, and
+LinkedIn job postings. Discovery uses the dedicated, signed-in Hunter Chrome
+profile for Google and LinkedIn searches. Searches are paced, temporary tabs
+are closed after result links are collected, and Hunter stops if either site
+asks for verification. This does not scan the watched-company sources
+owned by Companies mode. For example, one definition can combine a Minnesota
+lane across all work modes with a U.S.-wide remote-only lane. Hunter
+deduplicates the result URLs, verifies individual postings, reads direct
+posting pages, filters them against the lane's location and work modes, and
+scores the matches. Manual link capture remains available as an optional
+fallback. LinkedIn card details remain partial until an employer posting URL
+or copied posting content is available.
+
 Add a new opportunity:
 
 ```bash

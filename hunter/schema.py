@@ -141,6 +141,42 @@ COMPANY_CAREER_SCAN_FIELDS = [
     "errors_json",
 ]
 
+DISCOVERY_SEARCH_FIELDS = [
+    "id",
+    "name",
+    "keywords",
+    "location",
+    "remote_location",
+    "lanes_json",
+    "created_at",
+    "updated_at",
+    "last_opened_at",
+]
+
+DISCOVERY_CANDIDATE_FIELDS = [
+    "id",
+    "search_id",
+    "company",
+    "title",
+    "url",
+    "canonical_url",
+    "location",
+    "work_mode",
+    "source_platform",
+    "captured_at",
+    "last_seen_at",
+    "status",
+    "processing_status",
+    "fit_score",
+    "fit_summary",
+    "fit_checked_at",
+    "description_text",
+    "description_excerpt",
+    "warnings",
+    "ingested_application_id",
+    "notes",
+]
+
 INTERVIEW_FIELDS = [
     "id",
     "application_id",
@@ -246,3 +282,5 @@ DEFAULT_COMPANY_INTEREST_STATUS = "neutral"
 COMPANY_INTEREST_STATUSES = {"interested", "neutral", "archived"}
 COMPANY_POSTING_CANDIDATE_STATUSES = {"new", "ignored", "ingested", "unavailable"}
 COMPANY_POSTING_CANDIDATE_SCAN_STATES = {"current", "not-seen", "verification-pending", "unavailable"}
+DISCOVERY_CANDIDATE_STATUSES = {"new", "ignored", "ingested"}
+DISCOVERY_PROCESSING_STATUSES = {"ready", "partial", "needs-details"}

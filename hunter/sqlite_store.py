@@ -209,6 +209,93 @@ def ensure_text_columns(connection, table, columns):
             connection.execute(f'ALTER TABLE {table} ADD COLUMN "{column}" TEXT NOT NULL DEFAULT ""')
 
 
+def discovery_candidates_table_sql(table="discovery_candidates", if_not_exists=True):
+    qualifier = "IF NOT EXISTS " if if_not_exists else ""
+    return (
+        f"CREATE TABLE {qualifier}{table} ("
+        "id TEXT PRIMARY KEY, "
+        "search_id TEXT NOT NULL DEFAULT '', "
+        "company TEXT NOT NULL DEFAULT '', "
+        "title TEXT NOT NULL DEFAULT '', "
+        "url TEXT NOT NULL DEFAULT '', "
+        "canonical_url TEXT NOT NULL DEFAULT '', "
+        "location TEXT NOT NULL DEFAULT '', "
+        "work_mode TEXT NOT NULL DEFAULT '', "
+        "source_platform TEXT NOT NULL DEFAULT '', "
+        "captured_at TEXT NOT NULL DEFAULT '', "
+        "last_seen_at TEXT NOT NULL DEFAULT '', "
+        "status TEXT NOT NULL DEFAULT 'new', "
+        "processing_status TEXT NOT NULL DEFAULT 'needs-details', "
+        "fit_score TEXT NOT NULL DEFAULT '', "
+        "fit_summary TEXT NOT NULL DEFAULT '', "
+        "fit_checked_at TEXT NOT NULL DEFAULT '', "
+        "description_text TEXT NOT NULL DEFAULT '', "
+        "description_excerpt TEXT NOT NULL DEFAULT '', "
+        "warnings TEXT NOT NULL DEFAULT '', "
+        "ingested_application_id TEXT NOT NULL DEFAULT '', "
+        "notes TEXT NOT NULL DEFAULT '', "
+        "UNIQUE(search_id, url)"
+        ")"
+    )
+
+
+def migrate_discovery_candidates_constraint(connection):
+    definition = connection.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'discovery_candidates'"
+    ).fetchone()
+    if not definition or "UNIQUE(url)" not in (definition["sql"] or "").replace(" ", ""):
+        return
+    fields = schema.DISCOVERY_CANDIDATE_FIELDS
+    quoted_fields = ", ".join(f'"{field}"' for field in fields)
+    rows = connection.execute(f"SELECT {quoted_fields} FROM discovery_candidates").fetchall()
+    connection.execute("DROP TABLE IF EXISTS discovery_candidates_new")
+    connection.execute(discovery_candidates_table_sql("discovery_candidates_new", if_not_exists=False))
+    if rows:
+        placeholders = ", ".join("?" for _ in fields)
+        connection.executemany(
+            f"INSERT INTO discovery_candidates_new ({quoted_fields}) VALUES ({placeholders})",
+            [[row[field] or "" for field in fields] for row in rows],
+        )
+    connection.execute("DROP TABLE discovery_candidates")
+    connection.execute("ALTER TABLE discovery_candidates_new RENAME TO discovery_candidates")
+
+
+def migrate_discovery_search_lanes(connection):
+    rows = connection.execute(
+        "SELECT id, location, remote_location, lanes_json FROM discovery_searches"
+    ).fetchall()
+    all_work_modes = ["on-site", "hybrid", "remote"]
+    for row in rows:
+        if storage.clean(row["lanes_json"]):
+            continue
+        lanes = []
+        location = storage.clean(row["location"])
+        remote_location = storage.clean(row["remote_location"])
+        if location:
+            lanes.append(
+                {
+                    "id": "primary",
+                    "label": location,
+                    "location": location,
+                    "work_modes": all_work_modes,
+                }
+            )
+        if remote_location:
+            lanes.append(
+                {
+                    "id": "remote",
+                    "label": f"{remote_location} remote",
+                    "location": remote_location,
+                    "work_modes": ["remote"],
+                }
+            )
+        if lanes:
+            connection.execute(
+                "UPDATE discovery_searches SET lanes_json = ? WHERE id = ?",
+                (json.dumps(lanes), row["id"]),
+            )
+
+
 def seed_workflow_defaults(connection):
     for row in schema.DEFAULT_WORKFLOW_STAGES:
         connection.execute(
@@ -386,7 +473,25 @@ def initialize():
         )
         ensure_text_columns(connection, "company_career_scans", schema.COMPANY_CAREER_SCAN_FIELDS)
         connection.execute(
-            "INSERT INTO meta(key, value) VALUES('schema_version', '8') "
+            "CREATE TABLE IF NOT EXISTS discovery_searches ("
+            "id TEXT PRIMARY KEY, "
+            "name TEXT NOT NULL DEFAULT '', "
+            "keywords TEXT NOT NULL DEFAULT '', "
+            "location TEXT NOT NULL DEFAULT '', "
+            "remote_location TEXT NOT NULL DEFAULT '', "
+            "lanes_json TEXT NOT NULL DEFAULT '', "
+            "created_at TEXT NOT NULL DEFAULT '', "
+            "updated_at TEXT NOT NULL DEFAULT '', "
+            "last_opened_at TEXT NOT NULL DEFAULT ''"
+            ")"
+        )
+        ensure_text_columns(connection, "discovery_searches", schema.DISCOVERY_SEARCH_FIELDS)
+        migrate_discovery_search_lanes(connection)
+        connection.execute(discovery_candidates_table_sql())
+        ensure_text_columns(connection, "discovery_candidates", schema.DISCOVERY_CANDIDATE_FIELDS)
+        migrate_discovery_candidates_constraint(connection)
+        connection.execute(
+            "INSERT INTO meta(key, value) VALUES('schema_version', '11') "
             "ON CONFLICT(key) DO UPDATE SET value=excluded.value"
         )
 
@@ -708,6 +813,74 @@ def clear_company_career_scans():
     initialize()
     with connect() as connection:
         connection.execute("DELETE FROM company_career_scans")
+
+
+def read_discovery_searches():
+    initialize()
+    fields = schema.DISCOVERY_SEARCH_FIELDS
+    quoted_fields = ", ".join(f'"{field}"' for field in fields)
+    with connect() as connection:
+        rows = connection.execute(
+            f"SELECT {quoted_fields} FROM discovery_searches ORDER BY lower(name), id"
+        ).fetchall()
+    return [{field: storage.clean(row[field]) for field in fields} for row in rows]
+
+
+def write_discovery_searches(rows):
+    initialize()
+    fields = schema.DISCOVERY_SEARCH_FIELDS
+    placeholders = ", ".join("?" for _ in fields)
+    quoted_fields = ", ".join(f'"{field}"' for field in fields)
+    values = [[storage.clean(row.get(field, "")) for field in fields] for row in rows]
+    with connect() as connection:
+        connection.execute("DELETE FROM discovery_searches")
+        if values:
+            connection.executemany(
+                f"INSERT INTO discovery_searches ({quoted_fields}) VALUES ({placeholders})",
+                values,
+            )
+
+
+def read_discovery_candidates():
+    initialize()
+    fields = schema.DISCOVERY_CANDIDATE_FIELDS
+    quoted_fields = ", ".join(f'"{field}"' for field in fields)
+    preserved_fields = {"description_text", "warnings", "notes"}
+    with connect() as connection:
+        rows = connection.execute(
+            f"SELECT {quoted_fields} FROM discovery_candidates "
+            "ORDER BY captured_at DESC, lower(company), lower(title), id"
+        ).fetchall()
+    return [
+        {
+            field: (row[field] or "") if field in preserved_fields else storage.clean(row[field])
+            for field in fields
+        }
+        for row in rows
+    ]
+
+
+def write_discovery_candidates(rows):
+    initialize()
+    fields = schema.DISCOVERY_CANDIDATE_FIELDS
+    preserved_fields = {"description_text", "warnings", "notes"}
+    placeholders = ", ".join("?" for _ in fields)
+    quoted_fields = ", ".join(f'"{field}"' for field in fields)
+    values = [
+        [
+            (row.get(field, "") or "") if field in preserved_fields
+            else storage.clean(row.get(field, ""))
+            for field in fields
+        ]
+        for row in rows
+    ]
+    with connect() as connection:
+        connection.execute("DELETE FROM discovery_candidates")
+        if values:
+            connection.executemany(
+                f"INSERT INTO discovery_candidates ({quoted_fields}) VALUES ({placeholders})",
+                values,
+            )
 
 
 def read_posting_note(application_id):

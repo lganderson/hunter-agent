@@ -16,6 +16,7 @@ import {
   isRecommendedCandidate,
   type CandidateFilter
 } from "../companies/candidateUtils";
+import { DiscoveryMode } from "./DiscoveryMode";
 
 type CandidateReviewPageProps = {
   data: AppState;
@@ -35,6 +36,7 @@ const SORT_VALUES = ["fit", "last_seen", "company", "title"];
 
 export function CandidatesPage({ data, refresh }: CandidateReviewPageProps) {
   const [searchParams, setSearchParams] = useSearchParams();
+  const mode = searchParams.get("mode") === "discovery" ? "discovery" : "companies";
   const [search, setSearch] = useState("");
   const [candidateFilter, setCandidateFilter] = useState<CandidateFilter>(() => candidateFilterFromQuery(searchParams.get("status")));
   const [interestStatuses, setInterestStatuses] = useState<string[]>(INTEREST_VALUES);
@@ -266,9 +268,25 @@ export function CandidatesPage({ data, refresh }: CandidateReviewPageProps) {
     setSearchParams({});
   }
 
+  function chooseMode(nextMode: "companies" | "discovery") {
+    setSearchParams(nextMode === "discovery" ? { mode: "discovery" } : {});
+  }
+
+  if (mode === "discovery") {
+    return (
+      <section className="view-section" id="candidates-view" aria-label="Discovery candidates">
+        <article className="panel">
+          <CandidateModeSwitch mode={mode} chooseMode={chooseMode} />
+          <DiscoveryMode data={data} refresh={refresh} />
+        </article>
+      </section>
+    );
+  }
+
   return (
     <section className="view-section" id="candidates-view" aria-label="Posting candidates">
       <article className="panel">
+        <CandidateModeSwitch mode={mode} chooseMode={chooseMode} />
         <div className="toolbar" aria-label="Candidate filters">
           <label className="search">
             <span className="sr-only">Search posting candidates</span>
@@ -390,6 +408,21 @@ export function CandidatesPage({ data, refresh }: CandidateReviewPageProps) {
         </div>
       </article>
     </section>
+  );
+}
+
+function CandidateModeSwitch({
+  mode,
+  chooseMode
+}: {
+  mode: "companies" | "discovery";
+  chooseMode: (mode: "companies" | "discovery") => void;
+}) {
+  return (
+    <div className="candidate-mode-switch" role="tablist" aria-label="Candidate source mode">
+      <button className={mode === "companies" ? "active" : ""} type="button" role="tab" aria-selected={mode === "companies"} onClick={() => chooseMode("companies")}>Companies</button>
+      <button className={mode === "discovery" ? "active" : ""} type="button" role="tab" aria-selected={mode === "discovery"} onClick={() => chooseMode("discovery")}>Discovery</button>
+    </div>
   );
 }
 
