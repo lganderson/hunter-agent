@@ -160,10 +160,15 @@ export function DiscoveryMode({ data, refresh }: DiscoveryModeProps) {
       const errorSuffix = result.errors.length
         ? ` ${result.errors.length} source search${result.errors.length === 1 ? "" : "es"} could not be completed.`
         : "";
+      const limitSuffix = result.limited_count
+        ? ` Hunter retained the top ${result.found_count} and held back ${result.limited_count} lower-ranked matches.`
+        : "";
       setOperationStatus(
-        `Discovery evaluated ${result.evaluated_count} results and kept ${result.found_count} `
-        + `that matched the search: `
-        + `${result.new_count} new and ${result.updated_count} refreshed.${errorSuffix}`
+        `Discovery reviewed ${result.evaluated_count} unique links across two result pages per source. `
+        + `${result.qualified_count} qualified after validation and lane matching; `
+        + `${result.new_count} are new and ${result.updated_count} were refreshed. `
+        + `${result.duplicate_count} duplicate${result.duplicate_count === 1 ? "" : "s"} collapsed.`
+        + `${limitSuffix}${errorSuffix}`
       );
     } catch (error) {
       setOperationStatus(`Discovery search failed. ${errorMessage(error)}`);
@@ -283,7 +288,7 @@ export function DiscoveryMode({ data, refresh }: DiscoveryModeProps) {
       {selectedSearch ? (
         <div className="discovery-source-note">
           <strong>Hunter Chrome</strong>
-          <span>Discovery searches Google for individual postings across the web and searches LinkedIn with your signed-in profile. It does not scan watched-company career pages; those stay in Companies.</span>
+          <span>Discovery searches two Google pages and two LinkedIn batches per lane, including controlled senior, staff, principal, project, and engineering program variants. It validates and scores matches before retaining the strongest 50. Watched-company career scans stay in Companies.</span>
         </div>
       ) : null}
 

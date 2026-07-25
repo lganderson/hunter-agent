@@ -1,7 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import quote, unquote_plus
 
 from hunter import app_state, browser_discovery, discovery, paths, repository, sqlite_store
 
@@ -59,6 +59,35 @@ class HunterDiscoveryTest(unittest.TestCase):
         self.assertGreater(delays[0], 1.25)
         self.assertLessEqual(delays[0], 1.75)
 
+    def test_hunter_chrome_builds_second_google_and_linkedin_pages(self):
+        opened_urls = []
+        browser = browser_discovery.HunterChrome()
+        browser._search_tab = (
+            lambda url, extraction_script, scroll=False: opened_urls.append((url, scroll)) or []
+        )
+
+        browser.google("technical program manager", page=1)
+        browser.linkedin(
+            "https://www.linkedin.com/jobs/search/?keywords=technical+program+manager&location=Minnesota",
+            page=1,
+        )
+
+        self.assertIn("start=10", opened_urls[0][0])
+        self.assertFalse(opened_urls[0][1])
+        self.assertIn("start=25", opened_urls[1][0])
+        self.assertTrue(opened_urls[1][1])
+
+    def test_candidate_ranking_prefers_fit_then_processing_completeness(self):
+        candidates = [
+            {"title": "Lower", "fit_score": "45", "processing_status": "ready", "description_text": "complete"},
+            {"title": "Partial", "fit_score": "60", "processing_status": "partial", "description_text": "short"},
+            {"title": "Strong", "fit_score": "90", "processing_status": "ready", "description_text": "complete"},
+        ]
+
+        ranked = sorted(candidates, key=discovery.candidate_rank_key, reverse=True)
+
+        self.assertEqual([candidate["title"] for candidate in ranked], ["Strong", "Partial", "Lower"])
+
     def save_search(self, name, keywords, lanes=None):
         return discovery.upsert_search(
             "",
@@ -102,7 +131,11 @@ class HunterDiscoveryTest(unittest.TestCase):
         self.assertEqual(search["id"], "DS0001")
         self.assertNotIn("location", search)
         self.assertEqual(search["lanes"][0]["label"], "Minnesota")
-        self.assertIn("technical+program+manager+developer+tools", opened["url"])
+        decoded_url = unquote_plus(opened["url"])
+        self.assertIn('"technical program manager"', decoded_url)
+        self.assertIn('"staff technical program manager"', decoded_url)
+        self.assertIn('"technical project manager"', decoded_url)
+        self.assertIn("developer tools", decoded_url)
         self.assertIn("location=Minnesota", opened["url"])
         self.assertEqual(len(opened["lanes"]), 2)
         self.assertIn("location=United+States", opened["lanes"][1]["url"])
@@ -214,8 +247,8 @@ class HunterDiscoveryTest(unittest.TestCase):
         linkedin_url = "https://www.linkedin.com/jobs/view/1234567890"
         browser_requests = []
 
-        def browser_searcher(engine, value):
-            browser_requests.append((engine, value))
+        def browser_searcher(engine, value, page):
+            browser_requests.append((engine, value, page))
             if engine == "linkedin":
                 return [
                     {
@@ -250,12 +283,19 @@ class HunterDiscoveryTest(unittest.TestCase):
             posting_fetcher=lambda url: {"status": 200, "final_url": url, "html": posting_page, "error": ""},
         )
 
-        self.assertEqual(len(browser_requests), len(search["lanes"]) * len(discovery.BUILT_IN_SEARCH_STRATEGIES))
+        expected_requests_per_lane = (
+            2 * discovery.GOOGLE_PAGE_COUNT
+            + discovery.LINKEDIN_PAGE_COUNT
+        )
+        self.assertEqual(len(browser_requests), len(search["lanes"]) * expected_requests_per_lane)
         self.assertEqual({request[0] for request in browser_requests}, {"google", "linkedin"})
-        self.assertTrue(any("google.com" not in value and "Minnesota" in value for engine, value in browser_requests if engine == "google"))
-        self.assertTrue(any("linkedin.com/jobs/search" in value for engine, value in browser_requests if engine == "linkedin"))
+        self.assertEqual({request[2] for request in browser_requests}, {0, 1})
+        self.assertTrue(any("google.com" not in value and "Minnesota" in value for engine, value, _page in browser_requests if engine == "google"))
+        self.assertTrue(any("linkedin.com/jobs/search" in value for engine, value, _page in browser_requests if engine == "linkedin"))
         self.assertEqual({source["engine"] for source in result["sources"]}, {"hunter-chrome-google", "hunter-chrome-linkedin"})
+        self.assertEqual({source["page_count"] for source in result["sources"]}, {2})
         self.assertEqual(result["found_count"], 2)
+        self.assertEqual(result["qualified_count"], 2)
         self.assertEqual({candidate["source_platform"] for candidate in result["captured"]}, {"ashby", "linkedin"})
 
     def test_search_now_rejects_blocked_or_collection_content_before_scoring(self):
@@ -290,6 +330,51 @@ class HunterDiscoveryTest(unittest.TestCase):
         self.assertEqual(result["evaluated_count"], 1)
         self.assertEqual(result["found_count"], 0)
         self.assertEqual(result["skipped_count"], 1)
+        self.assertEqual(repository.read_discovery_candidates(), [])
+
+    def test_search_now_applies_final_limit_after_qualification(self):
+        search = self.save_search("Technical platforms", "technical program manager")
+
+        def browser_searcher(engine, value, page):
+            return [
+                {
+                    "url": f"https://www.linkedin.com/jobs/view/{1234567800 + index}",
+                    "title": f"Technical Program Manager at Company {index}",
+                    "snippet": "Remote in the United States. Own technical platform programs.",
+                }
+                for index in range(3)
+            ]
+
+        original_limit = discovery.DISCOVERY_RESULT_LIMIT
+        discovery.DISCOVERY_RESULT_LIMIT = 2
+        try:
+            result = discovery.run_search(
+                search["id"],
+                browser_searcher=browser_searcher,
+            )
+        finally:
+            discovery.DISCOVERY_RESULT_LIMIT = original_limit
+
+        self.assertEqual(result["evaluated_count"], 3)
+        self.assertEqual(result["qualified_count"], 3)
+        self.assertEqual(result["found_count"], 2)
+        self.assertEqual(result["limited_count"], 1)
+        self.assertEqual(len(repository.read_discovery_candidates()), 2)
+
+    def test_search_now_stops_when_a_paged_source_requests_verification(self):
+        search = self.save_search("Technical platforms", "technical program manager")
+        browser_requests = []
+
+        def browser_searcher(engine, value, page):
+            browser_requests.append((engine, page))
+            if page == 1:
+                raise browser_discovery.BrowserDiscoveryError("Google needs verification in Hunter Chrome.")
+            return []
+
+        with self.assertRaisesRegex(RuntimeError, "needs verification"):
+            discovery.run_search(search["id"], browser_searcher=browser_searcher)
+
+        self.assertEqual(browser_requests, [("google", 0), ("google", 1)])
         self.assertEqual(repository.read_discovery_candidates(), [])
 
     def test_open_web_source_keeps_postings_but_rejects_career_indexes(self):

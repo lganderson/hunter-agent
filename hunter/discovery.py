@@ -18,7 +18,18 @@ ALL_WORK_MODES = ["on-site", "hybrid", "remote"]
 YAHOO_SEARCH_URL = "https://search.yahoo.com/search?p={query}"
 DUCKDUCKGO_SEARCH_URL = "https://html.duckduckgo.com/html/?q={query}"
 SEARCH_RESULT_LIMIT = 10
-DISCOVERY_RESULT_LIMIT = 60
+GOOGLE_PAGE_COUNT = 2
+LINKEDIN_PAGE_COUNT = 2
+RAW_DISCOVERY_RESULT_LIMIT = 200
+DISCOVERY_RESULT_LIMIT = 50
+CONTROLLED_TPM_VARIANTS = [
+    "technical program manager",
+    "senior technical program manager",
+    "staff technical program manager",
+    "principal technical program manager",
+    "technical project manager",
+    "engineering program manager",
+]
 SEARCH_ENGINE_HOSTS = {
     "duckduckgo.com",
     "google.com",
@@ -237,8 +248,18 @@ def upsert_search(search_id="", updates=None):
     return get_search(row["id"])
 
 
+def expanded_search_keywords(search):
+    keywords = storage.clean(search.get("keywords", ""))
+    match = re.match(r"^technical program manager\b(.*)$", keywords, re.I)
+    if not match:
+        return keywords
+    qualifiers = storage.clean(match.group(1))
+    variants = " OR ".join(f'"{variant}"' for variant in CONTROLLED_TPM_VARIANTS)
+    return f"({variants}) {qualifiers}".strip()
+
+
 def linkedin_search_url(search, lane):
-    query = quote_plus(storage.clean(search.get("keywords", "")))
+    query = quote_plus(expanded_search_keywords(search))
     location = quote_plus(storage.clean(lane.get("location", "")))
     parts = [f"keywords={query}"]
     if location:
@@ -290,7 +311,7 @@ def discovery_query(search, lane, strategy):
     return " ".join(
         part
         for part in [
-            storage.clean(search.get("keywords", "")),
+            expanded_search_keywords(search),
             f'"{storage.clean(lane.get("location", ""))}"' if storage.clean(lane.get("location", "")) else "",
             work_mode_query(lane),
             strategy.get("query", ""),
@@ -470,7 +491,7 @@ def fetch_search_results(query, fetcher=None):
     return [], attempts
 
 
-def normalize_browser_results(items):
+def normalize_browser_results(items, limit=SEARCH_RESULT_LIMIT):
     results = []
     seen = set()
     for item in items or []:
@@ -486,15 +507,16 @@ def normalize_browser_results(items):
                 "snippet": storage.clean((item or {}).get("snippet", ""))[:2000],
             }
         )
-        if len(results) >= SEARCH_RESULT_LIMIT:
+        if len(results) >= limit:
             break
     return results
 
 
-def fetch_browser_results(engine, value, searcher=None):
+def fetch_browser_results(engine, value, page=0, searcher=None):
     browser_search = searcher or browser_discovery.search
-    items = browser_search(engine, value)
-    return normalize_browser_results(items)
+    items = browser_search(engine, value, page)
+    limit = browser_discovery.LINKEDIN_PAGE_SIZE if engine == "linkedin" else browser_discovery.GOOGLE_PAGE_SIZE
+    return normalize_browser_results(items, limit=limit)
 
 
 def search_title_details(title, platform=""):
@@ -649,6 +671,20 @@ def candidate_matches_lane(candidate, result, lane):
     return country_wide or result_has_location_signal(result, desired_location)
 
 
+def candidate_rank_key(candidate):
+    processing_rank = {"ready": 2, "partial": 1, "needs-details": 0}
+    try:
+        fit_score = int(candidate.get("fit_score", "") or 0)
+    except (TypeError, ValueError):
+        fit_score = 0
+    return (
+        fit_score,
+        processing_rank.get(candidate.get("processing_status", ""), 0),
+        len(candidate.get("description_text", "") or ""),
+        candidate.get("title", ""),
+    )
+
+
 def run_search(search_id, search_fetcher=None, posting_fetcher=None, browser_searcher=None):
     search = get_search(search_id)
     timestamp = now_iso()
@@ -656,12 +692,13 @@ def run_search(search_id, search_fetcher=None, posting_fetcher=None, browser_sea
     source_runs = []
     errors = []
     found_by_url = {}
+    duplicate_count = 0
     chrome_browser = None
     if search_fetcher is None and browser_searcher is None:
         chrome_browser = browser_discovery.HunterChrome()
 
-        def browser_searcher(engine, value):
-            return browser_discovery.search(engine, value, browser=chrome_browser)
+        def browser_searcher(engine, value, page):
+            return browser_discovery.search(engine, value, page=page, browser=chrome_browser)
 
     attempted_sources = 0
     failed_sources = 0
@@ -669,27 +706,57 @@ def run_search(search_id, search_fetcher=None, posting_fetcher=None, browser_sea
         for strategy in BUILT_IN_SEARCH_STRATEGIES:
             query = discovery_query(search, lane, strategy)
             attempted_sources += 1
-            attempts = []
             engine = ""
-            try:
-                if search_fetcher is not None:
-                    items, attempts = fetch_search_results(query, fetcher=search_fetcher)
-                    engine = attempts[-1]["engine"] if attempts else ""
-                elif strategy["id"] == "linkedin":
-                    engine = "hunter-chrome-linkedin"
-                    items = fetch_browser_results(
-                        "linkedin",
-                        linkedin_search_url(search, lane),
-                        searcher=browser_searcher,
-                    )
-                else:
-                    engine = "hunter-chrome-google"
-                    items = fetch_browser_results("google", query, searcher=browser_searcher)
-            except (browser_discovery.BrowserDiscoveryError, RuntimeError) as exc:
-                items = []
+            source_items = []
+            source_seen = set()
+            page_count = 1 if search_fetcher is not None else (
+                LINKEDIN_PAGE_COUNT if strategy["id"] == "linkedin" else GOOGLE_PAGE_COUNT
+            )
+            successful_pages = 0
+            source_error = ""
+            for page in range(page_count):
+                attempts = []
+                try:
+                    if search_fetcher is not None:
+                        page_items, attempts = fetch_search_results(query, fetcher=search_fetcher)
+                        engine = attempts[-1]["engine"] if attempts else ""
+                    elif strategy["id"] == "linkedin":
+                        engine = "hunter-chrome-linkedin"
+                        page_items = fetch_browser_results(
+                            "linkedin",
+                            linkedin_search_url(search, lane),
+                            page=page,
+                            searcher=browser_searcher,
+                        )
+                    else:
+                        engine = "hunter-chrome-google"
+                        page_items = fetch_browser_results(
+                            "google",
+                            query,
+                            page=page,
+                            searcher=browser_searcher,
+                        )
+                    successful_pages += 1
+                except browser_discovery.BrowserDiscoveryError as exc:
+                    raise RuntimeError(storage.clean(str(exc))) from exc
+                except RuntimeError as exc:
+                    page_items = []
+                    source_error = storage.clean(str(exc))
+                attempt_errors = [attempt["error"] for attempt in attempts if attempt.get("error")]
+                if attempt_errors and not page_items:
+                    source_error = attempt_errors[-1]
+                for item in page_items:
+                    if item["url"] in source_seen:
+                        duplicate_count += 1
+                        continue
+                    source_seen.add(item["url"])
+                    source_items.append(item)
+
+            if successful_pages == 0:
                 failed_sources += 1
+            if source_error:
                 errors.append(
-                    f"{strategy['label']} · {lane.get('label') or lane.get('location')}: {storage.clean(str(exc))}"
+                    f"{strategy['label']} · {lane.get('label') or lane.get('location')}: {source_error}"
                 )
             source_runs.append(
                 {
@@ -698,34 +765,29 @@ def run_search(search_id, search_fetcher=None, posting_fetcher=None, browser_sea
                     "lane_id": lane.get("id", ""),
                     "lane_label": lane.get("label", "") or lane.get("location", ""),
                     "query": query,
-                    "found_count": len(items),
+                    "found_count": len(source_items),
+                    "page_count": page_count,
                     "engine": engine,
                 }
             )
-            attempt_errors = [attempt["error"] for attempt in attempts if attempt.get("error")]
-            if attempt_errors and not items:
-                errors.append(f"{strategy['label']} · {lane.get('label') or lane.get('location')}: {attempt_errors[-1]}")
-            for item in items:
+            for item in source_items:
                 existing = found_by_url.get(item["url"])
                 match_context = {"strategy": strategy, "lane": lane}
                 if existing:
+                    duplicate_count += 1
                     existing["matches"].append(match_context)
                     continue
                 combined = {**item, "matches": [match_context]}
                 found_by_url[item["url"]] = combined
                 found.append(combined)
-    found = found[:DISCOVERY_RESULT_LIMIT]
+    found = found[:RAW_DISCOVERY_RESULT_LIMIT]
 
     if attempted_sources and failed_sources == attempted_sources:
         first_error = errors[0].split(": ", 1)[-1] if errors else "Hunter Chrome search was unavailable."
         raise RuntimeError(first_error)
 
-    rows = repository.read_discovery_candidates()
-    captured = []
-    new_count = 0
-    updated_count = 0
+    prepared = []
     skipped_count = 0
-    captured_ids = set()
     for result in found:
         candidate = {field: "" for field in schema.DISCOVERY_CANDIDATE_FIELDS}
         candidate.update(extracted_candidate(result["url"], fetcher=posting_fetcher))
@@ -755,7 +817,6 @@ def run_search(search_id, search_fetcher=None, posting_fetcher=None, browser_sea
             continue
         candidate.update(
             {
-                "id": next_id(rows, "DC"),
                 "search_id": search["id"],
                 "captured_at": timestamp,
                 "last_seen_at": timestamp,
@@ -767,6 +828,24 @@ def run_search(search_id, search_fetcher=None, posting_fetcher=None, browser_sea
             }
         )
         score_candidate(candidate, timestamp)
+        duplicate = matching_candidate(prepared, candidate)
+        if duplicate:
+            duplicate_count += 1
+            if candidate_rank_key(candidate) > candidate_rank_key(duplicate):
+                prepared[prepared.index(duplicate)] = candidate
+            continue
+        prepared.append(candidate)
+
+    qualified_count = len(prepared)
+    selected = sorted(prepared, key=candidate_rank_key, reverse=True)[:DISCOVERY_RESULT_LIMIT]
+    limited_count = max(0, qualified_count - len(selected))
+
+    rows = repository.read_discovery_candidates()
+    captured = []
+    new_count = 0
+    updated_count = 0
+    captured_ids = set()
+    for candidate in selected:
         existing = matching_candidate(rows, candidate)
         if existing:
             merge_candidate(existing, candidate)
@@ -775,6 +854,7 @@ def run_search(search_id, search_fetcher=None, posting_fetcher=None, browser_sea
                 captured_ids.add(existing["id"])
                 updated_count += 1
         else:
+            candidate["id"] = next_id(rows, "DC")
             rows.append(candidate)
             captured.append(candidate)
             captured_ids.add(candidate["id"])
@@ -790,10 +870,13 @@ def run_search(search_id, search_fetcher=None, posting_fetcher=None, browser_sea
         "search": get_search(search["id"]),
         "captured": captured,
         "evaluated_count": len(found),
+        "qualified_count": qualified_count,
         "found_count": len(captured),
         "new_count": new_count,
         "updated_count": updated_count,
         "skipped_count": skipped_count,
+        "duplicate_count": duplicate_count,
+        "limited_count": limited_count,
         "sources": source_runs,
         "errors": errors,
     }
@@ -1067,7 +1150,9 @@ def score_candidate(candidate, checked_at):
 def candidate_identity_keys(candidate):
     keys = set()
     for field in ["url", "canonical_url"]:
-        keys.update(companies.posting_identity_keys(candidate.get(field, "")))
+        value = storage.clean(candidate.get(field, ""))
+        if value:
+            keys.update(companies.posting_identity_keys(value))
     return keys
 
 

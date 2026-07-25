@@ -214,6 +214,7 @@ export type DiscoverySourceRun = {
   lane_label: string;
   query: string;
   found_count: number;
+  page_count: number;
   engine: string;
 };
 
@@ -221,10 +222,13 @@ export type DiscoveryRunResult = {
   search: DiscoverySearch;
   captured: DiscoveryCandidate[];
   evaluated_count: number;
+  qualified_count: number;
   found_count: number;
   new_count: number;
   updated_count: number;
   skipped_count: number;
+  duplicate_count: number;
+  limited_count: number;
   sources: DiscoverySourceRun[];
   errors: string[];
 };

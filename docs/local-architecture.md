@@ -112,13 +112,17 @@ Companies-mode adapters. Retrieval uses the dedicated Hunter Chrome window:
 Google supplies open-web and ATS result links, while LinkedIn uses the signed-in
 jobs search. The bridge identifies that profile by a local Hunter marker tab,
 does not read cookies or credentials, paces requests, closes temporary tabs, and
-stops on verification challenges. Results are deduplicated, challenged and
-collection pages are rejected, individual posting pages are extracted,
-location/work-mode criteria are applied locally, and matches run through the
-shared fit scorer. LinkedIn card details produce a partial result until an
-employer URL or copied posting content is available. Ingestion creates a normal
-posting and retains a manual posting snapshot when description text is
-available.
+stops on verification challenges. Each lane reads two Google pages for each
+open-web strategy and two LinkedIn result batches. The common `technical program
+manager` definition expands into a bounded Boolean group of senior, staff,
+principal, technical-project, and engineering-program titles. Up to 200 unique
+raw URLs are deduplicated and validated; challenged and collection pages are
+rejected, individual posting pages are extracted, and location/work-mode
+criteria are applied locally. Qualified results run through the shared fit
+scorer before the strongest 50 are persisted. LinkedIn card details produce a
+partial result until an employer URL or copied posting content is available.
+Ingestion creates a normal posting and retains a manual posting snapshot when
+description text is available.
 
 The canonical normalization step is shared across adapters. Adapter-specific
 code should return the most structured title, URL, location, work mode,

@@ -4,11 +4,13 @@ import json
 import random
 import subprocess
 import time
-from urllib.parse import quote_plus
+from urllib.parse import parse_qsl, quote_plus, urlencode, urlparse, urlunparse
 
 
 BRIDGE_MARKER = "hunter_browser_bridge=1"
-GOOGLE_SEARCH_URL = "https://www.google.com/search?q={query}&num=10"
+GOOGLE_PAGE_SIZE = 10
+LINKEDIN_PAGE_SIZE = 25
+GOOGLE_SEARCH_URL = "https://www.google.com/search?q={query}&num={page_size}&start={start}"
 DEFAULT_TIMEOUT_SECONDS = 15
 
 FIND_WINDOW_SCRIPT = """
@@ -278,19 +280,27 @@ class HunterChrome:
         finally:
             self._close_tab(tab_id)
 
-    def google(self, query):
-        url = GOOGLE_SEARCH_URL.format(query=quote_plus(query))
+    def google(self, query, page=0):
+        url = GOOGLE_SEARCH_URL.format(
+            query=quote_plus(query),
+            page_size=GOOGLE_PAGE_SIZE,
+            start=max(0, int(page)) * GOOGLE_PAGE_SIZE,
+        )
         return self._search_tab(url, GOOGLE_RESULTS_SCRIPT)
 
-    def linkedin(self, url):
-        return self._search_tab(url, LINKEDIN_RESULTS_SCRIPT, scroll=True)
+    def linkedin(self, url, page=0):
+        parsed = urlparse(url)
+        query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+        query["start"] = str(max(0, int(page)) * LINKEDIN_PAGE_SIZE)
+        paged_url = urlunparse(parsed._replace(query=urlencode(query)))
+        return self._search_tab(paged_url, LINKEDIN_RESULTS_SCRIPT, scroll=True)
 
 
-def search(engine, value, browser=None):
+def search(engine, value, page=0, browser=None):
     chrome = browser or HunterChrome()
     chrome.find_window()
     if engine == "linkedin":
-        return chrome.linkedin(value)
+        return chrome.linkedin(value, page=page)
     if engine == "google":
-        return chrome.google(value)
+        return chrome.google(value, page=page)
     raise ValueError(f"Unsupported Hunter Chrome search engine: {engine}")

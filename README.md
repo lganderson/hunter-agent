@@ -237,11 +237,15 @@ are closed after result links are collected, and Hunter stops if either site
 asks for verification. This does not scan the watched-company sources
 owned by Companies mode. For example, one definition can combine a Minnesota
 lane across all work modes with a U.S.-wide remote-only lane. Hunter
-deduplicates the result URLs, verifies individual postings, reads direct
-posting pages, filters them against the lane's location and work modes, and
-scores the matches. Manual link capture remains available as an optional
-fallback. LinkedIn card details remain partial until an employer posting URL
-or copied posting content is available.
+searches two Google pages and two LinkedIn result batches per lane. A saved
+`technical program manager` search expands into a bounded set of senior, staff,
+principal, technical-project, and engineering-program variants without adding
+separate user-facing lanes or source controls. Hunter deduplicates up to 200
+raw URLs, verifies individual postings, reads direct posting pages, filters
+them against the lane's location and work modes, scores the qualified matches,
+and retains the strongest 50. Manual link capture remains available as an
+optional fallback. LinkedIn card details remain partial until an employer
+posting URL or copied posting content is available.
 
 Add a new opportunity:
 
