@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from urllib.parse import quote, unquote_plus
 
 from hunter import app_state, browser_discovery, companies, discovery, paths, repository, sqlite_store
@@ -58,6 +59,19 @@ class HunterDiscoveryTest(unittest.TestCase):
         self.assertEqual(len(delays), 1)
         self.assertGreater(delays[0], 1.25)
         self.assertLessEqual(delays[0], 1.75)
+
+    def test_hunter_chrome_uses_absolute_osascript_path_for_thread_safe_spawn(self):
+        calls = []
+
+        def runner(command, **kwargs):
+            calls.append((command, kwargs))
+            return SimpleNamespace(returncode=0, stdout="123\n", stderr="")
+
+        browser = browser_discovery.HunterChrome(runner=runner)
+
+        self.assertEqual(browser.find_window(), "123")
+        self.assertEqual(calls[0][0][0], "/usr/bin/osascript")
+        self.assertFalse(calls[0][1]["close_fds"])
 
     def test_hunter_chrome_builds_second_google_and_linkedin_pages(self):
         opened_urls = []

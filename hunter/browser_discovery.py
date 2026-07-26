@@ -8,6 +8,7 @@ from urllib.parse import parse_qsl, quote_plus, urlencode, urlparse, urlunparse
 
 
 BRIDGE_MARKER = "hunter_browser_bridge=1"
+OSASCRIPT_PATH = "/usr/bin/osascript"
 GOOGLE_PAGE_SIZE = 10
 LINKEDIN_PAGE_SIZE = 25
 GOOGLE_SEARCH_URL = "https://www.google.com/search?q={query}&num={page_size}&start={start}"
@@ -480,8 +481,9 @@ class HunterChrome:
     def _run(self, script, *arguments):
         try:
             completed = self.runner(
-                ["osascript", "-e", script, *[str(argument) for argument in arguments]],
+                [OSASCRIPT_PATH, "-e", script, *[str(argument) for argument in arguments]],
                 capture_output=True,
+                close_fds=False,
                 text=True,
                 timeout=self.timeout_seconds,
                 check=False,
