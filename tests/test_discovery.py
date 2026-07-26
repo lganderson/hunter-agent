@@ -50,7 +50,7 @@ class HunterDiscoveryTest(unittest.TestCase):
         browser.window_id = "123"
         browser.last_search_at = browser_discovery.time.monotonic()
         browser._open_tab = lambda url: "456"
-        browser._wait_until_ready = lambda tab_id: {"ready": "complete"}
+        browser._wait_until_ready = lambda tab_id, expected_url="": {"ready": "complete"}
         browser._execute = lambda tab_id, script: '{"blocked": false, "items": []}'
         browser._close_tab = lambda tab_id: None
 
@@ -72,6 +72,55 @@ class HunterDiscoveryTest(unittest.TestCase):
         self.assertEqual(browser.find_window(), "123")
         self.assertEqual(calls[0][0][0], "/usr/bin/osascript")
         self.assertFalse(calls[0][1]["close_fds"])
+
+    def test_hunter_chrome_waits_past_about_blank_during_navigation(self):
+        states = iter(
+            [
+                '{"ready":"complete","href":"about:blank","title":""}',
+                '{"ready":"interactive","href":"https://www.linkedin.com/company/example/","title":"Example"}',
+            ]
+        )
+        delays = []
+        browser = browser_discovery.HunterChrome(
+            sleeper=delays.append,
+            timeout_seconds=1,
+        )
+        browser._execute = lambda tab_id, script: next(states)
+
+        state = browser._wait_until_ready(
+            "456",
+            expected_url="https://www.linkedin.com/company/example/",
+        )
+
+        self.assertEqual(state["href"], "https://www.linkedin.com/company/example/")
+        self.assertEqual(delays, [0.25])
+
+    def test_company_research_uses_linkedin_company_search_before_google(self):
+        opened_urls = []
+        browser = browser_discovery.HunterChrome()
+
+        def search_tab(url, extraction_script, scroll=False):
+            opened_urls.append((url, extraction_script, scroll))
+            if "/search/results/companies/" in url:
+                return [{"url": "https://www.linkedin.com/company/2k-games/"}]
+            return [
+                {
+                    "company": "2K",
+                    "company_industry": "Computer Games",
+                    "company_size": "1,001-5,000 employees",
+                }
+            ]
+
+        browser._search_tab = search_tab
+        browser.google = lambda query, page=0: self.fail("Google fallback should not run")
+
+        result = browser.company("2K Games")
+
+        self.assertEqual(result["company_industry"], "Computer Games")
+        self.assertIn("keywords=2K+Games", opened_urls[0][0])
+        self.assertEqual(opened_urls[1][0], "https://www.linkedin.com/company/2k-games/about/")
+        self.assertTrue(opened_urls[0][2])
+        self.assertTrue(opened_urls[1][2])
 
     def test_hunter_chrome_builds_second_google_and_linkedin_pages(self):
         opened_urls = []

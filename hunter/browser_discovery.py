@@ -12,6 +12,7 @@ OSASCRIPT_PATH = "/usr/bin/osascript"
 GOOGLE_PAGE_SIZE = 10
 LINKEDIN_PAGE_SIZE = 25
 GOOGLE_SEARCH_URL = "https://www.google.com/search?q={query}&num={page_size}&start={start}"
+LINKEDIN_COMPANY_SEARCH_URL = "https://www.linkedin.com/search/results/companies/?keywords={query}"
 DEFAULT_TIMEOUT_SECONDS = 15
 
 FIND_WINDOW_SCRIPT = """
@@ -167,6 +168,51 @@ LINKEDIN_RESULTS_SCRIPT = r"""
       snippet: [location, cardText].filter(Boolean).join(" · ").slice(0, 1200)
     });
     if (items.length >= 25) break;
+  }
+  return JSON.stringify({blocked: false, reason: "", items});
+})()
+"""
+
+LINKEDIN_COMPANY_RESULTS_SCRIPT = r"""
+(() => {
+  const pageText = (document.body?.innerText || "").toLowerCase();
+  const blocked = /\/(login|authwall|checkpoint)\b/i.test(location.pathname)
+    || pageText.includes("sign in or join linkedin")
+    || pageText.includes("let's do a quick security check");
+  if (blocked) {
+    return JSON.stringify({
+      blocked: true,
+      reason: "LinkedIn needs sign-in or verification in the Hunter Chrome profile.",
+      items: []
+    });
+  }
+  const seen = new Set();
+  const items = [];
+  for (const anchor of document.querySelectorAll('a[href*="/company/"]')) {
+    let url = anchor.href || "";
+    let parsed;
+    try {
+      parsed = new URL(url);
+    } catch (_error) {
+      continue;
+    }
+    const match = parsed.pathname.match(/^\/company\/([^/?#]+)/i);
+    if (!match) continue;
+    url = `https://www.linkedin.com/company/${match[1]}/`;
+    if (seen.has(url)) continue;
+    seen.add(url);
+    const card = anchor.closest("li")
+      || anchor.closest("[data-view-name='search-entity-result-universal-template']")
+      || anchor.parentElement;
+    const cardText = (card?.innerText || anchor.innerText || anchor.textContent || "")
+      .replace(/\s+/g, " ")
+      .trim();
+    const title = (anchor.innerText || anchor.textContent || "")
+      .split(/\n+/)
+      .map(value => value.trim())
+      .find(Boolean) || "";
+    items.push({url, title, snippet: cardText.slice(0, 1200)});
+    if (items.length >= 10) break;
   }
   return JSON.stringify({blocked: false, reason: "", items});
 })()
@@ -526,7 +572,7 @@ class HunterChrome:
         except BrowserDiscoveryError:
             pass
 
-    def _wait_until_ready(self, tab_id):
+    def _wait_until_ready(self, tab_id, expected_url=""):
         deadline = time.monotonic() + self.timeout_seconds
         last_state = {}
         while time.monotonic() < deadline:
@@ -535,10 +581,19 @@ class HunterChrome:
                 last_state = json.loads(raw or "{}")
             except json.JSONDecodeError:
                 last_state = {}
-            if last_state.get("ready") in {"interactive", "complete"}:
+            current_url = (last_state.get("href") or "").strip()
+            if (
+                current_url
+                and current_url != "about:blank"
+                and last_state.get("ready") in {"interactive", "complete"}
+            ):
                 return last_state
             self.sleeper(0.25)
         title = last_state.get("title", "")
+        if (last_state.get("href") or "").strip() == "about:blank":
+            raise BrowserDiscoveryError(
+                f"Hunter Chrome did not navigate to the requested page. {expected_url}".strip()
+            )
         raise BrowserDiscoveryError(f"Hunter Chrome did not finish loading the search page. {title}".strip())
 
     def _search_tab(self, url, extraction_script, scroll=False):
@@ -550,7 +605,7 @@ class HunterChrome:
         self.last_search_at = time.monotonic()
         tab_id = self._open_tab(url)
         try:
-            self._wait_until_ready(tab_id)
+            self._wait_until_ready(tab_id, expected_url=url)
             if scroll:
                 for _index in range(2):
                     self._execute(tab_id, LINKEDIN_SCROLL_SCRIPT)
@@ -588,6 +643,22 @@ class HunterChrome:
     def company(self, name, profile_url=""):
         target_url = (profile_url or "").strip()
         if not target_url:
+            linkedin_url = LINKEDIN_COMPANY_SEARCH_URL.format(query=quote_plus(name))
+            results = self._search_tab(
+                linkedin_url,
+                LINKEDIN_COMPANY_RESULTS_SCRIPT,
+                scroll=True,
+            )
+            target_url = next(
+                (
+                    item.get("url", "")
+                    for item in results
+                    if "linkedin.com" in urlparse(item.get("url", "")).netloc.lower()
+                    and "/company/" in urlparse(item.get("url", "")).path.lower()
+                ),
+                "",
+            )
+        if not target_url:
             results = self.google(f'site:linkedin.com/company "{name}"')
             target_url = next(
                 (
@@ -599,7 +670,9 @@ class HunterChrome:
                 "",
             )
         if not target_url:
-            return {}
+            raise BrowserDiscoveryError(
+                f'Hunter could not find a public company profile for "{name}".'
+            )
         parsed = urlparse(target_url)
         if "linkedin.com" in parsed.netloc.lower() and "/company/" in parsed.path.lower():
             segments = [segment for segment in parsed.path.split("/") if segment]
@@ -611,7 +684,11 @@ class HunterChrome:
                 company_path = f"/company/{segments[company_index + 1]}/about/"
                 target_url = urlunparse(parsed._replace(path=company_path, query="", fragment=""))
         items = self._search_tab(target_url, COMPANY_RESULTS_SCRIPT, scroll=True)
-        return items[0] if items else {}
+        if not items:
+            raise BrowserDiscoveryError(
+                f'Hunter could not read company information for "{name}".'
+            )
+        return items[0]
 
 
 def search(engine, value, page=0, browser=None):
