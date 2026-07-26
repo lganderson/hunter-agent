@@ -584,6 +584,20 @@ class AppHandler(SimpleHTTPRequestHandler):
             self.send_json({"link": link})
             return
 
+        if path == "/api/companies/merge":
+            payload = self.read_json()
+            try:
+                company = company_store.merge_companies(
+                    keep_company_id=payload.get("keep_company_id", ""),
+                    merge_company_id=payload.get("merge_company_id", ""),
+                )
+                discovery_store.canonicalize_candidates()
+            except ValueError as exc:
+                self.send_json({"error": str(exc)}, status=400)
+                return
+            self.send_json({"company": company})
+            return
+
         if path == "/api/companies/candidates/update":
             payload = self.read_json()
             try:
@@ -634,6 +648,22 @@ class AppHandler(SimpleHTTPRequestHandler):
             payload = self.read_json()
             try:
                 result = discovery_store.run_search(payload.get("id", ""))
+            except ValueError as exc:
+                self.send_json({"error": str(exc)}, status=400)
+                return
+            except RuntimeError as exc:
+                self.send_json({"error": str(exc)}, status=502)
+                return
+            self.send_json(result)
+            return
+
+        if path == "/api/discovery/continue":
+            payload = self.read_json()
+            try:
+                result = discovery_store.continue_discovery(
+                    payload.get("id", ""),
+                    enrichment_limit=payload.get("enrichment_limit", 10),
+                )
             except ValueError as exc:
                 self.send_json({"error": str(exc)}, status=400)
                 return

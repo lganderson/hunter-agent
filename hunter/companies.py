@@ -438,6 +438,116 @@ def matching_company_record(name="", profile_url="", website=""):
     return None
 
 
+def company_merge_key(name):
+    normalized = storage.clean(name).lower()
+    normalized = re.sub(
+        r"\b(?:incorporated|inc|llc|ltd|limited|corporation|corp|company|co)\.?\b",
+        " ",
+        normalized,
+    )
+    return re.sub(r"[^a-z0-9]+", "", normalized)
+
+
+def company_merge_suggestions():
+    groups = {}
+    for company in repository.read_companies():
+        key = company_merge_key(company.get("name", ""))
+        if not key:
+            continue
+        groups.setdefault(key, []).append(company)
+    suggestions = []
+    for key, rows in groups.items():
+        if len(rows) < 2:
+            continue
+        ordered = sorted(
+            rows,
+            key=lambda company: (
+                company.get("tracking_status") == "tracked",
+                bool(company.get("industry")) + bool(company.get("company_size")),
+                -len(company.get("name", "")),
+            ),
+            reverse=True,
+        )
+        keep = ordered[0]
+        for duplicate in ordered[1:]:
+            suggestions.append(
+                {
+                    "id": f"{keep.get('id', '')}:{duplicate.get('id', '')}",
+                    "keep_company_id": keep.get("id", ""),
+                    "keep_company_name": keep.get("name", ""),
+                    "merge_company_id": duplicate.get("id", ""),
+                    "merge_company_name": duplicate.get("name", ""),
+                    "reason": "These company names differ only by a legal suffix or punctuation.",
+                    "match_key": key,
+                }
+            )
+    return suggestions
+
+
+def merge_companies(keep_company_id, merge_company_id):
+    keep_id = storage.clean(keep_company_id).upper()
+    merge_id = storage.clean(merge_company_id).upper()
+    if not keep_id or not merge_id or keep_id == merge_id:
+        raise ValueError("Choose two different company records to merge.")
+    rows = repository.read_companies()
+    keep = next((row for row in rows if row.get("id", "").upper() == keep_id), None)
+    duplicate = next((row for row in rows if row.get("id", "").upper() == merge_id), None)
+    if keep is None or duplicate is None:
+        raise ValueError("One of the company records no longer exists.")
+
+    aliases = [
+        *split_aliases(keep.get("aliases", "")),
+        duplicate.get("name", ""),
+        *split_aliases(duplicate.get("aliases", "")),
+    ]
+    keep_name_key = normalized_key(keep.get("name", ""))
+    keep["aliases"] = normalize_aliases(
+        ", ".join(
+            value
+            for value in aliases
+            if value and normalized_key(value) != keep_name_key
+        )
+    )
+    for field in [
+        "website",
+        "careers_url",
+        "industry",
+        "company_size",
+        "company_profile_url",
+        "company_metadata_source",
+        "company_metadata_checked_at",
+        "company_metadata_suggestions_json",
+        "company_research_status",
+        "last_checked_at",
+        "last_check_status",
+    ]:
+        if not keep.get(field) and duplicate.get(field):
+            keep[field] = duplicate[field]
+    keep["tracking_status"] = (
+        "tracked"
+        if "tracked" in {keep.get("tracking_status"), duplicate.get("tracking_status")}
+        else "discovered"
+    )
+    if "interested" in {keep.get("interest_status"), duplicate.get("interest_status")}:
+        keep["interest_status"] = "interested"
+    keep["discovered_at"] = min(
+        [value for value in [keep.get("discovered_at", ""), duplicate.get("discovered_at", "")] if value],
+        default="",
+    )
+    keep["last_seen_at"] = max(keep.get("last_seen_at", ""), duplicate.get("last_seen_at", ""))
+    notes = [
+        storage.clean(keep.get("notes", "")),
+        storage.clean(duplicate.get("notes", "")),
+    ]
+    keep["notes"] = "\n".join(dict.fromkeys(value for value in notes if value))
+
+    repository.merge_company_references(keep_id, merge_id, keep.get("name", ""))
+    repository.write_companies(
+        [row for row in rows if row.get("id", "").upper() != merge_id]
+    )
+    return get_company(keep_id)
+
+
 def record_discovered_company(metadata, seen_at=""):
     name = storage.clean(metadata.get("company", "") or metadata.get("name", ""))
     if not name:

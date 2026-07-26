@@ -3,8 +3,8 @@ import type { FormEvent } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import {
   captureDiscoveryCandidates,
+  continueDiscovery,
   ingestDiscoveryCandidate,
-  runDiscoverySearch,
   updateDiscoveryCandidate,
   updateDiscoveryCandidateDetails,
   upsertDiscoverySearch
@@ -27,7 +27,7 @@ type DiscoveryModeProps = {
   refresh: () => Promise<AppState>;
 };
 
-type DiscoveryFilter = "latest" | "new" | "recommended" | "needs-details" | "all" | "ignored" | "ingested";
+type DiscoveryFilter = "latest" | "new" | "recommended" | "needs-details" | "all" | "ignored" | "ingested" | "unavailable";
 
 const DISCOVERY_FILTERS: Array<{ id: DiscoveryFilter; label: string }> = [
   { id: "latest", label: "Latest" },
@@ -36,7 +36,8 @@ const DISCOVERY_FILTERS: Array<{ id: DiscoveryFilter; label: string }> = [
   { id: "needs-details", label: "Needs details" },
   { id: "all", label: "All" },
   { id: "ignored", label: "Ignored" },
-  { id: "ingested", label: "Ingested" }
+  { id: "ingested", label: "Ingested" },
+  { id: "unavailable", label: "Closed" }
 ];
 
 const WORK_MODE_OPTIONS: Array<{ id: DiscoverySearchLaneDefinition["work_modes"][number]; label: string }> = [
@@ -74,6 +75,7 @@ export function DiscoveryMode({ data, refresh }: DiscoveryModeProps) {
   const [operationStatus, setOperationStatus] = useState("");
   const [pending, setPending] = useState(false);
   const [editingCandidate, setEditingCandidate] = useState<DiscoveryCandidate | null>(null);
+  const [reviewCandidateId, setReviewCandidateId] = useState("");
   const [ingestedPostingId, setIngestedPostingId] = useState("");
   const companyById = useMemo(
     () => new Map(data.companies.map(company => [company.id, company])),
@@ -112,6 +114,16 @@ export function DiscoveryMode({ data, refresh }: DiscoveryModeProps) {
     ) as Record<DiscoveryFilter, number>,
     [latestSeenAt, selectedCandidates]
   );
+  const reviewQueue = useMemo(
+    () => [...selectedCandidates
+      .filter(candidate => candidate.status === "new" && candidate.freshness_status !== "closed")]
+      .sort((left, right) => Number(right.processing_status === "ready") - Number(left.processing_status === "ready")
+        || Number(right.fit_score || 0) - Number(left.fit_score || 0)
+        || (right.last_seen_at || "").localeCompare(left.last_seen_at || "")),
+    [selectedCandidates]
+  );
+  const reviewBatch = reviewQueue.slice(0, 10);
+  const reviewCandidate = reviewBatch.find(candidate => candidate.id === reviewCandidateId) || null;
 
   const capturedUrlCount = (captureText.match(/https?:\/\//gi) || []).length;
 
@@ -136,6 +148,20 @@ export function DiscoveryMode({ data, refresh }: DiscoveryModeProps) {
     setSearchDraft(searchUpdates(selectedSearch));
     setEditingSearchId(selectedSearch.id);
     setEditingSearch(true);
+  }
+
+  function reviewPreferenceSuggestion(term: string) {
+    if (!selectedSearch) return;
+    const draft = searchUpdates(selectedSearch);
+    setSearchDraft({
+      ...draft,
+      excluded_terms: draft.excluded_terms.includes(term)
+        ? draft.excluded_terms
+        : [...draft.excluded_terms, term]
+    });
+    setEditingSearchId(selectedSearch.id);
+    setEditingSearch(true);
+    setOperationStatus(`Review the suggested “${term}” exclusion below, then save if it matches your intent.`);
   }
 
   async function saveSearch(event: FormEvent) {
@@ -167,7 +193,7 @@ export function DiscoveryMode({ data, refresh }: DiscoveryModeProps) {
     setIngestedPostingId("");
     setOperationStatus("Searching Google and LinkedIn with Hunter Chrome...");
     try {
-      const result = await runDiscoverySearch(selectedSearch.id);
+      const result = await continueDiscovery(selectedSearch.id);
       await refresh();
       setResultFilter("latest");
       const errorSuffix = result.errors.length
@@ -175,6 +201,9 @@ export function DiscoveryMode({ data, refresh }: DiscoveryModeProps) {
         : "";
       const limitSuffix = result.limited_count
         ? ` Hunter retained the top ${result.found_count} and held back ${result.limited_count} lower-ranked matches.`
+        : "";
+      const enrichmentSuffix = result.enrichment
+        ? ` Hunter continued through ${result.enrichment.processed_count} queued role${result.enrichment.processed_count === 1 ? "" : "s"}; ${result.enrichment.ready_count} are ready for review and ${result.enrichment.remaining_count} still need work.`
         : "";
       setOperationStatus(
         `Discovery reviewed ${result.evaluated_count} unique links with adaptive paging. `
@@ -184,7 +213,7 @@ export function DiscoveryMode({ data, refresh }: DiscoveryModeProps) {
         + `Hunter researched ${result.company_researched_count} compan${result.company_researched_count === 1 ? "y" : "ies"}`
         + `${result.company_suggestion_count ? ` and queued ${result.company_suggestion_count} company information suggestion${result.company_suggestion_count === 1 ? "" : "s"}` : ""}. `
         + `${result.duplicate_count} duplicate${result.duplicate_count === 1 ? "" : "s"} collapsed.`
-        + `${limitSuffix}${errorSuffix}`
+        + `${enrichmentSuffix}${limitSuffix}${errorSuffix}`
       );
     } catch (error) {
       setOperationStatus(`Discovery search failed. ${errorMessage(error)}`);
@@ -244,8 +273,10 @@ export function DiscoveryMode({ data, refresh }: DiscoveryModeProps) {
       await updateDiscoveryCandidate(candidate.id, status);
       await refresh();
       setOperationStatus(status === "ignored" ? "Discovery result ignored." : "Discovery result returned to New.");
+      return true;
     } catch (error) {
       setOperationStatus(`Could not update result. ${errorMessage(error)}`);
+      return false;
     } finally {
       setPending(false);
     }
@@ -260,11 +291,26 @@ export function DiscoveryMode({ data, refresh }: DiscoveryModeProps) {
       await refresh();
       setIngestedPostingId(result.posting.id);
       setOperationStatus(result.created ? "Discovery result ingested as a posting." : "This role was already tracked.");
+      return true;
     } catch (error) {
       setOperationStatus(`Could not ingest result. ${errorMessage(error)}`);
+      return false;
     } finally {
       setPending(false);
     }
+  }
+
+  function nextReviewCandidateId(candidate: DiscoveryCandidate) {
+    const index = reviewBatch.findIndex(row => row.id === candidate.id);
+    return reviewBatch[index + 1]?.id || reviewBatch[index - 1]?.id || "";
+  }
+
+  async function reviewCandidateStatus(candidate: DiscoveryCandidate, status: "ignored" | "ingested") {
+    const nextId = nextReviewCandidateId(candidate);
+    const succeeded = status === "ignored"
+      ? await setCandidateStatus(candidate, "ignored")
+      : await ingestCandidate(candidate);
+    if (succeeded) setReviewCandidateId(nextId);
   }
 
   return (
@@ -290,7 +336,7 @@ export function DiscoveryMode({ data, refresh }: DiscoveryModeProps) {
           title="Uses the signed-in Hunter Chrome profile to search Google and LinkedIn across every configured lane"
           onClick={() => void runSearch()}
         >
-          <SearchIcon size={15} /> {pending ? "Searching…" : "Search now"}
+          <SearchIcon size={15} /> {pending ? "Hunter is working…" : "Continue discovery"}
         </button>
         <button className="button" type="button" disabled={!selectedSearch} onClick={() => setCaptureOpen(value => !value)}>
           <PlusIcon size={15} /> Add found roles
@@ -308,16 +354,19 @@ export function DiscoveryMode({ data, refresh }: DiscoveryModeProps) {
         </div>
       ) : null}
       {selectedSearch?.last_run_at && Object.keys(selectedSearch.last_run_summary || {}).length ? (
-        <div className="discovery-run-summary">
-          <strong>Last run</strong>
-          <span>
-            Reviewed {selectedSearch.last_run_summary.evaluated_count || 0};
-            {" "}{selectedSearch.last_run_summary.qualified_count || 0} qualified;
-            {" "}{selectedSearch.last_run_summary.enriched_count || 0} enriched;
-            {" "}{selectedSearch.last_run_summary.company_researched_count || 0} companies researched;
-            {" "}{selectedSearch.last_run_summary.duplicate_count || 0} duplicates collapsed.
-          </span>
-        </div>
+        <details className="discovery-run-summary">
+          <summary>
+            <strong>Last run</strong>
+            <span>
+              Reviewed {selectedSearch.last_run_summary.evaluated_count || 0};
+              {" "}{selectedSearch.last_run_summary.qualified_count || 0} qualified;
+              {" "}{selectedSearch.last_run_summary.enriched_count || 0} enriched;
+              {" "}{selectedSearch.last_run_summary.company_researched_count || 0} companies researched;
+              {" "}{selectedSearch.last_run_summary.duplicate_count || 0} duplicates collapsed.
+            </span>
+          </summary>
+          <RunDiagnostics search={selectedSearch} />
+        </details>
       ) : null}
 
       {editingSearch ? (
@@ -343,6 +392,18 @@ export function DiscoveryMode({ data, refresh }: DiscoveryModeProps) {
               onChange={event => setSearchDraft({ ...searchDraft, keywords: event.target.value })}
               placeholder="technical program manager developer tools"
             />
+          </label>
+          <label className="form-field full">
+            Exclude titles or keywords
+            <input
+              value={searchDraft.excluded_terms.join(", ")}
+              onChange={event => setSearchDraft({
+                ...searchDraft,
+                excluded_terms: event.target.value.split(",").map(value => value.trim()).filter(Boolean)
+              })}
+              placeholder="sales, implementation, scrum"
+            />
+            <small>Optional comma-separated terms. Hunter applies them across every lane in this search.</small>
           </label>
           <div className="form-field full discovery-lanes-editor">
             <div className="discovery-lanes-heading">
@@ -420,6 +481,23 @@ export function DiscoveryMode({ data, refresh }: DiscoveryModeProps) {
         </form>
       ) : null}
 
+      {selectedSearch && (data.discovery_preference_suggestions || []).length ? (
+        <section className="discovery-preference-suggestions" aria-label="Suggested Discovery preferences">
+          <div>
+            <span className="eyebrow">Learn from your decisions</span>
+            <strong>Hunter found repeated patterns in ignored roles</strong>
+            <p>Nothing changes automatically. Review a suggestion in the search definition before saving it.</p>
+          </div>
+          <div>
+            {(data.discovery_preference_suggestions || []).map(suggestion => (
+              <button className="button compact" type="button" key={suggestion.id} onClick={() => reviewPreferenceSuggestion(suggestion.term)}>
+                Exclude “{suggestion.term}” · {suggestion.ignored_count} ignored
+              </button>
+            ))}
+          </div>
+        </section>
+      ) : null}
+
       {captureOpen && selectedSearch ? (
         <form className="discovery-capture-panel" onSubmit={captureRoles}>
           <div className="discovery-capture-heading">
@@ -466,6 +544,19 @@ export function DiscoveryMode({ data, refresh }: DiscoveryModeProps) {
             {!pending ? <button className="icon-button table-operation-close" type="button" onClick={() => setOperationStatus("")} aria-label="Dismiss status message"><XIcon size={15} /></button> : null}
           </div>
         </div>
+      ) : null}
+
+      {reviewQueue.length ? (
+        <section className="discovery-review-callout" aria-label="Discovery review queue">
+          <div>
+            <span className="eyebrow">Ready for your decision</span>
+            <strong>{reviewBatch.length} of {reviewQueue.length} roles in this batch</strong>
+            <p>Hunter ordered complete roles by fit and freshness. Review a bounded batch instead of scanning the entire inbox.</p>
+          </div>
+          <button className="button primary" type="button" onClick={() => setReviewCandidateId(reviewBatch[0].id)}>
+            Review next
+          </button>
+        </section>
       ) : null}
 
       <div className="toolbar discovery-results-toolbar" aria-label="Discovery result filters">
@@ -545,21 +636,21 @@ export function DiscoveryMode({ data, refresh }: DiscoveryModeProps) {
                 </td>
                 <td>
                   <span className={`pill discovery-${candidate.processing_status}`}>{processingLabel(candidate)}</span>
-                  {candidate.warnings ? <span className="cell-subtle">{candidate.warnings.split("\n")[0]}</span> : null}
+                  <span className="cell-subtle">{freshnessLabel(candidate)}</span>
                 </td>
                 <td>{candidate.last_seen_at || candidate.captured_at ? dateOnlyLabel(candidate.last_seen_at || candidate.captured_at) : "Unknown"}</td>
                 <td>
                   <div className="table-actions">
                     <a className="button compact" href={candidate.canonical_url || candidate.url} target="_blank" rel="noreferrer"><ExternalIcon size={15} /> Open</a>
-                    <button className="button compact" type="button" onClick={() => setEditingCandidate(candidate)}>Details</button>
+                    {candidate.status === "new" ? (
+                      <button className="button compact primary" type="button" onClick={() => setReviewCandidateId(candidate.id)}>Review</button>
+                    ) : null}
                     {candidate.ingested_application_id ? (
                       <Link className="button compact" to={routes.postingDetail(candidate.ingested_application_id)}><BriefcaseIcon size={15} /> Posting</Link>
-                    ) : (
-                      <button className="button compact" type="button" disabled={pending || candidate.processing_status !== "ready"} onClick={() => ingestCandidate(candidate)}>Ingest</button>
-                    )}
+                    ) : null}
                     {candidate.status === "ignored"
                       ? <button className="button compact" type="button" disabled={pending} onClick={() => setCandidateStatus(candidate, "new")}>Mark New</button>
-                      : <button className="button compact" type="button" disabled={pending || candidate.status === "ingested"} onClick={() => setCandidateStatus(candidate, "ignored")}>Ignore</button>}
+                      : <button className="button compact" type="button" onClick={() => setEditingCandidate(candidate)}>Details</button>}
                   </div>
                 </td>
               </tr>
@@ -581,7 +672,170 @@ export function DiscoveryMode({ data, refresh }: DiscoveryModeProps) {
           save={saveCandidateDetails}
         />
       ) : null}
+      {reviewCandidate ? (
+        <CandidateReviewModal
+          candidate={reviewCandidate}
+          company={companyById.get(reviewCandidate.company_id)}
+          index={reviewBatch.findIndex(candidate => candidate.id === reviewCandidate.id)}
+          total={reviewBatch.length}
+          pending={pending}
+          close={() => setReviewCandidateId("")}
+          previous={() => {
+            const index = reviewBatch.findIndex(candidate => candidate.id === reviewCandidate.id);
+            setReviewCandidateId(reviewBatch[index - 1]?.id || reviewCandidate.id);
+          }}
+          next={() => setReviewCandidateId(nextReviewCandidateId(reviewCandidate))}
+          edit={() => {
+            setReviewCandidateId("");
+            setEditingCandidate(reviewCandidate);
+          }}
+          ignore={() => void reviewCandidateStatus(reviewCandidate, "ignored")}
+          ingest={() => void reviewCandidateStatus(reviewCandidate, "ingested")}
+        />
+      ) : null}
     </>
+  );
+}
+
+function RunDiagnostics({ search }: { search: DiscoverySearch }) {
+  const summary = search.last_run_summary;
+  const sources = summary.sources || [];
+  const enrichment = summary.enrichment;
+  return (
+    <div className="discovery-run-diagnostics">
+      {enrichment ? (
+        <div className="discovery-diagnostic-metrics">
+          <span><strong>{enrichment.processed_count}</strong> queue processed</span>
+          <span><strong>{enrichment.posting_checked_count}</strong> postings checked</span>
+          <span><strong>{enrichment.ready_count}</strong> ready</span>
+          <span><strong>{enrichment.remaining_count}</strong> remaining</span>
+        </div>
+      ) : null}
+      {sources.length ? (
+        <div className="discovery-source-runs">
+          {sources.map((source, index) => (
+            <div key={`${source.source}-${source.query_family}-${source.lane_id}-${index}`}>
+              <strong>{source.label}</strong>
+              <span>{source.lane_label} · {source.query_family_label}</span>
+              <span>{source.found_count} found across {source.page_count} page{source.page_count === 1 ? "" : "s"}</span>
+            </div>
+          ))}
+        </div>
+      ) : <p>No per-source diagnostics were retained for this run.</p>}
+      {(summary.errors || []).length ? (
+        <ul className="discovery-run-errors">
+          {(summary.errors || []).map((error, index) => <li key={`${error}-${index}`}>{error}</li>)}
+        </ul>
+      ) : null}
+    </div>
+  );
+}
+
+function FitBrief({ candidate, company }: { candidate: DiscoveryCandidate; company?: Company }) {
+  return (
+    <section className="discovery-fit-brief" aria-label="Fit brief">
+      <div className="discovery-fit-headline">
+        <span className={`pill ${fitClass(candidate.fit_score)}`}>{candidate.fit_score || "Pending"}</span>
+        <div>
+          <strong>{candidate.fit_summary || "Hunter needs more posting details before scoring fit."}</strong>
+          <span>
+            {candidate.lane_match || "Search-lane match needs confirmation"} · {candidate.source_confidence || "Low"} source confidence
+          </span>
+        </div>
+      </div>
+      <div className="discovery-fit-columns">
+        <div>
+          <span className="eyebrow">Why it fits</span>
+          {(candidate.fit_strengths || []).length
+            ? <ul>{(candidate.fit_strengths || []).map(item => <li key={item}>{item}</li>)}</ul>
+            : <p>No supported fit strengths yet.</p>}
+        </div>
+        <div>
+          <span className="eyebrow">Check before deciding</span>
+          {(candidate.fit_gaps || []).length
+            ? <ul>{(candidate.fit_gaps || []).map(item => <li key={item}>{item}</li>)}</ul>
+            : <p>No material gaps identified from the available posting.</p>}
+        </div>
+      </div>
+      {company ? <span className="discovery-fit-company">{company.industry || "Industry unknown"} · {company.company_size || "Size unknown"}</span> : null}
+    </section>
+  );
+}
+
+function CandidateReviewModal({
+  candidate,
+  company,
+  index,
+  total,
+  pending,
+  close,
+  previous,
+  next,
+  edit,
+  ignore,
+  ingest
+}: {
+  candidate: DiscoveryCandidate;
+  company?: Company;
+  index: number;
+  total: number;
+  pending: boolean;
+  close: () => void;
+  previous: () => void;
+  next: () => void;
+  edit: () => void;
+  ignore: () => void;
+  ingest: () => void;
+}) {
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") close();
+      if (event.key === "ArrowLeft") previous();
+      if (event.key === "ArrowRight") next();
+    }
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [close, next, previous]);
+
+  return (
+    <div className="modal-backdrop">
+      <article className="modal discovery-review-modal" role="dialog" aria-modal="true" aria-labelledby="discovery-review-title">
+        <div className="modal-header">
+          <div>
+            <span className="eyebrow">Review {index + 1} of {total}</span>
+            <h2 id="discovery-review-title">{candidate.title || "Role details needed"}</h2>
+            <p>{company?.name || "Company needed"} · {candidateLocationLabel(candidate)}</p>
+          </div>
+          <button className="button compact" type="button" onClick={close}><XIcon size={18} /> Close</button>
+        </div>
+        <FitBrief candidate={candidate} company={company} />
+        <div className="discovery-review-evidence">
+          <div>
+            <span className="eyebrow">Posting evidence</span>
+            <strong>{freshnessLabel(candidate)}</strong>
+            <p>{candidate.description_excerpt || "Hunter has not captured a usable posting excerpt yet."}</p>
+          </div>
+          {(candidate.source_urls || []).length > 1 ? (
+            <details>
+              <summary>{candidate.source_urls.length} source links</summary>
+              <ul>{(candidate.source_urls || []).map(url => <li key={url}><a href={url} target="_blank" rel="noreferrer">{sourceLabel(url)}</a></li>)}</ul>
+            </details>
+          ) : null}
+        </div>
+        <div className="discovery-review-actions">
+          <div>
+            <button className="button" type="button" disabled={index <= 0 || pending} onClick={previous}>Previous</button>
+            <button className="button" type="button" disabled={total <= 1 || pending} onClick={next}>Next</button>
+          </div>
+          <div>
+            <a className="button" href={candidate.canonical_url || candidate.url} target="_blank" rel="noreferrer"><ExternalIcon size={15} /> Open posting</a>
+            <button className="button" type="button" disabled={pending} onClick={edit}>Edit details</button>
+            <button className="button" type="button" disabled={pending} onClick={ignore}>Ignore</button>
+            <button className="button primary" type="button" disabled={pending || candidate.processing_status !== "ready"} onClick={ingest}>Ingest</button>
+          </div>
+        </div>
+      </article>
+    </div>
   );
 }
 
@@ -616,6 +870,7 @@ function CandidateDetailsModal({
           <h2 id="discovery-details-title">{candidate.title || "Complete role details"}</h2>
           <button className="button compact" type="button" onClick={close}><XIcon size={18} /> Close</button>
         </div>
+        <FitBrief candidate={candidate} company={linkedCompany} />
         <form className="management-form" onSubmit={event => { event.preventDefault(); void save(draft); }}>
           <label className="form-field">
             Company
@@ -634,7 +889,10 @@ function CandidateDetailsModal({
             </div>
           ) : null}
           <label className="form-field full">Employer posting URL <input type="url" value={draft.canonical_url || ""} onChange={event => setDraft({ ...draft, canonical_url: event.target.value })} /></label>
-          <label className="form-field full">Posting description <textarea className="discovery-description-input" value={draft.description_text || ""} onChange={event => setDraft({ ...draft, description_text: event.target.value })} /></label>
+          <details className="form-field full discovery-description-editor">
+            <summary>Edit raw posting description</summary>
+            <textarea className="discovery-description-input" value={draft.description_text || ""} onChange={event => setDraft({ ...draft, description_text: event.target.value })} />
+          </details>
           <label className="form-field full">Notes <textarea value={draft.notes || ""} onChange={event => setDraft({ ...draft, notes: event.target.value })} /></label>
           <div className="detail-actions form-field full">
             <button className="button primary" type="submit" disabled={pending}><FilterIcon size={15} /> Save and rescore</button>
@@ -650,7 +908,8 @@ function searchUpdates(search: DiscoverySearch): DiscoverySearchUpdates {
   return {
     name: search.name,
     keywords: search.keywords,
-    lanes: search.lanes.map(lane => ({ ...lane, work_modes: [...lane.work_modes] }))
+    lanes: search.lanes.map(lane => ({ ...lane, work_modes: [...lane.work_modes] })),
+    excluded_terms: [...(search.excluded_terms || [])]
   };
 }
 
@@ -664,7 +923,7 @@ function newSearchLane(index: number): DiscoverySearchLaneDefinition {
 }
 
 function newSearchDraft(): DiscoverySearchUpdates {
-  return { name: "", keywords: "", lanes: [newSearchLane(0)] };
+  return { name: "", keywords: "", lanes: [newSearchLane(0)], excluded_terms: [] };
 }
 
 function updateSearchLane(
@@ -741,6 +1000,25 @@ function discoveryCandidateIncludes(candidate: DiscoveryCandidate, company: Comp
 function candidateLocationLabel(candidate: DiscoveryCandidate) {
   const location = candidate.location || "Location unknown";
   return candidate.work_mode ? `${location} · ${candidate.work_mode}` : location;
+}
+
+function freshnessLabel(candidate: DiscoveryCandidate) {
+  if (candidate.freshness_status === "confirmed-open") {
+    return candidate.freshness_checked_at
+      ? `Confirmed open ${dateOnlyLabel(candidate.freshness_checked_at)}`
+      : "Confirmed open";
+  }
+  if (candidate.freshness_status === "closed") return "Closed or no longer accepting applications";
+  if (candidate.freshness_status === "needs-review") return "Freshness needs review";
+  return "Freshness not checked";
+}
+
+function sourceLabel(url: string) {
+  try {
+    return new URL(url).hostname.replace(/^www\./, "");
+  } catch {
+    return url;
+  }
 }
 
 function fitClass(score: string) {

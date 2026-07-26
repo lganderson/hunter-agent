@@ -4,7 +4,7 @@ import html
 import json
 import re
 from difflib import SequenceMatcher
-from datetime import datetime
+from datetime import datetime, timedelta
 from urllib.parse import parse_qs, quote_plus, unquote, urljoin, urlparse, urlunparse
 
 from . import applications, browser_discovery, companies, posting_snapshots, repository, schema, settings, storage
@@ -27,6 +27,8 @@ RAW_DISCOVERY_RESULT_LIMIT = 200
 DISCOVERY_RESULT_LIMIT = 50
 DETAIL_ENRICHMENT_LIMIT = 12
 COMPANY_RESEARCH_LIMIT = 3
+CONTINUE_ENRICHMENT_LIMIT = 10
+FRESHNESS_RECHECK_DAYS = 7
 MIN_READY_DESCRIPTION_CHARS = 500
 TPM_QUERY_FAMILIES = [
     {
@@ -217,7 +219,17 @@ def search_payload(row):
         payload["last_run_summary"] = summary if isinstance(summary, dict) else {}
     except (TypeError, ValueError):
         payload["last_run_summary"] = {}
+    try:
+        excluded_terms = json.loads(row.get("excluded_terms_json", "") or "[]")
+        payload["excluded_terms"] = [
+            storage.clean(term)
+            for term in excluded_terms
+            if storage.clean(term)
+        ] if isinstance(excluded_terms, list) else []
+    except (TypeError, ValueError):
+        payload["excluded_terms"] = []
     payload.pop("lanes_json", None)
+    payload.pop("excluded_terms_json", None)
     payload.pop("location", None)
     payload.pop("remote_location", None)
     payload.pop("last_run_summary_json", None)
@@ -263,6 +275,13 @@ def upsert_search(search_id="", updates=None):
         row["lanes_json"] = json.dumps(lanes)
         row["location"] = lanes[0]["location"]
         row["remote_location"] = ""
+    if "excluded_terms" in (updates or {}):
+        terms = []
+        for value in (updates or {}).get("excluded_terms", []):
+            term = storage.clean(value)
+            if term and term.lower() not in {item.lower() for item in terms}:
+                terms.append(term)
+        row["excluded_terms_json"] = json.dumps(terms, ensure_ascii=False)
     if not row.get("name"):
         raise ValueError("Discovery search name is required.")
     if not row.get("keywords"):
@@ -352,6 +371,10 @@ def work_mode_query(lane):
 
 
 def discovery_query(search, lane, strategy, keywords=""):
+    exclusions = " ".join(
+        f'-"{term}"' if " " in term else f"-{term}"
+        for term in search.get("excluded_terms", [])
+    )
     return " ".join(
         part
         for part in [
@@ -359,8 +382,20 @@ def discovery_query(search, lane, strategy, keywords=""):
             f'"{storage.clean(lane.get("location", ""))}"' if storage.clean(lane.get("location", "")) else "",
             work_mode_query(lane),
             strategy.get("query", ""),
+            exclusions,
         ]
         if part
+    )
+
+
+def candidate_is_excluded(search, candidate):
+    text = storage.clean(
+        f"{candidate.get('title', '')} {candidate.get('description_text', '')}"
+    ).lower()
+    return any(
+        storage.clean(term).lower() in text
+        for term in search.get("excluded_terms", [])
+        if storage.clean(term)
     )
 
 
@@ -786,6 +821,16 @@ def apply_browser_details(candidate, details):
             for line in (candidate.get("warnings", "") or "").splitlines()
             if line != LINKEDIN_DETAILS_WARNING
         )
+    availability = storage.clean((details or {}).get("availability_status", "")).lower()
+    if availability == "closed":
+        candidate["freshness_status"] = "closed"
+        candidate["status"] = "unavailable"
+    elif availability == "open":
+        candidate["freshness_status"] = "confirmed-open"
+        if candidate.get("status") == "unavailable":
+            candidate["status"] = "new"
+    if availability:
+        candidate["freshness_checked_at"] = now_iso()
     return candidate
 
 
@@ -824,11 +869,34 @@ def candidate_rank_key(candidate):
     except (TypeError, ValueError):
         fit_score = 0
     return (
+        candidate.get("freshness_status", "") != "closed",
         processing_rank.get(candidate.get("processing_status", ""), 0),
         fit_score,
         len(candidate.get("description_text", "") or ""),
         candidate.get("title", ""),
     )
+
+
+def candidate_source_urls(candidate):
+    urls = []
+    try:
+        decoded = json.loads(candidate.get("source_urls_json", "") or "[]")
+    except (TypeError, ValueError):
+        decoded = []
+    for value in [
+        *(decoded if isinstance(decoded, list) else []),
+        candidate.get("url", ""),
+        candidate.get("canonical_url", ""),
+    ]:
+        normalized = companies.normalize_url(str(value or ""))
+        if normalized and normalized not in urls:
+            urls.append(normalized)
+    return urls
+
+
+def sync_candidate_source_urls(candidate):
+    candidate["source_urls_json"] = json.dumps(candidate_source_urls(candidate), ensure_ascii=False)
+    return candidate
 
 
 def connect_candidate_company(candidate, seen_at=""):
@@ -843,10 +911,68 @@ def connect_candidate_company(candidate, seen_at=""):
     if company is None:
         return None
     candidate["company_id"] = company.get("id", "")
+    if any(
+        candidate.get(field)
+        for field in ["company_industry", "company_size", "company_profile_url", "website"]
+    ):
+        company = companies.update_company_metadata(
+            company.get("id", ""),
+            candidate,
+            source_url=(
+                candidate.get("company_metadata_source")
+                or candidate.get("canonical_url")
+                or candidate.get("url", "")
+            ),
+            checked_at=storage.clean(seen_at) or now_iso(),
+        )
     return company
 
 
+def canonicalize_candidate_rows(rows):
+    canonical = []
+    status_rank = {"ingested": 4, "new": 3, "ignored": 2, "unavailable": 1}
+    for original in rows:
+        candidate = dict(original)
+        sync_candidate_source_urls(candidate)
+        duplicate = matching_candidate(canonical, candidate)
+        if duplicate is None:
+            canonical.append(candidate)
+            continue
+        duplicate_priority = (
+            status_rank.get(duplicate.get("status", ""), 0),
+            candidate_rank_key(duplicate),
+        )
+        candidate_priority = (
+            status_rank.get(candidate.get("status", ""), 0),
+            candidate_rank_key(candidate),
+        )
+        if candidate_priority > duplicate_priority:
+            index = canonical.index(duplicate)
+            preserved_status = candidate.get("status", "")
+            merge_candidate(candidate, duplicate)
+            candidate["status"] = preserved_status
+            canonical[index] = candidate
+        else:
+            preserved_status = duplicate.get("status", "")
+            merge_candidate(duplicate, candidate)
+            duplicate["status"] = preserved_status
+    return canonical
+
+
+def canonicalize_candidates():
+    rows = repository.read_discovery_candidates()
+    canonical = canonicalize_candidate_rows(rows)
+    if canonical != rows:
+        repository.write_discovery_candidates(canonical)
+    return {
+        "before_count": len(rows),
+        "after_count": len(canonical),
+        "merged_count": max(0, len(rows) - len(canonical)),
+    }
+
+
 def sync_discovered_companies():
+    canonicalize_candidates()
     rows = repository.read_discovery_candidates()
     linked_count = 0
     changed = False
@@ -1010,6 +1136,9 @@ def run_search(
         if posting_evidence != "individual":
             skipped_count += 1
             continue
+        if candidate_is_excluded(search, candidate):
+            skipped_count += 1
+            continue
         matched_context = next(
             (
                 context
@@ -1165,6 +1294,7 @@ def run_search(
     updated_count = 0
     captured_ids = set()
     for candidate in selected:
+        sync_candidate_source_urls(candidate)
         existing = matching_candidate(rows, candidate)
         if existing:
             merge_candidate(existing, candidate)
@@ -1179,6 +1309,11 @@ def run_search(
             captured_ids.add(candidate["id"])
             new_count += 1
 
+    rows = canonicalize_candidate_rows(rows)
+    captured = [
+        matching_candidate(rows, candidate) or candidate
+        for candidate in captured
+    ]
     repository.write_discovery_candidates(rows)
     stored_by_id = {
         row.get("id", ""): row
@@ -1227,31 +1362,390 @@ def run_search(
                     "company_suggestion_count",
                 ]
             }
+            | {
+                "sources": result["sources"],
+                "errors": result["errors"],
+            }
         )
         repository.write_discovery_searches(stored_rows)
     result["search"] = get_search(search["id"])
     return result
 
 
-def list_candidates():
-    collapsed = []
-    status_rank = {"ingested": 3, "ignored": 2, "new": 1}
-    for candidate in repository.read_discovery_candidates():
-        duplicate = matching_candidate(collapsed, candidate)
-        if duplicate is None:
-            collapsed.append(candidate)
+def parse_timestamp(value):
+    try:
+        return datetime.fromisoformat(storage.clean(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def freshness_due(candidate, reference=None):
+    checked_at = parse_timestamp(candidate.get("freshness_checked_at", ""))
+    if checked_at is None:
+        return True
+    return checked_at <= (reference or datetime.now()) - timedelta(days=FRESHNESS_RECHECK_DAYS)
+
+
+def enrichment_needed(candidate, company=None, reference=None):
+    if candidate.get("status") in {"ignored", "ingested"}:
+        return False
+    if candidate.get("processing_status") != "ready":
+        return True
+    if not candidate.get("canonical_url"):
+        return True
+    if freshness_due(candidate, reference):
+        return True
+    if company and (
+        not company.get("industry")
+        or not company.get("company_size")
+    ) and not storage.clean(company.get("company_research_status", "")).startswith("ok:"):
+        return True
+    return False
+
+
+def enrichment_priority(candidate, company=None):
+    return (
+        candidate.get("status") == "new",
+        candidate.get("processing_status") != "ready",
+        not candidate.get("canonical_url"),
+        bool(company and (not company.get("industry") or not company.get("company_size"))),
+        freshness_due(candidate),
+        candidate_rank_key(candidate),
+    )
+
+
+def continue_enrichment(
+    limit=CONTINUE_ENRICHMENT_LIMIT,
+    browser_detailer=None,
+    company_researcher=None,
+):
+    rows = canonicalize_candidate_rows(repository.read_discovery_candidates())
+    companies_by_id = {
+        company.get("id", ""): company
+        for company in repository.read_companies()
+    }
+    chrome_browser = None
+    if browser_detailer is None or company_researcher is None:
+        chrome_browser = browser_discovery.HunterChrome()
+        chrome_browser.find_window()
+        browser_detailer = browser_detailer or chrome_browser.details
+        company_researcher = company_researcher or chrome_browser.company
+
+    selected = sorted(
+        [
+            candidate
+            for candidate in rows
+            if enrichment_needed(
+                candidate,
+                companies_by_id.get(candidate.get("company_id", "")),
+            )
+        ],
+        key=lambda candidate: enrichment_priority(
+            candidate,
+            companies_by_id.get(candidate.get("company_id", "")),
+        ),
+        reverse=True,
+    )[:max(1, int(limit or CONTINUE_ENRICHMENT_LIMIT))]
+
+    timestamp = now_iso()
+    posting_checked_count = 0
+    posting_enriched_count = 0
+    company_researched_count = 0
+    unavailable_count = 0
+    errors = []
+    researched_company_ids = set()
+    for candidate in selected:
+        target_url = candidate.get("canonical_url") or candidate.get("url", "")
+        if target_url and (
+            candidate.get("processing_status") != "ready"
+            or not candidate.get("canonical_url")
+            or freshness_due(candidate)
+        ):
+            posting_checked_count += 1
+            before = (
+                candidate.get("processing_status", ""),
+                candidate.get("canonical_url", ""),
+                candidate.get("location", ""),
+                candidate.get("work_mode", ""),
+                candidate.get("description_text", ""),
+            )
+            try:
+                details = browser_detailer(target_url) or {}
+            except (browser_discovery.BrowserDiscoveryError, RuntimeError) as exc:
+                candidate["freshness_status"] = "needs-review"
+                candidate["freshness_checked_at"] = timestamp
+                errors.append(
+                    f"{candidate.get('title') or target_url}: {storage.clean(str(exc))}"
+                )
+                details = {}
+            if details:
+                apply_browser_details(candidate, details)
+                if not candidate.get("freshness_status"):
+                    candidate["freshness_status"] = "confirmed-open"
+                    candidate["freshness_checked_at"] = timestamp
+                if candidate.get("freshness_status") == "closed":
+                    unavailable_count += 1
+                after = (
+                    candidate.get("processing_status", ""),
+                    candidate.get("canonical_url", ""),
+                    candidate.get("location", ""),
+                    candidate.get("work_mode", ""),
+                    candidate.get("description_text", ""),
+                )
+                if after != before:
+                    posting_enriched_count += 1
+
+        company = connect_candidate_company(candidate, seen_at=timestamp)
+        score_candidate(candidate, timestamp)
+        sync_candidate_source_urls(candidate)
+        if not company:
             continue
-        duplicate_priority = (
-            status_rank.get(duplicate.get("status", ""), 0),
-            candidate_rank_key(duplicate),
+        company_id = company.get("id", "")
+        companies_by_id[company_id] = company
+        missing_company_details = not company.get("industry") or not company.get("company_size")
+        research_completed = storage.clean(company.get("company_research_status", "")).startswith("ok:")
+        if (
+            missing_company_details
+            and not research_completed
+            and company_id not in researched_company_ids
+        ):
+            researched_company_ids.add(company_id)
+            try:
+                research = companies.research_company(
+                    company_id,
+                    researcher=company_researcher,
+                )
+                companies_by_id[company_id] = research.get("company", company)
+                company_researched_count += 1
+            except (browser_discovery.BrowserDiscoveryError, RuntimeError) as exc:
+                errors.append(
+                    f"Company research for {company.get('name', 'company')}: "
+                    f"{storage.clean(str(exc))}"
+                )
+
+    rows = canonicalize_candidate_rows(rows)
+    repository.write_discovery_candidates(rows)
+    refreshed_companies = {
+        company.get("id", ""): company
+        for company in repository.read_companies()
+    }
+    remaining_count = sum(
+        1
+        for candidate in rows
+        if enrichment_needed(
+            candidate,
+            refreshed_companies.get(candidate.get("company_id", "")),
         )
-        candidate_priority = (
-            status_rank.get(candidate.get("status", ""), 0),
-            candidate_rank_key(candidate),
+    )
+    ready_count = sum(
+        1
+        for candidate in rows
+        if candidate.get("status") == "new"
+        and candidate.get("processing_status") == "ready"
+        and candidate.get("freshness_status") != "closed"
+    )
+    return {
+        "processed_count": len(selected),
+        "posting_checked_count": posting_checked_count,
+        "posting_enriched_count": posting_enriched_count,
+        "company_researched_count": company_researched_count,
+        "unavailable_count": unavailable_count,
+        "remaining_count": remaining_count,
+        "ready_count": ready_count,
+        "errors": errors,
+    }
+
+
+def continue_discovery(search_id, enrichment_limit=CONTINUE_ENRICHMENT_LIMIT):
+    search = get_search(search_id)
+    chrome_browser = browser_discovery.HunterChrome()
+    chrome_browser.find_window()
+
+    def browser_searcher(engine, value, page):
+        return browser_discovery.search(engine, value, page=page, browser=chrome_browser)
+
+    try:
+        result = run_search(
+            search_id,
+            browser_searcher=browser_searcher,
+            browser_detailer=chrome_browser.details,
+            company_researcher=chrome_browser.company,
         )
-        if candidate_priority > duplicate_priority:
-            collapsed[collapsed.index(duplicate)] = candidate
-    return collapsed
+    except RuntimeError as exc:
+        result = {
+            "search": search,
+            "captured": [],
+            "evaluated_count": 0,
+            "qualified_count": 0,
+            "found_count": 0,
+            "new_count": 0,
+            "updated_count": 0,
+            "skipped_count": 0,
+            "duplicate_count": 0,
+            "limited_count": 0,
+            "enriched_count": 0,
+            "company_researched_count": 0,
+            "company_suggestion_count": 0,
+            "sources": [],
+            "errors": [storage.clean(str(exc))],
+        }
+    enrichment = continue_enrichment(
+        limit=enrichment_limit,
+        browser_detailer=chrome_browser.details,
+        company_researcher=chrome_browser.company,
+    )
+    result["enrichment"] = enrichment
+    result["errors"] = [*result.get("errors", []), *enrichment.get("errors", [])]
+
+    stored_rows = repository.read_discovery_searches()
+    stored = next((row for row in stored_rows if row.get("id") == search["id"]), None)
+    if stored is not None:
+        try:
+            summary = json.loads(stored.get("last_run_summary_json", "") or "{}")
+        except (TypeError, ValueError):
+            summary = {}
+        summary["enrichment"] = enrichment
+        summary["errors"] = result["errors"]
+        stored["last_run_summary_json"] = json.dumps(summary)
+        repository.write_discovery_searches(stored_rows)
+    result["search"] = get_search(search_id)
+    return result
+
+
+def fit_strengths(candidate):
+    summary = storage.clean(candidate.get("fit_summary", ""))
+    match = re.search(r"\bmatches\s+(.+?)\.?$", summary, re.I)
+    strengths = []
+    if match:
+        strengths.extend(
+            storage.clean(value)
+            for value in match.group(1).split(",")
+            if storage.clean(value)
+        )
+    if candidate.get("processing_status") == "ready":
+        strengths.append("Verified posting details")
+    if candidate.get("canonical_url") and source_platform(candidate.get("canonical_url", "")) != "linkedin":
+        strengths.append("Direct employer posting available")
+    return list(dict.fromkeys(strengths))
+
+
+def fit_gaps(candidate, company=None):
+    gaps = []
+    if candidate.get("processing_status") != "ready":
+        gaps.append("Posting details still need verification")
+    if not candidate.get("location"):
+        gaps.append("Location is unknown")
+    if not candidate.get("work_mode"):
+        gaps.append("Work mode is unknown")
+    if not candidate.get("canonical_url"):
+        gaps.append("Direct employer posting link is missing")
+    if company and not company.get("industry"):
+        gaps.append("Company industry has not been researched")
+    if company and not company.get("company_size"):
+        gaps.append("Company size has not been researched")
+    if candidate.get("freshness_status") not in {"confirmed-open", "closed"}:
+        gaps.append("Posting freshness has not been confirmed")
+    if candidate.get("warnings"):
+        gaps.extend(
+            storage.clean(line)
+            for line in candidate.get("warnings", "").splitlines()
+            if storage.clean(line)
+        )
+    return list(dict.fromkeys(gaps))
+
+
+def candidate_source_confidence(candidate):
+    if candidate.get("freshness_status") == "closed":
+        return "Closed"
+    direct_url = candidate.get("canonical_url", "")
+    direct_platform = source_platform(direct_url) if direct_url else ""
+    if (
+        candidate.get("processing_status") == "ready"
+        and direct_url
+        and direct_platform != "linkedin"
+        and candidate.get("freshness_status") == "confirmed-open"
+    ):
+        return "High"
+    if candidate.get("processing_status") == "ready":
+        return "Medium"
+    return "Low"
+
+
+def candidate_lane_match(candidate):
+    matches = []
+    for search in list_searches():
+        for lane in search.get("lanes", []):
+            if candidate_matches_lane(candidate, {}, lane):
+                label = lane.get("label", "") or lane.get("location", "")
+                mode = storage.clean(candidate.get("work_mode", ""))
+                value = f"{label} · {mode}" if mode else label
+                if value and value not in matches:
+                    matches.append(value)
+    return ", ".join(matches[:2])
+
+
+def candidate_payload(candidate, company_by_id=None):
+    payload = dict(candidate)
+    company = (company_by_id or {}).get(candidate.get("company_id", ""))
+    payload["source_urls"] = candidate_source_urls(candidate)
+    payload["fit_strengths"] = fit_strengths(candidate)
+    payload["fit_gaps"] = fit_gaps(candidate, company)
+    payload["source_confidence"] = candidate_source_confidence(candidate)
+    payload["lane_match"] = candidate_lane_match(candidate)
+    return payload
+
+
+def list_candidates():
+    collapsed = canonicalize_candidate_rows(repository.read_discovery_candidates())
+    company_by_id = {
+        company.get("id", ""): company
+        for company in repository.read_companies()
+    }
+    return [
+        candidate_payload(candidate, company_by_id)
+        for candidate in collapsed
+    ]
+
+
+def preference_suggestions():
+    ignored = [
+        candidate
+        for candidate in list_candidates()
+        if candidate.get("status") == "ignored"
+    ]
+    stop_words = {
+        "and", "for", "the", "technical", "technology", "program", "programme",
+        "manager", "management", "senior", "staff", "principal", "lead", "director",
+        "remote", "hybrid", "onsite", "role", "jobs", "system", "systems",
+        "product", "engineering", "software",
+    }
+    terms = {}
+    for candidate in ignored:
+        title = storage.clean(candidate.get("title", ""))
+        candidate_terms = {
+            token
+            for token in re.findall(r"[a-z][a-z0-9+#.-]{2,}", title.lower())
+            if token not in stop_words
+        }
+        for term in candidate_terms:
+            item = terms.setdefault(term, {"candidate_ids": [], "samples": []})
+            item["candidate_ids"].append(candidate.get("id", ""))
+            if title and title not in item["samples"]:
+                item["samples"].append(title)
+    return [
+        {
+            "id": f"exclude:{term}",
+            "term": term,
+            "ignored_count": len(item["candidate_ids"]),
+            "sample_titles": item["samples"][:3],
+            "reason": f"{len(item['candidate_ids'])} ignored roles contain “{term}”.",
+        }
+        for term, item in sorted(
+            terms.items(),
+            key=lambda pair: (-len(pair[1]["candidate_ids"]), pair[0]),
+        )
+        if len(item["candidate_ids"]) >= 2
+    ][:5]
 
 
 def get_candidate(candidate_id):
@@ -1262,7 +1756,11 @@ def get_candidate(candidate_id):
     )
     if row is None:
         raise ValueError(f"No Discovery candidate found with id {candidate_id}.")
-    return row
+    company_by_id = {
+        company.get("id", ""): company
+        for company in repository.read_companies()
+    }
+    return candidate_payload(row, company_by_id)
 
 
 def parse_capture_urls(value):
@@ -1596,6 +2094,10 @@ def matching_candidate(rows, candidate):
 
 
 def merge_candidate(existing, incoming):
+    source_urls = []
+    for value in [*candidate_source_urls(existing), *candidate_source_urls(incoming)]:
+        if value not in source_urls:
+            source_urls.append(value)
     replace_partial_linkedin_details = (
         incoming.get("source_platform") == "linkedin"
         and existing.get("processing_status") != "ready"
@@ -1642,7 +2144,21 @@ def merge_candidate(existing, incoming):
         if line
     ]
     existing["warnings"] = "\n".join(dict.fromkeys(warning_lines))
-    existing["last_seen_at"] = incoming.get("last_seen_at", "")
+    existing["source_urls_json"] = json.dumps(source_urls, ensure_ascii=False)
+    captured_dates = [
+        value
+        for value in [existing.get("captured_at", ""), incoming.get("captured_at", "")]
+        if value
+    ]
+    if captured_dates:
+        existing["captured_at"] = min(captured_dates)
+    existing["last_seen_at"] = max(
+        existing.get("last_seen_at", ""),
+        incoming.get("last_seen_at", ""),
+    )
+    if incoming.get("freshness_checked_at", "") > existing.get("freshness_checked_at", ""):
+        existing["freshness_checked_at"] = incoming.get("freshness_checked_at", "")
+        existing["freshness_status"] = incoming.get("freshness_status", "")
     if existing.get("status") != "ingested":
         existing["status"] = "new"
     return existing
@@ -1676,6 +2192,7 @@ def capture_candidates(search_id, capture_text, details=None, fetcher=None):
             apply_manual_details(candidate, details or {})
         connect_candidate_company(candidate, seen_at=timestamp)
         score_candidate(candidate, timestamp)
+        sync_candidate_source_urls(candidate)
         existing = matching_candidate(rows, candidate)
         if existing:
             merge_candidate(existing, candidate)
@@ -1683,6 +2200,11 @@ def capture_candidates(search_id, capture_text, details=None, fetcher=None):
         else:
             rows.append(candidate)
             captured.append(candidate)
+    rows = canonicalize_candidate_rows(rows)
+    captured = [
+        matching_candidate(rows, candidate) or candidate
+        for candidate in captured
+    ]
     repository.write_discovery_candidates(rows)
     stored_by_id = {
         row.get("id", ""): row

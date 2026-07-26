@@ -65,6 +65,15 @@ def write_companies(rows):
         sqlite_store.write_companies(rows)
 
 
+def merge_company_references(keep_company_id, merge_company_id, company_name):
+    if using_sqlite():
+        sqlite_store.merge_company_references(
+            keep_company_id,
+            merge_company_id,
+            company_name,
+        )
+
+
 def read_application_contacts():
     if using_sqlite():
         return sqlite_store.read_application_contacts()

@@ -307,6 +307,13 @@ export function runDiscoverySearch(id: string): Promise<DiscoveryRunResult> {
   return postJson<DiscoveryRunResult>("/api/discovery/searches/run", { id });
 }
 
+export function continueDiscovery(id: string, enrichmentLimit = 10): Promise<DiscoveryRunResult> {
+  return postJson<DiscoveryRunResult>("/api/discovery/continue", {
+    id,
+    enrichment_limit: enrichmentLimit
+  });
+}
+
 export function captureDiscoveryCandidates(
   searchId: string,
   captureText: string,
@@ -337,6 +344,16 @@ export function ingestDiscoveryCandidate(
     "/api/discovery/candidates/ingest",
     { id }
   );
+}
+
+export function mergeCompanies(
+  keepCompanyId: string,
+  mergeCompanyId: string
+): Promise<{ company: Company }> {
+  return postJson<{ company: Company }>("/api/companies/merge", {
+    keep_company_id: keepCompanyId,
+    merge_company_id: mergeCompanyId
+  });
 }
 
 export function linkCompanyContact(companyId: string, contactId: string): Promise<{ link: { company_id: string; contact_id: string } }> {

@@ -2861,6 +2861,39 @@ class HunterCompaniesTest(unittest.TestCase):
         self.assertIn("hunter_get_settings", tool_names)
         self.assertIn("hunter_update_settings", tool_names)
 
+    def test_company_merge_suggestion_and_reviewed_merge_relink_records(self):
+        sqlite_store.initialize()
+        keep = companies.upsert_company("", {"name": "Reddit", "industry": "Social Networking Platforms"})
+        duplicate = companies.upsert_company("", {"name": "Reddit, Inc.", "company_size": "1,001-5,000 employees"})
+        repository.write_applications([
+            application_row({"id": "A0001", "company": duplicate["name"], "company_id": duplicate["id"]}),
+        ])
+        discovery_candidate = {field: "" for field in schema.DISCOVERY_CANDIDATE_FIELDS}
+        discovery_candidate.update(
+            {
+                "id": "DC0001",
+                "company_id": duplicate["id"],
+                "title": "Technical Program Manager",
+                "url": "https://www.linkedin.com/jobs/view/1234567890",
+                "status": "new",
+            }
+        )
+        repository.write_discovery_candidates([discovery_candidate])
+        repository.write_contacts([contact_row({"id": "C0001", "name": "Ada"})])
+        companies.link_contact(duplicate["id"], "C0001")
+
+        suggestions = companies.company_merge_suggestions()
+        merged = companies.merge_companies(keep["id"], duplicate["id"])
+
+        self.assertEqual(len(suggestions), 1)
+        self.assertIn("Reddit, Inc.", merged["aliases"])
+        self.assertEqual(merged["industry"], "Social Networking Platforms")
+        self.assertEqual(merged["company_size"], "1,001–5,000 employees")
+        self.assertEqual(repository.read_applications()[0]["company_id"], keep["id"])
+        self.assertEqual(repository.read_discovery_candidates()[0]["company_id"], keep["id"])
+        self.assertEqual(repository.read_company_contacts()[0]["company_id"], keep["id"])
+        self.assertEqual(len(repository.read_companies()), 1)
+
     def test_export_company_data_writes_related_company_snapshot(self):
         sqlite_store.initialize()
         company = companies.upsert_company("", {"name": "Example", "careers_url": "https://example.com/careers"})

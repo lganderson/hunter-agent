@@ -823,6 +823,78 @@ class HunterDiscoveryTest(unittest.TestCase):
         self.assertEqual(first["captured"][0]["id"], second["captured"][0]["id"])
         self.assertEqual(len(repository.read_discovery_candidates()), 1)
 
+    def test_canonicalization_merges_source_urls_and_preserves_decision(self):
+        company = companies.upsert_company("", {"name": "Example Labs"})
+        rows = []
+        for candidate_id, url, status in [
+            ("DC0001", "https://www.linkedin.com/jobs/view/1234567890", "new"),
+            ("DC0002", "https://jobs.example.com/roles/platform-tpm", "ingested"),
+        ]:
+            row = {field: "" for field in discovery.schema.DISCOVERY_CANDIDATE_FIELDS}
+            row.update(
+                {
+                    "id": candidate_id,
+                    "company_id": company["id"],
+                    "title": "Technical Program Manager, Platform",
+                    "url": url,
+                    "canonical_url": url if candidate_id == "DC0002" else "",
+                    "status": status,
+                    "processing_status": "ready",
+                    "last_seen_at": f"2026-07-2{1 if candidate_id == 'DC0001' else 2}T10:00:00",
+                }
+            )
+            rows.append(row)
+        repository.write_discovery_candidates(rows)
+
+        result = discovery.canonicalize_candidates()
+        candidate = discovery.list_candidates()[0]
+
+        self.assertEqual(result["merged_count"], 1)
+        self.assertEqual(candidate["status"], "ingested")
+        self.assertEqual(len(candidate["source_urls"]), 2)
+        self.assertEqual(len(repository.read_discovery_candidates()), 1)
+
+    def test_continue_enrichment_finishes_posting_and_company_details(self):
+        company = companies.upsert_company("", {"name": "Example Labs", "tracking_status": "discovered"})
+        row = {field: "" for field in discovery.schema.DISCOVERY_CANDIDATE_FIELDS}
+        row.update(
+            {
+                "id": "DC0001",
+                "company_id": company["id"],
+                "title": "Technical Program Manager",
+                "url": "https://jobs.example.com/roles/platform-tpm",
+                "status": "new",
+                "processing_status": "partial",
+                "captured_at": "2026-07-20T10:00:00",
+                "last_seen_at": "2026-07-20T10:00:00",
+            }
+        )
+        repository.write_discovery_candidates([row])
+
+        result = discovery.continue_enrichment(
+            limit=10,
+            browser_detailer=lambda _url: {
+                "company": "Example Labs",
+                "title": "Technical Program Manager",
+                "canonical_url": "https://jobs.example.com/roles/platform-tpm",
+                "location": "Remote, United States",
+                "description_text": "Remote role. " + "Lead technical program delivery across engineering and product teams. " * 20,
+                "company_industry": "Software Development",
+                "company_size": "201-500 employees",
+                "availability_status": "open",
+            },
+            company_researcher=lambda *_args: {},
+        )
+        candidate = discovery.list_candidates()[0]
+        enriched_company = companies.get_company(company["id"])
+
+        self.assertEqual(result["processed_count"], 1)
+        self.assertEqual(candidate["processing_status"], "ready")
+        self.assertEqual(candidate["freshness_status"], "confirmed-open")
+        self.assertEqual(candidate["source_confidence"], "High")
+        self.assertEqual(enriched_company["industry"], "Software Development")
+        self.assertEqual(enriched_company["company_size"], "201–500 employees")
+
     def test_legacy_location_fields_migrate_into_search_lanes(self):
         repository.write_discovery_searches(
             [

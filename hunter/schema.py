@@ -158,6 +158,7 @@ DISCOVERY_SEARCH_FIELDS = [
     "location",
     "remote_location",
     "lanes_json",
+    "excluded_terms_json",
     "created_at",
     "updated_at",
     "last_opened_at",
@@ -185,6 +186,9 @@ DISCOVERY_CANDIDATE_FIELDS = [
     "description_text",
     "description_excerpt",
     "warnings",
+    "source_urls_json",
+    "freshness_status",
+    "freshness_checked_at",
     "ingested_application_id",
     "notes",
 ]
@@ -296,5 +300,5 @@ DEFAULT_COMPANY_TRACKING_STATUS = "tracked"
 COMPANY_TRACKING_STATUSES = {"discovered", "tracked"}
 COMPANY_POSTING_CANDIDATE_STATUSES = {"new", "ignored", "ingested", "unavailable"}
 COMPANY_POSTING_CANDIDATE_SCAN_STATES = {"current", "not-seen", "verification-pending", "unavailable"}
-DISCOVERY_CANDIDATE_STATUSES = {"new", "ignored", "ingested"}
+DISCOVERY_CANDIDATE_STATUSES = {"new", "ignored", "ingested", "unavailable"}
 DISCOVERY_PROCESSING_STATUSES = {"ready", "partial", "needs-details"}

@@ -232,9 +232,11 @@ def discovery_candidates_table_sql(table="discovery_candidates", if_not_exists=T
         "description_text TEXT NOT NULL DEFAULT '', "
         "description_excerpt TEXT NOT NULL DEFAULT '', "
         "warnings TEXT NOT NULL DEFAULT '', "
+        "source_urls_json TEXT NOT NULL DEFAULT '', "
+        "freshness_status TEXT NOT NULL DEFAULT '', "
+        "freshness_checked_at TEXT NOT NULL DEFAULT '', "
         "ingested_application_id TEXT NOT NULL DEFAULT '', "
-        "notes TEXT NOT NULL DEFAULT '', "
-        "UNIQUE(search_id, url)"
+        "notes TEXT NOT NULL DEFAULT ''"
         ")"
     )
 
@@ -248,7 +250,11 @@ def migrate_discovery_candidates_schema(connection):
     current_columns = set(table_columns(connection, "discovery_candidates"))
     target_columns = set(schema.DISCOVERY_CANDIDATE_FIELDS)
     compact_definition = (definition["sql"] or "").replace(" ", "")
-    if current_columns == target_columns and "UNIQUE(url)" not in compact_definition:
+    if (
+        current_columns == target_columns
+        and "UNIQUE(url)" not in compact_definition
+        and "UNIQUE(search_id,url)" not in compact_definition
+    ):
         return
     legacy_company_fields = {
         "company",
@@ -550,6 +556,7 @@ def initialize():
             "location TEXT NOT NULL DEFAULT '', "
             "remote_location TEXT NOT NULL DEFAULT '', "
             "lanes_json TEXT NOT NULL DEFAULT '', "
+            "excluded_terms_json TEXT NOT NULL DEFAULT '', "
             "created_at TEXT NOT NULL DEFAULT '', "
             "updated_at TEXT NOT NULL DEFAULT '', "
             "last_opened_at TEXT NOT NULL DEFAULT '', "
@@ -705,6 +712,70 @@ def write_companies(rows):
                 f"INSERT INTO companies ({quoted_fields}) VALUES ({placeholders})",
                 values,
             )
+
+
+def merge_company_references(keep_company_id, merge_company_id, company_name):
+    initialize()
+    keep_id = storage.clean(keep_company_id).upper()
+    merge_id = storage.clean(merge_company_id).upper()
+    cleaned_name = storage.clean(company_name)
+    with connect() as connection:
+        connection.execute(
+            "UPDATE applications SET company_id = ?, company = ? WHERE upper(company_id) = ?",
+            (keep_id, cleaned_name, merge_id),
+        )
+        connection.execute(
+            "UPDATE discovery_candidates SET company_id = ? WHERE upper(company_id) = ?",
+            (keep_id, merge_id),
+        )
+        connection.execute(
+            "DELETE FROM company_posting_candidates AS merged "
+            "WHERE upper(merged.company_id) = ? AND EXISTS ("
+            "SELECT 1 FROM company_posting_candidates AS kept "
+            "WHERE upper(kept.company_id) = ? AND kept.url = merged.url"
+            ")",
+            (merge_id, keep_id),
+        )
+        connection.execute(
+            "UPDATE company_posting_candidates SET company_id = ? WHERE upper(company_id) = ?",
+            (keep_id, merge_id),
+        )
+        connection.execute(
+            "INSERT INTO company_contacts(company_id, contact_id, created_at) "
+            "SELECT ?, contact_id, created_at FROM company_contacts WHERE upper(company_id) = ? "
+            "ON CONFLICT(company_id, contact_id) DO NOTHING",
+            (keep_id, merge_id),
+        )
+        connection.execute(
+            "DELETE FROM company_contacts WHERE upper(company_id) = ?",
+            (merge_id,),
+        )
+        kept_source = connection.execute(
+            "SELECT 1 FROM company_career_sources WHERE upper(company_id) = ?",
+            (keep_id,),
+        ).fetchone()
+        if kept_source:
+            connection.execute(
+                "DELETE FROM company_career_sources WHERE upper(company_id) = ?",
+                (merge_id,),
+            )
+        else:
+            connection.execute(
+                "UPDATE company_career_sources SET company_id = ? WHERE upper(company_id) = ?",
+                (keep_id, merge_id),
+            )
+        connection.execute(
+            "DELETE FROM company_career_scans AS merged "
+            "WHERE upper(merged.company_id) = ? AND EXISTS ("
+            "SELECT 1 FROM company_career_scans AS kept "
+            "WHERE upper(kept.company_id) = ? AND kept.checked_at = merged.checked_at"
+            ")",
+            (merge_id, keep_id),
+        )
+        connection.execute(
+            "UPDATE company_career_scans SET company_id = ? WHERE upper(company_id) = ?",
+            (keep_id, merge_id),
+        )
 
 
 def read_application_contacts():

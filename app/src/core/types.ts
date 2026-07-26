@@ -109,6 +109,16 @@ export type Company = {
   last_check_status: string;
 };
 
+export type CompanyMergeSuggestion = {
+  id: string;
+  keep_company_id: string;
+  keep_company_name: string;
+  merge_company_id: string;
+  merge_company_name: string;
+  reason: string;
+  match_key: string;
+};
+
 export type ApplicationContact = {
   application_id: string;
   contact_id: string;
@@ -180,11 +190,20 @@ export type DiscoverySearch = {
   name: string;
   keywords: string;
   lanes: DiscoverySearchLaneDefinition[];
+  excluded_terms: string[];
   created_at: string;
   updated_at: string;
   last_opened_at: string;
   last_run_at: string;
   last_run_summary: DiscoveryLastRunSummary;
+};
+
+export type DiscoveryPreferenceSuggestion = {
+  id: string;
+  term: string;
+  ignored_count: number;
+  sample_titles: string[];
+  reason: string;
 };
 
 export type DiscoveryLastRunSummary = {
@@ -199,6 +218,9 @@ export type DiscoveryLastRunSummary = {
   enriched_count?: number;
   company_researched_count?: number;
   company_suggestion_count?: number;
+  sources?: DiscoverySourceRun[];
+  errors?: string[];
+  enrichment?: DiscoveryEnrichmentResult;
 };
 
 export type DiscoveryCandidate = {
@@ -221,6 +243,14 @@ export type DiscoveryCandidate = {
   description_text: string;
   description_excerpt: string;
   warnings: string;
+  source_urls_json: string;
+  source_urls: string[];
+  freshness_status: string;
+  freshness_checked_at: string;
+  fit_strengths: string[];
+  fit_gaps: string[];
+  source_confidence: string;
+  lane_match: string;
   ingested_application_id: string;
   notes: string;
 };
@@ -265,6 +295,18 @@ export type DiscoveryRunResult = {
   company_suggestion_count: number;
   sources: DiscoverySourceRun[];
   errors: string[];
+  enrichment?: DiscoveryEnrichmentResult;
+};
+
+export type DiscoveryEnrichmentResult = {
+  processed_count: number;
+  posting_checked_count: number;
+  posting_enriched_count: number;
+  company_researched_count: number;
+  unavailable_count: number;
+  remaining_count: number;
+  ready_count: number;
+  errors: string[];
 };
 
 export type WorkflowStage = {
@@ -301,12 +343,14 @@ export type AppState = {
   contacts: Contact[];
   application_contacts: ApplicationContact[];
   companies: Company[];
+  company_merge_suggestions: CompanyMergeSuggestion[];
   company_contacts: CompanyContact[];
   company_career_sources: CompanyCareerSource[];
   company_posting_candidates: CompanyPostingCandidate[];
   company_career_scans: CompanyCareerScan[];
   discovery_searches: DiscoverySearch[];
   discovery_candidates: DiscoveryCandidate[];
+  discovery_preference_suggestions: DiscoveryPreferenceSuggestion[];
 };
 
 export type SettingsStatus = {
@@ -416,7 +460,7 @@ export type ContactUpdates = Partial<Omit<Contact, "id">>;
 
 export type CompanyUpdates = Partial<Omit<Company, "id" | "last_checked_at" | "last_check_status">>;
 
-export type DiscoverySearchUpdates = Pick<DiscoverySearch, "name" | "keywords" | "lanes">;
+export type DiscoverySearchUpdates = Pick<DiscoverySearch, "name" | "keywords" | "lanes" | "excluded_terms">;
 
 export type DiscoveryCandidateDetails = Partial<
   Pick<

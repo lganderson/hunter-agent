@@ -4,20 +4,23 @@ import { DownloadIcon, ExternalIcon, FilterIcon, ListIcon, SearchIcon } from "..
 import {
   archiveCompany,
   checkCompanyPostings,
+  ingestDiscoveryCandidate,
   ingestCompanyCandidate,
   linkCompanyContact,
+  mergeCompanies,
   researchCompany,
   resolveCompanyMetadataSuggestion,
   restoreCompany,
   trackCompany,
   unlinkCompanyContact,
+  updateDiscoveryCandidate,
   updateCompanyCandidate,
   upsertCompany,
   type CompanyMetadataSuggestion
 } from "../core/api";
 import { routes } from "../core/routes";
 import { dateOnlyLabel, titleCase } from "../core/format";
-import type { AppState, Company, CompanyCareerSource, CompanyPostingCandidate } from "../core/types";
+import type { AppState, Company, CompanyCareerSource, CompanyMergeSuggestion, CompanyPostingCandidate, DiscoveryCandidate } from "../core/types";
 import {
   CANDIDATE_FILTERS,
   RECOMMENDED_CANDIDATE_LIMIT,
@@ -235,6 +238,7 @@ export function CompanyDetailPage({ data, refresh, createNew = false }: CompanyD
   const [isCheckingCareers, setIsCheckingCareers] = useState(false);
   const [isResearching, setIsResearching] = useState(false);
   const [isTracking, setIsTracking] = useState(false);
+  const [isMerging, setIsMerging] = useState(false);
   const [activeSuggestionId, setActiveSuggestionId] = useState("");
 
   const linkedContactIds = useMemo(
@@ -262,6 +266,20 @@ export function CompanyDetailPage({ data, refresh, createNew = false }: CompanyD
       .filter(candidate => candidate.company_id === company?.id)
       .sort((a, b) => candidateRank(a.status) - candidateRank(b.status) || candidateFitScore(b) - candidateFitScore(a) || (b.last_seen_at || "").localeCompare(a.last_seen_at || "")),
     [company?.id, data.company_posting_candidates]
+  );
+  const discoveryRoles = useMemo(
+    () => data.discovery_candidates
+      .filter(candidate => candidate.company_id === company?.id)
+      .sort((a, b) => candidateRank(a.status) - candidateRank(b.status)
+        || Number(b.fit_score || 0) - Number(a.fit_score || 0)
+        || (b.last_seen_at || "").localeCompare(a.last_seen_at || "")),
+    [company?.id, data.discovery_candidates]
+  );
+  const mergeSuggestions = useMemo(
+    () => (data.company_merge_suggestions || []).filter(
+      suggestion => suggestion.keep_company_id === company?.id || suggestion.merge_company_id === company?.id
+    ),
+    [company?.id, data.company_merge_suggestions]
   );
   const [candidateFilter, setCandidateFilter] = useState<CandidateFilter>("recommended");
   const recommendedCount = useMemo(
@@ -473,6 +491,38 @@ export function CompanyDetailPage({ data, refresh, createNew = false }: CompanyD
     }
   }
 
+  async function updateDiscoveryRole(candidateId: string, action: "ignored" | "ingested") {
+    if (activeCandidateActionId) return;
+    setActiveCandidateActionId(candidateId);
+    setOperationStatus(`${action === "ignored" ? "Ignoring" : "Ingesting"} Discovery role...`);
+    try {
+      if (action === "ignored") await updateDiscoveryCandidate(candidateId, "ignored");
+      else await ingestDiscoveryCandidate(candidateId);
+      await refresh();
+      setOperationStatus(action === "ignored" ? "Discovery role ignored." : "Discovery role ingested.");
+    } catch (error) {
+      setOperationStatus(`Could not update Discovery role. ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setActiveCandidateActionId("");
+    }
+  }
+
+  async function mergeSuggestedCompany(suggestion: CompanyMergeSuggestion) {
+    if (isMerging) return;
+    setIsMerging(true);
+    setOperationStatus("Merging company records and relinking roles...");
+    try {
+      const result = await mergeCompanies(suggestion.keep_company_id, suggestion.merge_company_id);
+      await refresh();
+      navigate(routes.companyDetail(result.company.id), { replace: true });
+      setOperationStatus("Company records merged. Roles and relationships now use the canonical company.");
+    } catch (error) {
+      setOperationStatus(`Could not merge companies. ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setIsMerging(false);
+    }
+  }
+
   if (invalidCompany) return <Navigate to={routes.companies} replace />;
 
   if (isNewCompany) {
@@ -529,17 +579,17 @@ export function CompanyDetailPage({ data, refresh, createNew = false }: CompanyD
       </header>
 
       <div className="company-overview-grid" aria-label="Company overview">
-        <Link className="company-stat" to={routes.candidatesFiltered({ companies: company.id, status: "recommended" })} aria-label={`View recommended role candidates for ${company.name}`}>
-          <span>Recommended roles</span><strong>{recommendedCount}</strong><small>{candidateCounts.new} new from latest check</small>
-        </Link>
+        <div className="company-stat" aria-label={`${candidates.length + discoveryRoles.length} roles linked to ${company.name}`}>
+          <span>Roles</span><strong>{candidates.length + discoveryRoles.length}</strong><small>{discoveryRoles.length} Discovery · {candidates.length} career scan</small>
+        </div>
         <Link className="company-stat" to={routes.postingsFiltered({ companies: company.name })} aria-label={`View tracked postings for ${company.name}`}>
           <span>Tracked postings</span><strong>{linkedPostings.length}</strong><small>{linkedPostings.filter(app => app.is_active).length} active</small>
         </Link>
         <Link className="company-stat" to={routes.contactsFiltered({ company_id: company.id })} aria-label={`View contacts linked to ${company.name}`}>
           <span>Contacts</span><strong>{linkedContacts.length}</strong><small>{linkedContacts.length ? "Linked to this company" : "No relationships yet"}</small>
         </Link>
-        <Link className="company-stat" to={routes.candidatesFiltered({ mode: "discovery" })} aria-label="View Discovery roles">
-          <span>Discovery roles</span><strong>{company.discovery_role_count || 0}</strong><small>{company.recommended_discovery_role_count || 0} recommended</small>
+        <Link className="company-stat" to={routes.candidatesFiltered({ mode: "discovery" })} aria-label="Review Discovery inbox">
+          <span>Recommended</span><strong>{recommendedCount + (company.recommended_discovery_role_count || 0)}</strong><small>Across both role sources</small>
         </Link>
       </div>
 
@@ -550,11 +600,40 @@ export function CompanyDetailPage({ data, refresh, createNew = false }: CompanyD
           <article className="panel company-candidates-panel">
             <div className="company-section-header">
               <div>
-                <h2>Role candidates</h2>
-                <p>Review roles found on this company’s careers source.</p>
+                <h2>Roles</h2>
+                <p>Discovery and company career scans in one place.</p>
               </div>
-              <span>{candidates.length} total</span>
+              <span>{candidates.length + discoveryRoles.length} total</span>
             </div>
+            {discoveryRoles.length ? (
+              <div className="company-role-source-group">
+                <div className="company-role-source-heading"><strong>Discovery</strong><span>{discoveryRoles.length} role{discoveryRoles.length === 1 ? "" : "s"}</span></div>
+                <div className="company-candidate-list">
+                  {discoveryRoles.map(candidate => (
+                    <article className="company-candidate" key={`discovery-${candidate.id}`}>
+                      <div className="company-candidate-copy">
+                        <a className="company-candidate-title" href={candidate.canonical_url || candidate.url} target="_blank" rel="noreferrer">{candidate.title || candidate.url}</a>
+                        <div className="candidate-meta">
+                          <span className="pill">Discovery</span>
+                          <span>{candidateLocationLabel(candidate)}</span>
+                          <span>{titleCase(candidate.status)} · Seen {candidateDateLabel(candidate)}</span>
+                          {candidate.fit_score ? <span className={`pill fit-${fitBandForScore(candidate.fit_score)}`}>Fit {candidate.fit_score}</span> : null}
+                        </div>
+                        {candidate.fit_summary ? <span className="candidate-fit-summary">{candidate.fit_summary}</span> : null}
+                      </div>
+                      <div className="company-candidate-actions">
+                        <a className="button compact" href={candidate.canonical_url || candidate.url} target="_blank" rel="noreferrer">View role</a>
+                        <button className="button compact primary" type="button" disabled={candidate.status === "ingested" || candidate.processing_status !== "ready" || Boolean(activeCandidateActionId)} onClick={() => updateDiscoveryRole(candidate.id, "ingested")}>
+                          {activeCandidateActionId === candidate.id ? "Updating..." : "Ingest"}
+                        </button>
+                        <button className="button compact" type="button" disabled={candidate.status !== "new" || Boolean(activeCandidateActionId)} onClick={() => updateDiscoveryRole(candidate.id, "ignored")}>Ignore</button>
+                      </div>
+                    </article>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+            <div className="company-role-source-heading"><strong>Career scan</strong><span>{candidates.length} role{candidates.length === 1 ? "" : "s"}</span></div>
             <div className="candidate-filter-bar" aria-label="Candidate filters">
               {CANDIDATE_FILTERS.map(filter => (
                 <button
@@ -641,7 +720,7 @@ export function CompanyDetailPage({ data, refresh, createNew = false }: CompanyD
         </div>
 
         <aside className="company-workspace-rail">
-          {company.tracking_recommendation || metadataSuggestions.length ? (
+          {company.tracking_recommendation || metadataSuggestions.length || mergeSuggestions.length ? (
             <article className="panel company-rail-panel company-suggestions-panel">
               <div className="company-section-header compact">
                 <div><h2>Hunter suggestions</h2><p>Review source-backed changes before they replace existing information.</p></div>
@@ -656,6 +735,21 @@ export function CompanyDetailPage({ data, refresh, createNew = false }: CompanyD
                   ) : null}
                 </div>
               ) : null}
+              {mergeSuggestions.map(suggestion => {
+                const otherName = suggestion.keep_company_id === company.id
+                  ? suggestion.merge_company_name
+                  : suggestion.keep_company_name;
+                return (
+                  <div className="company-merge-suggestion" key={suggestion.id}>
+                    <strong>Possible duplicate company</strong>
+                    <p>{otherName}</p>
+                    <span>{suggestion.reason}</span>
+                    <button className="button compact primary" type="button" disabled={isMerging} onClick={() => mergeSuggestedCompany(suggestion)}>
+                      {isMerging ? "Merging…" : suggestion.keep_company_id === company.id ? `Merge ${otherName} here` : `Merge into ${otherName}`}
+                    </button>
+                  </div>
+                );
+              })}
               <div className="company-metadata-suggestions">
                 {metadataSuggestions.map(suggestion => (
                   <article className="company-metadata-suggestion" key={suggestion.id}>
@@ -737,8 +831,8 @@ function CompanyForm({ company, onSubmit }: { company: Company | null; onSubmit:
   );
 }
 
-function candidateDateLabel(candidate: CompanyPostingCandidate) {
-  const value = candidate.last_seen_at || candidate.first_seen_at;
+function candidateDateLabel(candidate: CompanyPostingCandidate | DiscoveryCandidate) {
+  const value = candidate.last_seen_at || ("first_seen_at" in candidate ? candidate.first_seen_at : candidate.captured_at);
   return value ? dateOnlyLabel(value) : "unknown";
 }
 
@@ -779,9 +873,16 @@ function companyFieldLabel(field: CompanyMetadataSuggestion["field"]) {
   }[field];
 }
 
-function candidateLocationLabel(candidate: CompanyPostingCandidate) {
+function candidateLocationLabel(candidate: CompanyPostingCandidate | DiscoveryCandidate) {
   const location = candidate.location || "Location not listed";
   return candidate.work_mode ? `${location} · ${candidate.work_mode}` : location;
+}
+
+function fitBandForScore(score: string) {
+  const value = Number(score || 0);
+  if (value >= 70) return "strong";
+  if (value >= 45) return "consider";
+  return "low";
 }
 
 function lastCheckChip(status: string) {

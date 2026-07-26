@@ -233,6 +233,17 @@ DETAIL_RESULTS_SCRIPT = r"""
       items: []
     });
   }
+  const unavailableMarkers = [
+    "this job is no longer available",
+    "this position is no longer available",
+    "this job has expired",
+    "this position has been filled",
+    "no longer accepting applications",
+    "the job you are looking for is no longer open"
+  ];
+  const availabilityStatus = unavailableMarkers.some(marker => pageText.includes(marker))
+    ? "closed"
+    : "open";
 
   const text = value => (value || "").replace(/\s+/g, " ").trim();
   const firstText = selectors => {
@@ -392,7 +403,8 @@ DETAIL_RESULTS_SCRIPT = r"""
     company_metadata_source: (structuredIndustry || visibleIndustry || structuredSize || visibleSize || companyProfile)
       ? location.href
       : "",
-    description_text: description.slice(0, 80000)
+    description_text: description.slice(0, 80000),
+    availability_status: availabilityStatus
   };
   return JSON.stringify({blocked: false, reason: "", items: [item]});
 })()

@@ -4,6 +4,7 @@ from datetime import date, datetime
 
 from . import actions as action_store
 from . import discovery as discovery_store
+from . import companies as company_store
 from . import repository, schema, storage, workflow
 
 
@@ -120,10 +121,12 @@ def build_payload():
         "contacts": repository.read_contacts(),
         "application_contacts": repository.read_application_contacts(),
         "companies": enrich_companies(repository.read_companies(), discovery_candidates),
+        "company_merge_suggestions": company_store.company_merge_suggestions(),
         "company_contacts": repository.read_company_contacts(),
         "company_career_sources": repository.read_company_career_sources(),
         "company_posting_candidates": repository.read_company_posting_candidates(),
         "company_career_scans": repository.read_company_career_scans(limit=200),
         "discovery_searches": discovery_store.list_searches(),
         "discovery_candidates": discovery_candidates,
+        "discovery_preference_suggestions": discovery_store.preference_suggestions(),
     }
