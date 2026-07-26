@@ -300,5 +300,5 @@ DEFAULT_COMPANY_TRACKING_STATUS = "tracked"
 COMPANY_TRACKING_STATUSES = {"discovered", "tracked"}
 COMPANY_POSTING_CANDIDATE_STATUSES = {"new", "ignored", "ingested", "unavailable"}
 COMPANY_POSTING_CANDIDATE_SCAN_STATES = {"current", "not-seen", "verification-pending", "unavailable"}
-DISCOVERY_CANDIDATE_STATUSES = {"new", "ignored", "ingested", "unavailable"}
+DISCOVERY_CANDIDATE_STATUSES = {"new", "ignored", "ingested", "duplicate", "unavailable"}
 DISCOVERY_PROCESSING_STATUSES = {"ready", "partial", "needs-details"}

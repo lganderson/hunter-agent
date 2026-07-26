@@ -713,6 +713,19 @@ class AppHandler(SimpleHTTPRequestHandler):
             self.send_json({"candidate": candidate})
             return
 
+        if path == "/api/discovery/candidates/duplicate":
+            payload = self.read_json()
+            try:
+                result = discovery_store.mark_candidate_duplicate(
+                    candidate_id=payload.get("id", ""),
+                    application_id=payload.get("application_id", ""),
+                )
+            except ValueError as exc:
+                self.send_json({"error": str(exc)}, status=400)
+                return
+            self.send_json(result)
+            return
+
         if path == "/api/discovery/candidates/ingest":
             payload = self.read_json()
             try:

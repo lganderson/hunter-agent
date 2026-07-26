@@ -4,7 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import quote, unquote_plus
 
-from hunter import app_state, browser_discovery, companies, discovery, paths, repository, sqlite_store
+from hunter import applications, app_state, browser_discovery, companies, discovery, paths, repository, sqlite_store
 
 
 class HunterDiscoveryTest(unittest.TestCase):
@@ -796,6 +796,57 @@ class HunterDiscoveryTest(unittest.TestCase):
         self.assertEqual(ingested["posting"]["source_url"], "https://jobs.new-company.example/roles/tpm-devex")
         self.assertEqual(discovery.get_candidate(candidate["id"])["status"], "ingested")
         self.assertEqual(len(repository.read_posting_snapshots(ingested["posting"]["id"])), 1)
+
+    def test_mark_duplicate_associates_existing_posting_and_preserves_decision(self):
+        search = self.save_search("Platforms", "technical program manager")
+        company = companies.upsert_company("", {"name": "Example Labs"})
+        posting = applications.create_application(
+            {
+                "company_id": company["id"],
+                "company": company["name"],
+                "role": "Technical Program Manager, Platform",
+                "source_url": "https://jobs.example.com/roles/platform-tpm",
+            }
+        )
+        candidate = {field: "" for field in discovery.schema.DISCOVERY_CANDIDATE_FIELDS}
+        candidate.update(
+            {
+                "id": "DC0001",
+                "search_id": search["id"],
+                "company_id": company["id"],
+                "title": "Technical Program Manager - Platform",
+                "url": "https://www.linkedin.com/jobs/view/1234567890",
+                "status": "new",
+                "processing_status": "ready",
+            }
+        )
+        repository.write_discovery_candidates([candidate])
+
+        result = discovery.mark_candidate_duplicate(candidate["id"], posting["id"])
+
+        self.assertEqual(result["candidate"]["status"], "duplicate")
+        self.assertEqual(result["candidate"]["ingested_application_id"], posting["id"])
+        self.assertEqual(result["posting"]["id"], posting["id"])
+        self.assertFalse(discovery.enrichment_needed(result["candidate"], company))
+
+        rediscovered = dict(candidate)
+        rediscovered.update({"id": "DC0002", "status": "new", "last_seen_at": "2026-07-26T12:00:00"})
+        repository.write_discovery_candidates([result["candidate"], rediscovered])
+        discovery.canonicalize_candidates()
+        preserved = discovery.list_candidates()[0]
+
+        self.assertEqual(preserved["status"], "duplicate")
+        self.assertEqual(preserved["ingested_application_id"], posting["id"])
+
+    def test_mark_duplicate_rejects_unknown_posting(self):
+        candidate = {field: "" for field in discovery.schema.DISCOVERY_CANDIDATE_FIELDS}
+        candidate.update({"id": "DC0001", "status": "new"})
+        repository.write_discovery_candidates([candidate])
+
+        with self.assertRaisesRegex(ValueError, "No application found"):
+            discovery.mark_candidate_duplicate(candidate["id"], "A9999")
+
+        self.assertEqual(discovery.get_candidate(candidate["id"])["status"], "new")
 
     def test_batch_capture_rejects_one_details_payload_for_multiple_links(self):
         search = self.save_search("Batch", "program manager")

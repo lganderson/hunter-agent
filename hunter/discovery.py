@@ -930,7 +930,7 @@ def connect_candidate_company(candidate, seen_at=""):
 
 def canonicalize_candidate_rows(rows):
     canonical = []
-    status_rank = {"ingested": 4, "new": 3, "ignored": 2, "unavailable": 1}
+    status_rank = {"ingested": 5, "duplicate": 4, "new": 3, "ignored": 2, "unavailable": 1}
     for original in rows:
         candidate = dict(original)
         sync_candidate_source_urls(candidate)
@@ -1387,7 +1387,7 @@ def freshness_due(candidate, reference=None):
 
 
 def enrichment_needed(candidate, company=None, reference=None):
-    if candidate.get("status") in {"ignored", "ingested"}:
+    if candidate.get("status") in {"ignored", "ingested", "duplicate"}:
         return False
     if candidate.get("processing_status") != "ready":
         return True
@@ -2116,6 +2116,7 @@ def merge_candidate(existing, incoming):
         "fit_summary",
         "fit_checked_at",
         "processing_status",
+        "ingested_application_id",
         "notes",
     ]:
         richer_description = (
@@ -2159,7 +2160,7 @@ def merge_candidate(existing, incoming):
     if incoming.get("freshness_checked_at", "") > existing.get("freshness_checked_at", ""):
         existing["freshness_checked_at"] = incoming.get("freshness_checked_at", "")
         existing["freshness_status"] = incoming.get("freshness_status", "")
-    if existing.get("status") != "ingested":
+    if existing.get("status") not in {"ingested", "duplicate"}:
         existing["status"] = "new"
     return existing
 
@@ -2240,8 +2241,38 @@ def update_candidate_status(candidate_id, status):
     if row is None:
         raise ValueError(f"No Discovery candidate found with id {candidate_id}.")
     row["status"] = cleaned_status
+    if cleaned_status in {"new", "ignored", "unavailable"}:
+        row["ingested_application_id"] = ""
     repository.write_discovery_candidates(rows)
     return row
+
+
+def mark_candidate_duplicate(candidate_id, application_id):
+    rows = repository.read_discovery_candidates()
+    wanted_candidate = storage.clean(candidate_id).upper()
+    candidate = next(
+        (item for item in rows if item.get("id", "").upper() == wanted_candidate),
+        None,
+    )
+    if candidate is None:
+        raise ValueError(f"No Discovery candidate found with id {candidate_id}.")
+
+    wanted_application = storage.clean(application_id).upper()
+    posting = next(
+        (
+            item
+            for item in repository.read_applications()
+            if item.get("id", "").upper() == wanted_application
+        ),
+        None,
+    )
+    if posting is None:
+        raise ValueError(f"No application found with id {application_id}.")
+
+    candidate["status"] = "duplicate"
+    candidate["ingested_application_id"] = posting.get("id", "")
+    repository.write_discovery_candidates(rows)
+    return {"candidate": get_candidate(candidate_id), "posting": posting}
 
 
 def matching_company(company_name):

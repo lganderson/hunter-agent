@@ -5,6 +5,7 @@ import {
   captureDiscoveryCandidates,
   continueDiscovery,
   ingestDiscoveryCandidate,
+  markDiscoveryCandidateDuplicate,
   updateDiscoveryCandidate,
   updateDiscoveryCandidateDetails,
   upsertDiscoverySearch
@@ -13,6 +14,7 @@ import { dateOnlyLabel, titleCase } from "../core/format";
 import { routes } from "../core/routes";
 import type {
   AppState,
+  Application,
   Company,
   DiscoveryCandidate,
   DiscoveryCandidateDetails,
@@ -27,7 +29,7 @@ type DiscoveryModeProps = {
   refresh: () => Promise<AppState>;
 };
 
-type DiscoveryFilter = "latest" | "new" | "recommended" | "needs-details" | "all" | "ignored" | "ingested" | "unavailable";
+type DiscoveryFilter = "latest" | "new" | "recommended" | "needs-details" | "all" | "ignored" | "ingested" | "duplicate" | "unavailable";
 
 const DISCOVERY_FILTERS: Array<{ id: DiscoveryFilter; label: string }> = [
   { id: "latest", label: "Latest" },
@@ -37,6 +39,7 @@ const DISCOVERY_FILTERS: Array<{ id: DiscoveryFilter; label: string }> = [
   { id: "all", label: "All" },
   { id: "ignored", label: "Ignored" },
   { id: "ingested", label: "Ingested" },
+  { id: "duplicate", label: "Duplicates" },
   { id: "unavailable", label: "Closed" }
 ];
 
@@ -300,6 +303,24 @@ export function DiscoveryMode({ data, refresh }: DiscoveryModeProps) {
     }
   }
 
+  async function markCandidateDuplicate(candidate: DiscoveryCandidate, applicationId: string) {
+    setPending(true);
+    setIngestedPostingId("");
+    setOperationStatus("Associating duplicate with the existing posting...");
+    try {
+      const result = await markDiscoveryCandidateDuplicate(candidate.id, applicationId);
+      await refresh();
+      setIngestedPostingId(result.posting.id);
+      setOperationStatus(`Marked as a duplicate of ${result.posting.company} · ${result.posting.role}.`);
+      return true;
+    } catch (error) {
+      setOperationStatus(`Could not mark duplicate. ${errorMessage(error)}`);
+      return false;
+    } finally {
+      setPending(false);
+    }
+  }
+
   function nextReviewCandidateId(candidate: DiscoveryCandidate) {
     const index = reviewBatch.findIndex(row => row.id === candidate.id);
     return reviewBatch[index + 1]?.id || reviewBatch[index - 1]?.id || "";
@@ -310,6 +331,12 @@ export function DiscoveryMode({ data, refresh }: DiscoveryModeProps) {
     const succeeded = status === "ignored"
       ? await setCandidateStatus(candidate, "ignored")
       : await ingestCandidate(candidate);
+    if (succeeded) setReviewCandidateId(nextId);
+  }
+
+  async function reviewCandidateDuplicate(candidate: DiscoveryCandidate, applicationId: string) {
+    const nextId = nextReviewCandidateId(candidate);
+    const succeeded = await markCandidateDuplicate(candidate, applicationId);
     if (succeeded) setReviewCandidateId(nextId);
   }
 
@@ -648,7 +675,7 @@ export function DiscoveryMode({ data, refresh }: DiscoveryModeProps) {
                     {candidate.ingested_application_id ? (
                       <Link className="button compact" to={routes.postingDetail(candidate.ingested_application_id)}><BriefcaseIcon size={15} /> Posting</Link>
                     ) : null}
-                    {candidate.status === "ignored"
+                    {candidate.status === "ignored" || candidate.status === "duplicate"
                       ? <button className="button compact" type="button" disabled={pending} onClick={() => setCandidateStatus(candidate, "new")}>Mark New</button>
                       : <button className="button compact" type="button" onClick={() => setEditingCandidate(candidate)}>Details</button>}
                   </div>
@@ -674,8 +701,10 @@ export function DiscoveryMode({ data, refresh }: DiscoveryModeProps) {
       ) : null}
       {reviewCandidate ? (
         <CandidateReviewModal
+          key={reviewCandidate.id}
           candidate={reviewCandidate}
           company={companyById.get(reviewCandidate.company_id)}
+          applications={data.applications}
           index={reviewBatch.findIndex(candidate => candidate.id === reviewCandidate.id)}
           total={reviewBatch.length}
           pending={pending}
@@ -690,6 +719,7 @@ export function DiscoveryMode({ data, refresh }: DiscoveryModeProps) {
             setEditingCandidate(reviewCandidate);
           }}
           ignore={() => void reviewCandidateStatus(reviewCandidate, "ignored")}
+          markDuplicate={applicationId => void reviewCandidateDuplicate(reviewCandidate, applicationId)}
           ingest={() => void reviewCandidateStatus(reviewCandidate, "ingested")}
         />
       ) : null}
@@ -765,6 +795,7 @@ function FitBrief({ candidate, company }: { candidate: DiscoveryCandidate; compa
 function CandidateReviewModal({
   candidate,
   company,
+  applications,
   index,
   total,
   pending,
@@ -773,10 +804,12 @@ function CandidateReviewModal({
   next,
   edit,
   ignore,
+  markDuplicate,
   ingest
 }: {
   candidate: DiscoveryCandidate;
   company?: Company;
+  applications: Application[];
   index: number;
   total: number;
   pending: boolean;
@@ -785,17 +818,30 @@ function CandidateReviewModal({
   next: () => void;
   edit: () => void;
   ignore: () => void;
+  markDuplicate: (applicationId: string) => void;
   ingest: () => void;
 }) {
+  const [duplicateOpen, setDuplicateOpen] = useState(false);
+
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape" && duplicateOpen) {
+        setDuplicateOpen(false);
+        return;
+      }
       if (event.key === "Escape") close();
+      if (duplicateOpen) return;
+      if (
+        event.target instanceof HTMLInputElement
+        || event.target instanceof HTMLTextAreaElement
+        || event.target instanceof HTMLSelectElement
+      ) return;
       if (event.key === "ArrowLeft") previous();
       if (event.key === "ArrowRight") next();
     }
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [close, next, previous]);
+  }, [close, duplicateOpen, next, previous]);
 
   return (
     <div className="modal-backdrop">
@@ -822,6 +868,16 @@ function CandidateReviewModal({
             </details>
           ) : null}
         </div>
+        {duplicateOpen ? (
+          <DuplicatePostingPicker
+            candidate={candidate}
+            company={company}
+            applications={applications}
+            pending={pending}
+            cancel={() => setDuplicateOpen(false)}
+            confirm={markDuplicate}
+          />
+        ) : null}
         <div className="discovery-review-actions">
           <div>
             <button className="button" type="button" disabled={index <= 0 || pending} onClick={previous}>Previous</button>
@@ -831,12 +887,150 @@ function CandidateReviewModal({
             <a className="button" href={candidate.canonical_url || candidate.url} target="_blank" rel="noreferrer"><ExternalIcon size={15} /> Open posting</a>
             <button className="button" type="button" disabled={pending} onClick={edit}>Edit details</button>
             <button className="button" type="button" disabled={pending} onClick={ignore}>Ignore</button>
+            <button className="button" type="button" disabled={pending || !applications.length} onClick={() => setDuplicateOpen(true)}>
+              Mark duplicate
+            </button>
             <button className="button primary" type="button" disabled={pending || candidate.processing_status !== "ready"} onClick={ingest}>Ingest</button>
           </div>
         </div>
       </article>
     </div>
   );
+}
+
+function DuplicatePostingPicker({
+  candidate,
+  company,
+  applications,
+  pending,
+  cancel,
+  confirm
+}: {
+  candidate: DiscoveryCandidate;
+  company?: Company;
+  applications: Application[];
+  pending: boolean;
+  cancel: () => void;
+  confirm: (applicationId: string) => void;
+}) {
+  const [query, setQuery] = useState("");
+  const [selectedApplicationId, setSelectedApplicationId] = useState("");
+  const matches = useMemo(() => {
+    const terms = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
+    return [...applications]
+      .filter(application => {
+        if (!terms.length) return true;
+        const searchable = postingSearchText(application);
+        return terms.every(term => searchable.includes(term));
+      })
+      .sort((left, right) => (
+        duplicatePostingScore(right, candidate, company) - duplicatePostingScore(left, candidate, company)
+        || Number(right.is_active) - Number(left.is_active)
+        || (right.date_found || "").localeCompare(left.date_found || "")
+        || right.id.localeCompare(left.id)
+      ))
+      .slice(0, 20);
+  }, [applications, candidate, company, query]);
+
+  return (
+    <section className="discovery-duplicate-picker" aria-label="Associate duplicate with an existing posting">
+      <div className="discovery-duplicate-heading">
+        <div>
+          <strong>Choose the posting this duplicates</strong>
+          <span>Hunter will keep the Discovery result linked to the posting you select.</span>
+        </div>
+        <button className="icon-button" type="button" onClick={cancel} aria-label="Cancel duplicate association"><XIcon size={15} /></button>
+      </div>
+      <label className="search discovery-duplicate-search">
+        <span className="sr-only">Search existing postings</span>
+        <SearchIcon />
+        <input
+          autoFocus
+          value={query}
+          onChange={event => setQuery(event.target.value)}
+          type="search"
+          placeholder="Search by company, role, location, or posting ID..."
+        />
+      </label>
+      <div className="discovery-duplicate-results" role="list" aria-label="Existing postings">
+        {matches.map(application => (
+          <button
+            className={selectedApplicationId === application.id ? "discovery-duplicate-option selected" : "discovery-duplicate-option"}
+            key={application.id}
+            type="button"
+            onClick={() => setSelectedApplicationId(application.id)}
+            aria-pressed={selectedApplicationId === application.id}
+          >
+            <span>
+              <strong>{application.role}</strong>
+              <small>{application.company} · {application.location || "Location unknown"} · {postingStageLabel(application)}</small>
+            </span>
+            <span>{application.id}</span>
+          </button>
+        ))}
+        {!matches.length ? <p>No existing postings match that search.</p> : null}
+      </div>
+      <div className="discovery-duplicate-actions">
+        <button className="button" type="button" disabled={pending} onClick={cancel}>Cancel</button>
+        <button
+          className="button primary"
+          type="button"
+          disabled={pending || !selectedApplicationId}
+          onClick={() => confirm(selectedApplicationId)}
+        >
+          <BriefcaseIcon size={15} /> Associate duplicate
+        </button>
+      </div>
+    </section>
+  );
+}
+
+function postingSearchText(application: Application) {
+  return [
+    application.id,
+    application.company,
+    application.role,
+    application.location,
+    application.work_mode,
+    application.stage,
+    application.outcome,
+    application.source_url
+  ].join(" ").toLowerCase();
+}
+
+function duplicatePostingScore(
+  application: Application,
+  candidate: DiscoveryCandidate,
+  company?: Company
+) {
+  let score = 0;
+  const candidateUrls = new Set(
+    [candidate.url, candidate.canonical_url, ...(candidate.source_urls || [])]
+      .map(normalizedPostingUrl)
+      .filter(Boolean)
+  );
+  if (candidateUrls.has(normalizedPostingUrl(application.source_url))) score += 1000;
+  if (candidate.company_id && application.company_id === candidate.company_id) score += 300;
+  if (company?.name && application.company.toLowerCase() === company.name.toLowerCase()) score += 200;
+
+  const candidateTitle = candidate.title.trim().toLowerCase();
+  const applicationTitle = application.role.trim().toLowerCase();
+  if (candidateTitle && candidateTitle === applicationTitle) score += 400;
+  const candidateTerms = new Set(candidateTitle.match(/[a-z0-9]+/g) || []);
+  const applicationTerms = new Set(applicationTitle.match(/[a-z0-9]+/g) || []);
+  score += [...candidateTerms].filter(term => applicationTerms.has(term)).length * 12;
+  return score;
+}
+
+function normalizedPostingUrl(value: string) {
+  return value.trim().toLowerCase().replace(/\/+$/, "");
+}
+
+function postingStageLabel(application: Application) {
+  if (application.stage === "closed" && application.outcome) {
+    return `${titleCase(application.stage)} · ${titleCase(application.outcome)}`;
+  }
+  return titleCase(application.stage || "tracked");
 }
 
 function CandidateDetailsModal({

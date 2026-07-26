@@ -337,6 +337,16 @@ export function updateDiscoveryCandidate(id: string, status: string): Promise<{ 
   return postJson<{ candidate: DiscoveryCandidate }>("/api/discovery/candidates/update", { id, status });
 }
 
+export function markDiscoveryCandidateDuplicate(
+  id: string,
+  applicationId: string
+): Promise<{ candidate: DiscoveryCandidate; posting: Application }> {
+  return postJson<{ candidate: DiscoveryCandidate; posting: Application }>(
+    "/api/discovery/candidates/duplicate",
+    { id, application_id: applicationId }
+  );
+}
+
 export function ingestDiscoveryCandidate(
   id: string
 ): Promise<{ candidate: DiscoveryCandidate; posting: Application; created: boolean }> {

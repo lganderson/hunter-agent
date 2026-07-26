@@ -2115,6 +2115,116 @@
       -webkit-line-clamp: 5;
     }
 
+    .discovery-duplicate-picker {
+      display: grid;
+      gap: 10px;
+      border-top: 1px solid var(--border);
+      background: var(--surface-soft);
+      padding: 14px 16px;
+    }
+
+    .discovery-duplicate-heading {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 12px;
+    }
+
+    .discovery-duplicate-heading > div {
+      display: grid;
+      gap: 2px;
+    }
+
+    .discovery-duplicate-heading strong {
+      font-size: 13px;
+    }
+
+    .discovery-duplicate-heading span {
+      color: var(--muted);
+      font-size: 11px;
+    }
+
+    .discovery-duplicate-search {
+      width: 100%;
+      max-width: none;
+      background: var(--surface);
+    }
+
+    .discovery-duplicate-results {
+      display: grid;
+      max-height: 238px;
+      overflow-y: auto;
+      border: 1px solid var(--border);
+      border-radius: 7px;
+      background: var(--surface);
+    }
+
+    .discovery-duplicate-results > p {
+      margin: 0;
+      padding: 22px 14px;
+      color: var(--muted);
+      font-size: 12px;
+      text-align: center;
+    }
+
+    .discovery-duplicate-option {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 14px;
+      width: 100%;
+      border: 0;
+      border-bottom: 1px solid var(--border);
+      background: transparent;
+      padding: 9px 11px;
+      color: var(--text);
+      font: inherit;
+      text-align: left;
+      cursor: pointer;
+    }
+
+    .discovery-duplicate-option:last-child {
+      border-bottom: 0;
+    }
+
+    .discovery-duplicate-option:hover,
+    .discovery-duplicate-option.selected {
+      background: var(--accent-soft);
+    }
+
+    .discovery-duplicate-option.selected {
+      box-shadow: inset 3px 0 0 var(--accent);
+    }
+
+    .discovery-duplicate-option > span:first-child {
+      display: grid;
+      min-width: 0;
+      gap: 2px;
+    }
+
+    .discovery-duplicate-option strong,
+    .discovery-duplicate-option small {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .discovery-duplicate-option strong {
+      font-size: 12px;
+    }
+
+    .discovery-duplicate-option small,
+    .discovery-duplicate-option > span:last-child {
+      color: var(--muted);
+      font-size: 11px;
+    }
+
+    .discovery-duplicate-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 7px;
+    }
+
     .discovery-review-actions {
       display: flex;
       position: sticky;
