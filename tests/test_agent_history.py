@@ -54,7 +54,7 @@ class HunterAgentHistoryTest(unittest.TestCase):
         self.assertEqual(result["cleared"], 2)
         self.assertEqual(chat_history.list_messages(), [])
 
-    def test_initialize_creates_agent_messages_posting_snapshots_and_resume_versions_schema_version_eleven(self):
+    def test_initialize_creates_agent_messages_posting_snapshots_and_resume_versions_schema_version_twelve(self):
         sqlite_store.initialize()
 
         with sqlite_store.connect() as connection:
@@ -75,7 +75,7 @@ class HunterAgentHistoryTest(unittest.TestCase):
         self.assertEqual(table["name"], "agent_messages")
         self.assertEqual(snapshot_table["name"], "posting_snapshots")
         self.assertEqual(resume_versions_table["name"], "resume_versions")
-        self.assertEqual(version["value"], "11")
+        self.assertEqual(version["value"], "12")
         self.assertIn("capture_method", snapshot_columns)
         self.assertIn("capture_model", snapshot_columns)
         self.assertIn("sources_json", snapshot_columns)

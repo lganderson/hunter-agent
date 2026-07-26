@@ -482,7 +482,9 @@ def initialize():
             "lanes_json TEXT NOT NULL DEFAULT '', "
             "created_at TEXT NOT NULL DEFAULT '', "
             "updated_at TEXT NOT NULL DEFAULT '', "
-            "last_opened_at TEXT NOT NULL DEFAULT ''"
+            "last_opened_at TEXT NOT NULL DEFAULT '', "
+            "last_run_at TEXT NOT NULL DEFAULT '', "
+            "last_run_summary_json TEXT NOT NULL DEFAULT ''"
             ")"
         )
         ensure_text_columns(connection, "discovery_searches", schema.DISCOVERY_SEARCH_FIELDS)
@@ -491,7 +493,7 @@ def initialize():
         ensure_text_columns(connection, "discovery_candidates", schema.DISCOVERY_CANDIDATE_FIELDS)
         migrate_discovery_candidates_constraint(connection)
         connection.execute(
-            "INSERT INTO meta(key, value) VALUES('schema_version', '11') "
+            "INSERT INTO meta(key, value) VALUES('schema_version', '12') "
             "ON CONFLICT(key) DO UPDATE SET value=excluded.value"
         )
 

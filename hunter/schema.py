@@ -151,6 +151,8 @@ DISCOVERY_SEARCH_FIELDS = [
     "created_at",
     "updated_at",
     "last_opened_at",
+    "last_run_at",
+    "last_run_summary_json",
 ]
 
 DISCOVERY_CANDIDATE_FIELDS = [

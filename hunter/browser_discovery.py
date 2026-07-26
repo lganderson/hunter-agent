@@ -161,11 +161,126 @@ LINKEDIN_RESULTS_SCRIPT = r"""
     items.push({
       url,
       title,
+      company,
+      location,
       snippet: [location, cardText].filter(Boolean).join(" · ").slice(0, 1200)
     });
     if (items.length >= 25) break;
   }
   return JSON.stringify({blocked: false, reason: "", items});
+})()
+"""
+
+DETAIL_RESULTS_SCRIPT = r"""
+(() => {
+  const pageText = (document.body?.innerText || "").toLowerCase();
+  const blocked = /\/(login|authwall|checkpoint)\b/i.test(location.pathname)
+    || pageText.includes("sign in or join linkedin")
+    || pageText.includes("let's do a quick security check")
+    || pageText.includes("verify you are a human")
+    || pageText.includes("unusual traffic from your computer network");
+  if (blocked) {
+    return JSON.stringify({
+      blocked: true,
+      reason: "The posting page needs sign-in or verification in the Hunter Chrome profile.",
+      items: []
+    });
+  }
+
+  const text = value => (value || "").replace(/\s+/g, " ").trim();
+  const firstText = selectors => {
+    for (const selector of selectors) {
+      const value = text(document.querySelector(selector)?.textContent || "");
+      if (value) return value;
+    }
+    return "";
+  };
+  const jobObjects = [];
+  for (const script of document.querySelectorAll('script[type="application/ld+json"]')) {
+    try {
+      const decoded = JSON.parse(script.textContent || "{}");
+      const pending = Array.isArray(decoded) ? decoded : [decoded];
+      for (const item of pending) {
+        if (!item || typeof item !== "object") continue;
+        jobObjects.push(item);
+        if (Array.isArray(item["@graph"])) jobObjects.push(...item["@graph"]);
+      }
+    } catch (_error) {
+      // Ignore malformed structured data and continue with visible page content.
+    }
+  }
+  const job = jobObjects.find(item => {
+    const types = Array.isArray(item?.["@type"]) ? item["@type"] : [item?.["@type"]];
+    return types.includes("JobPosting");
+  }) || {};
+  const organization = job.hiringOrganization && typeof job.hiringOrganization === "object"
+    ? text(job.hiringOrganization.name || "")
+    : "";
+  const locationParts = [];
+  const locations = Array.isArray(job.jobLocation) ? job.jobLocation : (job.jobLocation ? [job.jobLocation] : []);
+  for (const item of locations) {
+    const address = item?.address && typeof item.address === "object" ? item.address : item;
+    const value = [address?.addressLocality, address?.addressRegion, address?.addressCountry]
+      .map(part => typeof part === "object" ? part?.name : part)
+      .map(text)
+      .filter(Boolean)
+      .join(", ");
+    if (value) locationParts.push(value);
+  }
+  const requirements = Array.isArray(job.applicantLocationRequirements)
+    ? job.applicantLocationRequirements
+    : (job.applicantLocationRequirements ? [job.applicantLocationRequirements] : []);
+  for (const item of requirements) {
+    const value = text(typeof item === "object" ? item?.name : item);
+    if (value) locationParts.push(value);
+  }
+  if (text(job.jobLocationType || "").toUpperCase() === "TELECOMMUTE") locationParts.unshift("Remote");
+
+  const title = text(job.title || "") || firstText([
+    ".job-details-jobs-unified-top-card__job-title",
+    ".top-card-layout__title",
+    "[data-automation-id='jobPostingHeader']",
+    "h1"
+  ]);
+  const company = organization || firstText([
+    ".job-details-jobs-unified-top-card__company-name",
+    ".topcard__org-name-link",
+    "[data-automation-id='company']"
+  ]);
+  const visibleLocation = firstText([
+    ".job-details-jobs-unified-top-card__primary-description-container",
+    ".topcard__flavor--bullet",
+    "[data-automation-id='locations']",
+    "[data-automation-id='location']"
+  ]);
+  const description = text(job.description || "") || firstText([
+    ".jobs-description__content",
+    ".jobs-description-content__text",
+    "#job-details",
+    "[data-automation-id='jobPostingDescription']",
+    "main"
+  ]);
+  const canonical = document.querySelector('link[rel="canonical"]')?.href || location.href;
+  const outboundApply = Array.from(document.querySelectorAll("a[href]")).find(anchor => {
+    const href = anchor.href || "";
+    const label = text(anchor.textContent || "").toLowerCase();
+    try {
+      const host = new URL(href).hostname.replace(/^www\./, "");
+      return label.includes("apply") && host && host !== "linkedin.com" && !host.endsWith(".linkedin.com");
+    } catch (_error) {
+      return false;
+    }
+  });
+  const isLinkedIn = location.hostname === "linkedin.com" || location.hostname.endsWith(".linkedin.com");
+  const item = {
+    url: location.href,
+    canonical_url: isLinkedIn ? (outboundApply?.href || "") : canonical,
+    title,
+    company,
+    location: [...new Set([...locationParts, visibleLocation].filter(Boolean))].join("; "),
+    description_text: description.slice(0, 80000)
+  };
+  return JSON.stringify({blocked: false, reason: "", items: [item]});
 })()
 """
 
@@ -294,6 +409,10 @@ class HunterChrome:
         query["start"] = str(max(0, int(page)) * LINKEDIN_PAGE_SIZE)
         paged_url = urlunparse(parsed._replace(query=urlencode(query)))
         return self._search_tab(paged_url, LINKEDIN_RESULTS_SCRIPT, scroll=True)
+
+    def details(self, url):
+        items = self._search_tab(url, DETAIL_RESULTS_SCRIPT, scroll=True)
+        return items[0] if items else {}
 
 
 def search(engine, value, page=0, browser=None):

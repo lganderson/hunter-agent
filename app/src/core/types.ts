@@ -170,6 +170,20 @@ export type DiscoverySearch = {
   created_at: string;
   updated_at: string;
   last_opened_at: string;
+  last_run_at: string;
+  last_run_summary: DiscoveryLastRunSummary;
+};
+
+export type DiscoveryLastRunSummary = {
+  evaluated_count?: number;
+  qualified_count?: number;
+  found_count?: number;
+  new_count?: number;
+  updated_count?: number;
+  skipped_count?: number;
+  duplicate_count?: number;
+  limited_count?: number;
+  enriched_count?: number;
 };
 
 export type DiscoveryCandidate = {
@@ -210,6 +224,8 @@ export type DiscoverySearchLane = DiscoverySearchLaneDefinition & {
 export type DiscoverySourceRun = {
   source: string;
   label: string;
+  query_family: string;
+  query_family_label: string;
   lane_id: string;
   lane_label: string;
   query: string;
@@ -229,6 +245,7 @@ export type DiscoveryRunResult = {
   skipped_count: number;
   duplicate_count: number;
   limited_count: number;
+  enriched_count: number;
   sources: DiscoverySourceRun[];
   errors: string[];
 };

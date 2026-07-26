@@ -77,7 +77,7 @@ class HunterDiscoveryTest(unittest.TestCase):
         self.assertIn("start=25", opened_urls[1][0])
         self.assertTrue(opened_urls[1][1])
 
-    def test_candidate_ranking_prefers_fit_then_processing_completeness(self):
+    def test_candidate_ranking_prefers_verified_details_before_provisional_fit(self):
         candidates = [
             {"title": "Lower", "fit_score": "45", "processing_status": "ready", "description_text": "complete"},
             {"title": "Partial", "fit_score": "60", "processing_status": "partial", "description_text": "short"},
@@ -86,7 +86,7 @@ class HunterDiscoveryTest(unittest.TestCase):
 
         ranked = sorted(candidates, key=discovery.candidate_rank_key, reverse=True)
 
-        self.assertEqual([candidate["title"] for candidate in ranked], ["Strong", "Partial", "Lower"])
+        self.assertEqual([candidate["title"] for candidate in ranked], ["Strong", "Lower", "Partial"])
 
     def save_search(self, name, keywords, lanes=None):
         return discovery.upsert_search(
@@ -133,9 +133,11 @@ class HunterDiscoveryTest(unittest.TestCase):
         self.assertEqual(search["lanes"][0]["label"], "Minnesota")
         decoded_url = unquote_plus(opened["url"])
         self.assertIn('"technical program manager"', decoded_url)
-        self.assertIn('"staff technical program manager"', decoded_url)
-        self.assertIn('"technical project manager"', decoded_url)
         self.assertIn("developer tools", decoded_url)
+        families = discovery.search_keyword_families(search)
+        self.assertEqual([family["id"] for family in families], ["exact", "senior", "adjacent"])
+        self.assertIn('"staff technical program manager"', families[1]["query"])
+        self.assertIn('"technical project manager"', families[2]["query"])
         self.assertIn("location=Minnesota", opened["url"])
         self.assertEqual(len(opened["lanes"]), 2)
         self.assertIn("location=United+States", opened["lanes"][1]["url"])
@@ -205,7 +207,12 @@ class HunterDiscoveryTest(unittest.TestCase):
             posting_fetcher=lambda url: {"status": 200, "final_url": url, "html": posting_page, "error": ""},
         )
 
-        self.assertEqual(len(search_requests), len(search["lanes"]) * len(discovery.BUILT_IN_SEARCH_STRATEGIES))
+        self.assertEqual(
+            len(search_requests),
+            len(search["lanes"])
+            * len(discovery.search_keyword_families(search))
+            * len(discovery.BUILT_IN_SEARCH_STRATEGIES),
+        )
         self.assertTrue(any("Minnesota" in source["query"] for source in result["sources"]))
         self.assertTrue(any("United States" in source["query"] and "remote" in source["query"] for source in result["sources"]))
         self.assertEqual(result["found_count"], 2)
@@ -284,19 +291,135 @@ class HunterDiscoveryTest(unittest.TestCase):
         )
 
         expected_requests_per_lane = (
-            2 * discovery.GOOGLE_PAGE_COUNT
-            + discovery.LINKEDIN_PAGE_COUNT
+            len(discovery.search_keyword_families(search))
+            * len(discovery.BUILT_IN_SEARCH_STRATEGIES)
         )
         self.assertEqual(len(browser_requests), len(search["lanes"]) * expected_requests_per_lane)
         self.assertEqual({request[0] for request in browser_requests}, {"google", "linkedin"})
-        self.assertEqual({request[2] for request in browser_requests}, {0, 1})
+        self.assertEqual({request[2] for request in browser_requests}, {0})
         self.assertTrue(any("google.com" not in value and "Minnesota" in value for engine, value, _page in browser_requests if engine == "google"))
         self.assertTrue(any("linkedin.com/jobs/search" in value for engine, value, _page in browser_requests if engine == "linkedin"))
         self.assertEqual({source["engine"] for source in result["sources"]}, {"hunter-chrome-google", "hunter-chrome-linkedin"})
-        self.assertEqual({source["page_count"] for source in result["sources"]}, {2})
+        self.assertEqual({source["page_count"] for source in result["sources"]}, {1})
+        self.assertEqual(
+            {source["query_family"] for source in result["sources"]},
+            {"exact", "senior", "adjacent"},
+        )
         self.assertEqual(result["found_count"], 2)
         self.assertEqual(result["qualified_count"], 2)
         self.assertEqual({candidate["source_platform"] for candidate in result["captured"]}, {"ashby", "linkedin"})
+
+    def test_adaptive_paging_continues_on_high_yield_and_stops_after_yield_drops(self):
+        search = self.save_search("Technical platforms", "platform delivery leader")
+        browser_requests = []
+
+        def browser_searcher(engine, value, page):
+            browser_requests.append((engine, page))
+            count = 10 if page == 0 else 2
+            return [
+                {
+                    "url": f"https://jobs.example.com/jobs/{engine}/{page}/{index}",
+                    "title": f"Platform Delivery Leader {page}-{index}",
+                    "snippet": "Minnesota platform program leadership.",
+                }
+                for index in range(count)
+            ]
+
+        discovery.run_search(
+            search["id"],
+            browser_searcher=browser_searcher,
+            posting_fetcher=lambda url: {
+                "status": 200,
+                "final_url": url,
+                "html": (
+                    "<html><head><script type='application/ld+json'>"
+                    '{"@type":"JobPosting","title":"Platform Delivery Leader",'
+                    '"description":"Lead platform delivery planning, technical dependencies, execution reviews, '
+                    'risk management, stakeholder communication, release readiness, operational mechanisms, '
+                    'customer workflows, measurable outcomes, roadmap governance, continuous improvement, '
+                    'cross-functional alignment, and post-launch learning across distributed engineering teams.",'
+                    '"hiringOrganization":{"name":"Example Labs"},'
+                    '"jobLocation":{"address":{"addressLocality":"Minneapolis","addressRegion":"MN"}}}'
+                    "</script></head><body>Apply now</body></html>"
+                ),
+                "error": "",
+            },
+        )
+
+        self.assertEqual([page for _engine, page in browser_requests], [0, 1, 0, 1, 0, 1])
+
+    def test_search_automatically_enriches_linkedin_details_before_ranking(self):
+        search = self.save_search("Technical platforms", "technical program manager")
+        linkedin_url = "https://www.linkedin.com/jobs/view/1234567890"
+
+        def browser_searcher(engine, value, page):
+            if engine != "linkedin":
+                return []
+            return [
+                {
+                    "url": linkedin_url,
+                    "title": "Technical Program Manager",
+                    "company": "Example Labs",
+                    "location": "United States",
+                    "snippet": "Remote technical program role.",
+                }
+            ]
+
+        details_text = (
+            "Lead technical platform programs across planning, execution, dependency management, risk reviews, "
+            "stakeholder communication, launch readiness, operating mechanisms, and continuous improvement. "
+            "Partner with product and engineering teams to translate customer needs into clear requirements, "
+            "measurable milestones, and durable delivery systems. Own roadmap governance, technical decision "
+            "forums, release coordination, post-launch learning, and cross-functional communication across "
+            "distributed teams in the United States."
+        )
+        result = discovery.run_search(
+            search["id"],
+            browser_searcher=browser_searcher,
+            browser_detailer=lambda url: {
+                "title": "Technical Program Manager, Platform",
+                "company": "Example Labs",
+                "location": "Remote; United States",
+                "description_text": details_text,
+            },
+        )
+
+        candidate = result["captured"][0]
+        self.assertEqual(result["enriched_count"], 1)
+        self.assertEqual(candidate["processing_status"], "ready")
+        self.assertEqual(candidate["location"], "Remote; United States")
+        self.assertNotIn(discovery.LINKEDIN_DETAILS_WARNING, candidate["warnings"])
+        self.assertTrue(result["search"]["last_run_at"])
+        self.assertEqual(result["search"]["last_run_summary"]["enriched_count"], 1)
+
+    def test_workday_redirect_payload_is_not_ready(self):
+        candidate = {
+            "company": "Example",
+            "title": "Technical Program Manager",
+            "location": "Minneapolis, MN",
+            "work_mode": "",
+            "source_platform": "workday",
+            "description_text": '{"widget":"redirect","url":"/job/example","externalSpa":true}',
+            "warnings": "",
+        }
+
+        self.assertEqual(discovery.processing_status(candidate), "partial")
+
+    def test_requisition_identity_deduplicates_cross_domain_workday_role(self):
+        direct = {
+            "company": "Danaher",
+            "title": "Technical Project Manager, Global Operations",
+            "url": "https://jobs.danaher.com/global/en/job/DANAGLOBALR1308804EXTERNALENGLOBAL/technical-project-manager",
+            "canonical_url": "",
+        }
+        workday = {
+            "company": "Danaher",
+            "title": "Technical Project Manager, Global Operations ...",
+            "url": "https://danaher.wd1.myworkdayjobs.com/DanaherJobs/job/technical-project-manager_R1308804",
+            "canonical_url": "",
+        }
+
+        self.assertIs(discovery.matching_candidate([direct], workday), direct)
 
     def test_search_now_rejects_blocked_or_collection_content_before_scoring(self):
         search = self.save_search("Technical platforms", "technical program manager")
@@ -369,7 +492,14 @@ class HunterDiscoveryTest(unittest.TestCase):
             browser_requests.append((engine, page))
             if page == 1:
                 raise browser_discovery.BrowserDiscoveryError("Google needs verification in Hunter Chrome.")
-            return []
+            return [
+                {
+                    "url": f"https://jobs.example.com/job/{index}",
+                    "title": f"Technical Program Manager {index}",
+                    "snippet": "Minnesota technical program role.",
+                }
+                for index in range(10)
+            ]
 
         with self.assertRaisesRegex(RuntimeError, "needs verification"):
             discovery.run_search(search["id"], browser_searcher=browser_searcher)
@@ -410,7 +540,7 @@ class HunterDiscoveryTest(unittest.TestCase):
           {
             "@type": "JobPosting",
             "title": "Senior Technical Program Manager, Developer Platform",
-            "description": "Own the developer platform roadmap, customer workflows, requirements, and cross-functional launch.",
+            "description": "Own the developer platform roadmap, customer workflows, requirements, and cross-functional launch. Lead planning, execution, risk management, technical dependency reviews, stakeholder communication, release readiness, operational mechanisms, and continuous improvement across multiple engineering teams. Translate customer needs into durable program requirements and measurable delivery outcomes. Partner with product and engineering leaders to define milestones, resolve ambiguity, and communicate progress. Build repeatable mechanisms for roadmap planning, launch governance, and post-launch learning.",
             "hiringOrganization": {"name": "Example Labs"},
             "jobLocation": {"address": {"addressLocality": "Minneapolis", "addressRegion": "MN", "addressCountry": "US"}}
           }
@@ -493,9 +623,16 @@ class HunterDiscoveryTest(unittest.TestCase):
                 "company": "New Company",
                 "title": "Technical Program Manager, Developer Experience",
                 "location": "Remote, US",
-                "work_mode": "Remote",
+                "work_mode": "remote",
                 "canonical_url": "https://jobs.new-company.example/roles/tpm-devex",
-                "description_text": "Lead developer tools roadmap, cross-functional launches, requirements, and customer workflows.",
+                "description_text": (
+                    "Lead the developer tools roadmap, cross-functional launches, requirements, and customer workflows. "
+                    "Own planning, technical dependency management, execution reviews, risk mitigation, stakeholder "
+                    "communication, release readiness, and operating mechanisms across engineering and product teams. "
+                    "Translate customer needs into program requirements and measurable outcomes while improving delivery "
+                    "systems, launch governance, and post-launch learning. Partner with senior leaders and distributed "
+                    "teams to resolve ambiguity and maintain durable program health."
+                ),
             },
         )
         ingested = discovery.ingest_candidate(candidate["id"])
@@ -518,7 +655,7 @@ class HunterDiscoveryTest(unittest.TestCase):
                 details={"company": "Example"},
             )
 
-    def test_same_role_can_be_kept_in_multiple_saved_searches(self):
+    def test_same_role_is_global_across_saved_searches(self):
         first_search = self.save_search("Platforms", "platform program manager")
         second_search = self.save_search("Developer experience", "developer experience")
         details = {
@@ -531,8 +668,8 @@ class HunterDiscoveryTest(unittest.TestCase):
         first = discovery.capture_candidates(first_search["id"], url, details=details)
         second = discovery.capture_candidates(second_search["id"], url, details=details)
 
-        self.assertNotEqual(first["captured"][0]["id"], second["captured"][0]["id"])
-        self.assertEqual(len(repository.read_discovery_candidates()), 2)
+        self.assertEqual(first["captured"][0]["id"], second["captured"][0]["id"])
+        self.assertEqual(len(repository.read_discovery_candidates()), 1)
 
     def test_legacy_location_fields_migrate_into_search_lanes(self):
         repository.write_discovery_searches(

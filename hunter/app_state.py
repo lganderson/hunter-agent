@@ -79,5 +79,5 @@ def build_payload():
         "company_posting_candidates": repository.read_company_posting_candidates(),
         "company_career_scans": repository.read_company_career_scans(limit=200),
         "discovery_searches": discovery_store.list_searches(),
-        "discovery_candidates": repository.read_discovery_candidates(),
+        "discovery_candidates": discovery_store.list_candidates(),
     }

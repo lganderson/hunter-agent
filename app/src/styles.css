@@ -1630,6 +1630,23 @@
       white-space: nowrap;
     }
 
+    .discovery-run-summary {
+      display: flex;
+      flex: 0 0 auto;
+      align-items: baseline;
+      gap: 8px;
+      padding: 7px 10px;
+      border-bottom: 1px solid var(--border);
+      background: #f3f8f6;
+      color: var(--muted);
+      font-size: 11px;
+    }
+
+    .discovery-run-summary strong {
+      color: var(--green);
+      white-space: nowrap;
+    }
+
     .discovery-editor {
       flex: 0 0 auto;
       border-bottom: 1px solid var(--border);
@@ -1857,6 +1874,11 @@
     .pill.discovery-needs-details {
       background: var(--red-soft);
       color: var(--red);
+    }
+
+    .pill.fit-pending {
+      background: var(--surface-soft);
+      color: var(--muted);
     }
 
     .discovery-details-modal {
@@ -4863,7 +4885,8 @@
         flex-basis: 100%;
       }
 
-      .discovery-source-note {
+      .discovery-source-note,
+      .discovery-run-summary {
         align-items: flex-start;
         flex-direction: column;
         gap: 2px;

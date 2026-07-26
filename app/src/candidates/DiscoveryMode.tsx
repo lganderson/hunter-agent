@@ -26,9 +26,10 @@ type DiscoveryModeProps = {
   refresh: () => Promise<AppState>;
 };
 
-type DiscoveryFilter = "new" | "recommended" | "needs-details" | "all" | "ignored" | "ingested";
+type DiscoveryFilter = "latest" | "new" | "recommended" | "needs-details" | "all" | "ignored" | "ingested";
 
 const DISCOVERY_FILTERS: Array<{ id: DiscoveryFilter; label: string }> = [
+  { id: "latest", label: "Latest" },
   { id: "new", label: "New" },
   { id: "recommended", label: "Recommended" },
   { id: "needs-details", label: "Needs details" },
@@ -77,28 +78,33 @@ export function DiscoveryMode({ data, refresh }: DiscoveryModeProps) {
     if (selectedSearch && !editingSearch) setSearchDraft(searchUpdates(selectedSearch));
   }, [editingSearch, selectedSearch]);
 
-  const selectedCandidates = useMemo(
-    () => data.discovery_candidates.filter(candidate => !selectedSearch || candidate.search_id === selectedSearch.id),
-    [data.discovery_candidates, selectedSearch]
+  const selectedCandidates = data.discovery_candidates;
+  const latestSeenAt = useMemo(
+    () => selectedCandidates.reduce(
+      (latest, candidate) => candidate.last_seen_at > latest ? candidate.last_seen_at : latest,
+      ""
+    ),
+    [selectedCandidates]
   );
 
   const visibleCandidates = useMemo(
     () => selectedCandidates
-      .filter(candidate => discoveryCandidateMatches(candidate, resultFilter))
+      .filter(candidate => discoveryCandidateMatches(candidate, resultFilter, latestSeenAt))
       .filter(candidate => discoveryCandidateIncludes(candidate, resultSearch))
-      .sort((left, right) => Number(right.fit_score || 0) - Number(left.fit_score || 0)
-        || (right.captured_at || "").localeCompare(left.captured_at || "")),
-    [resultFilter, resultSearch, selectedCandidates]
+      .sort((left, right) => Number(right.processing_status === "ready") - Number(left.processing_status === "ready")
+        || Number(right.fit_score || 0) - Number(left.fit_score || 0)
+        || (right.last_seen_at || "").localeCompare(left.last_seen_at || "")),
+    [latestSeenAt, resultFilter, resultSearch, selectedCandidates]
   );
 
   const counts = useMemo(
     () => Object.fromEntries(
       DISCOVERY_FILTERS.map(filter => [
         filter.id,
-        selectedCandidates.filter(candidate => discoveryCandidateMatches(candidate, filter.id)).length
+        selectedCandidates.filter(candidate => discoveryCandidateMatches(candidate, filter.id, latestSeenAt)).length
       ])
     ) as Record<DiscoveryFilter, number>,
-    [selectedCandidates]
+    [latestSeenAt, selectedCandidates]
   );
 
   const capturedUrlCount = (captureText.match(/https?:\/\//gi) || []).length;
@@ -157,6 +163,7 @@ export function DiscoveryMode({ data, refresh }: DiscoveryModeProps) {
     try {
       const result = await runDiscoverySearch(selectedSearch.id);
       await refresh();
+      setResultFilter("latest");
       const errorSuffix = result.errors.length
         ? ` ${result.errors.length} source search${result.errors.length === 1 ? "" : "es"} could not be completed.`
         : "";
@@ -164,9 +171,10 @@ export function DiscoveryMode({ data, refresh }: DiscoveryModeProps) {
         ? ` Hunter retained the top ${result.found_count} and held back ${result.limited_count} lower-ranked matches.`
         : "";
       setOperationStatus(
-        `Discovery reviewed ${result.evaluated_count} unique links across two result pages per source. `
+        `Discovery reviewed ${result.evaluated_count} unique links with adaptive paging. `
         + `${result.qualified_count} qualified after validation and lane matching; `
         + `${result.new_count} are new and ${result.updated_count} were refreshed. `
+        + `${result.enriched_count} posting${result.enriched_count === 1 ? "" : "s"} gained verified details. `
         + `${result.duplicate_count} duplicate${result.duplicate_count === 1 ? "" : "s"} collapsed.`
         + `${limitSuffix}${errorSuffix}`
       );
@@ -288,7 +296,18 @@ export function DiscoveryMode({ data, refresh }: DiscoveryModeProps) {
       {selectedSearch ? (
         <div className="discovery-source-note">
           <strong>Hunter Chrome</strong>
-          <span>Discovery searches two Google pages and two LinkedIn batches per lane, including controlled senior, staff, principal, project, and engineering program variants. It validates and scores matches before retaining the strongest 50. Watched-company career scans stay in Companies.</span>
+          <span>Discovery runs weighted exact, senior, and adjacent-role searches, continues paging while each page yields useful new postings, and automatically enriches the strongest incomplete results before fit scoring. Watched-company career scans stay in Companies.</span>
+        </div>
+      ) : null}
+      {selectedSearch?.last_run_at && Object.keys(selectedSearch.last_run_summary || {}).length ? (
+        <div className="discovery-run-summary">
+          <strong>Last run</strong>
+          <span>
+            Reviewed {selectedSearch.last_run_summary.evaluated_count || 0};
+            {" "}{selectedSearch.last_run_summary.qualified_count || 0} qualified;
+            {" "}{selectedSearch.last_run_summary.enriched_count || 0} enriched;
+            {" "}{selectedSearch.last_run_summary.duplicate_count || 0} duplicates collapsed.
+          </span>
         </div>
       ) : null}
 
@@ -464,7 +483,7 @@ export function DiscoveryMode({ data, refresh }: DiscoveryModeProps) {
 
       <div className="candidate-review-summary">
         <strong>{visibleCandidates.length}</strong>
-        <span>shown from {selectedCandidates.length} results for {selectedSearch?.name || "Discovery"}</span>
+        <span>shown from {selectedCandidates.length} roles in the Discovery inbox</span>
       </div>
 
       <div className="table-scroll">
@@ -475,7 +494,7 @@ export function DiscoveryMode({ data, refresh }: DiscoveryModeProps) {
               <th>Company</th>
               <th>Fit</th>
               <th>Processing</th>
-              <th>Captured</th>
+              <th>Last seen</th>
               <th>Actions</th>
             </tr>
           </thead>
@@ -491,14 +510,23 @@ export function DiscoveryMode({ data, refresh }: DiscoveryModeProps) {
                   <span className="cell-subtle">{titleCase(candidate.source_platform || "manual")}</span>
                 </td>
                 <td className="candidate-score-cell discovery-fit-cell">
-                  <span className={`pill ${fitClass(candidate.fit_score)}`}>{candidate.fit_score || "—"}</span>
-                  <span className="cell-subtle">{candidate.fit_summary || "Add details to calculate fit"}</span>
+                  {candidate.processing_status === "ready" ? (
+                    <>
+                      <span className={`pill ${fitClass(candidate.fit_score)}`}>{candidate.fit_score || "—"}</span>
+                      <span className="cell-subtle">{candidate.fit_summary || "Fit calculated from verified details"}</span>
+                    </>
+                  ) : (
+                    <>
+                      <span className="pill fit-pending">Pending</span>
+                      <span className="cell-subtle">Fit will be calculated after posting details are verified.</span>
+                    </>
+                  )}
                 </td>
                 <td>
-                  <span className={`pill discovery-${candidate.processing_status}`}>{titleCase(candidate.processing_status)}</span>
+                  <span className={`pill discovery-${candidate.processing_status}`}>{processingLabel(candidate)}</span>
                   {candidate.warnings ? <span className="cell-subtle">{candidate.warnings.split("\n")[0]}</span> : null}
                 </td>
-                <td>{candidate.captured_at ? dateOnlyLabel(candidate.captured_at) : "Unknown"}</td>
+                <td>{candidate.last_seen_at || candidate.captured_at ? dateOnlyLabel(candidate.last_seen_at || candidate.captured_at) : "Unknown"}</td>
                 <td>
                   <div className="table-actions">
                     <a className="button compact" href={candidate.canonical_url || candidate.url} target="_blank" rel="noreferrer"><ExternalIcon size={15} /> Open</a>
@@ -506,7 +534,7 @@ export function DiscoveryMode({ data, refresh }: DiscoveryModeProps) {
                     {candidate.ingested_application_id ? (
                       <Link className="button compact" to={routes.postingDetail(candidate.ingested_application_id)}><BriefcaseIcon size={15} /> Posting</Link>
                     ) : (
-                      <button className="button compact" type="button" disabled={pending || !candidate.company || !candidate.title} onClick={() => ingestCandidate(candidate)}>Ingest</button>
+                      <button className="button compact" type="button" disabled={pending || candidate.processing_status !== "ready"} onClick={() => ingestCandidate(candidate)}>Ingest</button>
                     )}
                     {candidate.status === "ignored"
                       ? <button className="button compact" type="button" disabled={pending} onClick={() => setCandidateStatus(candidate, "new")}>Mark New</button>
@@ -636,11 +664,22 @@ function workModeLabel(mode: DiscoverySearchLaneDefinition["work_modes"][number]
   return WORK_MODE_OPTIONS.find(option => option.id === mode)?.label || titleCase(mode);
 }
 
-function discoveryCandidateMatches(candidate: DiscoveryCandidate, filter: DiscoveryFilter) {
-  if (filter === "recommended") return candidate.status === "new" && Number(candidate.fit_score || 0) >= 45;
+function discoveryCandidateMatches(candidate: DiscoveryCandidate, filter: DiscoveryFilter, latestSeenAt: string) {
+  if (filter === "latest") return Boolean(latestSeenAt) && candidate.last_seen_at === latestSeenAt;
+  if (filter === "recommended") {
+    return candidate.status === "new"
+      && candidate.processing_status === "ready"
+      && Number(candidate.fit_score || 0) >= 45;
+  }
   if (filter === "needs-details") return candidate.status === "new" && candidate.processing_status !== "ready";
   if (filter === "all") return true;
   return candidate.status === filter;
+}
+
+function processingLabel(candidate: DiscoveryCandidate) {
+  if (candidate.processing_status === "ready") return "Verified";
+  if (candidate.processing_status === "partial") return "Provisional";
+  return titleCase(candidate.processing_status);
 }
 
 function discoveryCandidateIncludes(candidate: DiscoveryCandidate, search: string) {
