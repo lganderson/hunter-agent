@@ -287,11 +287,13 @@ class HunterDiscoveryTest(unittest.TestCase):
         self.assertEqual(result["new_count"], 2)
         self.assertEqual({candidate["source_platform"] for candidate in result["captured"]}, {"ashby", "linkedin"})
         linkedin = next(candidate for candidate in result["captured"] if candidate["source_platform"] == "linkedin")
-        self.assertEqual(linkedin["company"], "Network Company")
+        linkedin_company = companies.get_company(linkedin["company_id"])
+        self.assertEqual(linkedin_company["name"], "Network Company")
         self.assertEqual(linkedin["processing_status"], "partial")
         employer = next(candidate for candidate in result["captured"] if candidate["source_platform"] == "ashby")
-        self.assertEqual(employer["company_industry"], "Software Development")
-        self.assertEqual(employer["company_size"], "201–500 employees")
+        employer_company = companies.get_company(employer["company_id"])
+        self.assertEqual(employer_company["industry"], "Software Development")
+        self.assertEqual(employer_company["company_size"], "201–500 employees")
 
         rerun = discovery.run_search(
             search["id"],
@@ -463,8 +465,9 @@ class HunterDiscoveryTest(unittest.TestCase):
         self.assertEqual(result["enriched_count"], 1)
         self.assertEqual(candidate["processing_status"], "ready")
         self.assertEqual(candidate["location"], "Remote; United States")
-        self.assertEqual(candidate["company_industry"], "Software Development")
-        self.assertEqual(candidate["company_size"], "51–200 employees")
+        company = companies.get_company(candidate["company_id"])
+        self.assertEqual(company["industry"], "Software Development")
+        self.assertEqual(company["company_size"], "51–200 employees")
         self.assertNotIn(discovery.LINKEDIN_DETAILS_WARNING, candidate["warnings"])
         self.assertTrue(result["search"]["last_run_at"])
         self.assertEqual(result["search"]["last_run_summary"]["enriched_count"], 1)
@@ -517,9 +520,9 @@ class HunterDiscoveryTest(unittest.TestCase):
         self.assertEqual(result["company_suggestion_count"], 0)
         self.assertEqual(company["tracking_status"], "discovered")
         self.assertEqual(company["industry"], "Software Development")
-        self.assertEqual(candidate["company_size"], "201–500 employees")
+        self.assertEqual(company["company_size"], "201–500 employees")
         self.assertEqual(
-            candidate["company_profile_url"],
+            company["company_profile_url"],
             "https://www.linkedin.com/company/example-labs",
         )
 
@@ -696,16 +699,13 @@ class HunterDiscoveryTest(unittest.TestCase):
         )
 
         candidate = first["captured"][0]
-        self.assertEqual(candidate["company"], "Example Labs")
+        discovered_company = companies.get_company(candidate["company_id"])
+        self.assertEqual(discovered_company["name"], "Example Labs")
         self.assertEqual(candidate["title"], "Senior Technical Program Manager, Developer Platform")
         self.assertEqual(candidate["location"], "Minneapolis, MN, US")
-        self.assertEqual(candidate["company_industry"], "Software Development")
-        self.assertEqual(candidate["company_size"], "201–500 employees")
+        self.assertEqual(discovered_company["industry"], "Software Development")
+        self.assertEqual(discovered_company["company_size"], "201–500 employees")
         self.assertTrue(candidate["company_id"])
-        discovered_company = next(
-            row for row in repository.read_companies()
-            if row["id"] == candidate["company_id"]
-        )
         self.assertEqual(discovered_company["tracking_status"], "discovered")
         self.assertEqual(candidate["processing_status"], "ready")
         self.assertGreaterEqual(int(candidate["fit_score"]), 45)

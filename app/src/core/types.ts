@@ -205,16 +205,11 @@ export type DiscoveryCandidate = {
   id: string;
   search_id: string;
   company_id: string;
-  company: string;
   title: string;
   url: string;
   canonical_url: string;
   location: string;
   work_mode: string;
-  company_industry: string;
-  company_size: string;
-  company_profile_url: string;
-  company_metadata_source: string;
   source_platform: string;
   captured_at: string;
   last_seen_at: string;
@@ -426,18 +421,15 @@ export type DiscoverySearchUpdates = Pick<DiscoverySearch, "name" | "keywords" |
 export type DiscoveryCandidateDetails = Partial<
   Pick<
     DiscoveryCandidate,
-    | "company"
+    | "company_id"
     | "title"
     | "canonical_url"
     | "location"
     | "work_mode"
-    | "company_industry"
-    | "company_size"
-    | "company_profile_url"
     | "description_text"
     | "notes"
   >
->;
+> & { company_name?: string };
 
 export type AgentChatMessage = {
   role: "user" | "assistant";

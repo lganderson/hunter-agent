@@ -127,6 +127,65 @@ class HunterCompaniesTest(unittest.TestCase):
         self.assertEqual(company["company_size"], "")
         self.assertEqual(company["tracking_status"], "tracked")
 
+    def test_initialize_moves_discovery_company_details_to_linked_company_records(self):
+        sqlite_store.initialize()
+        company = companies.upsert_company("", {"name": "Example Labs"})
+        legacy_company_fields = [
+            "company",
+            "company_industry",
+            "company_size",
+            "company_profile_url",
+            "company_metadata_source",
+        ]
+        legacy_fields = [
+            *schema.DISCOVERY_CANDIDATE_FIELDS[:3],
+            *legacy_company_fields,
+            *schema.DISCOVERY_CANDIDATE_FIELDS[3:],
+        ]
+        with sqlite_store.connect() as connection:
+            connection.execute("DROP TABLE discovery_candidates")
+            columns = ", ".join(
+                f'"{field}" TEXT NOT NULL DEFAULT ""'
+                for field in legacy_fields
+            )
+            connection.execute(
+                f"CREATE TABLE discovery_candidates ({columns}, PRIMARY KEY(id), UNIQUE(search_id, url))"
+            )
+            row = {field: "" for field in legacy_fields}
+            row.update(
+                {
+                    "id": "DC0001",
+                    "search_id": "DS0001",
+                    "company_id": company["id"],
+                    "company": "Example Labs",
+                    "company_industry": "Software Development",
+                    "company_size": "201–500 employees",
+                    "title": "Technical Program Manager",
+                    "url": "https://example.com/jobs/1",
+                }
+            )
+            connection.execute(
+                f"INSERT INTO discovery_candidates ({', '.join(legacy_fields)}) "
+                f"VALUES ({', '.join('?' for _ in legacy_fields)})",
+                [row[field] for field in legacy_fields],
+            )
+
+        sqlite_store.initialize()
+
+        candidate = repository.read_discovery_candidates()[0]
+        self.assertEqual(candidate["company_id"], company["id"])
+        self.assertEqual(candidate["title"], "Technical Program Manager")
+        self.assertTrue(set(legacy_company_fields).isdisjoint(candidate))
+        migrated_company = companies.get_company(company["id"])
+        self.assertEqual(migrated_company["industry"], "Software Development")
+        self.assertEqual(migrated_company["company_size"], "201–500 employees")
+        with sqlite_store.connect() as connection:
+            columns = {
+                row["name"]
+                for row in connection.execute("PRAGMA table_info(discovery_candidates)").fetchall()
+            }
+        self.assertEqual(columns, set(schema.DISCOVERY_CANDIDATE_FIELDS))
+
     def test_manual_company_metadata_is_normalized_and_preserved_from_automatic_updates(self):
         sqlite_store.initialize()
         company = companies.upsert_company(

@@ -13,6 +13,7 @@ import { dateOnlyLabel, titleCase } from "../core/format";
 import { routes } from "../core/routes";
 import type {
   AppState,
+  Company,
   DiscoveryCandidate,
   DiscoveryCandidateDetails,
   DiscoverySearch,
@@ -44,14 +45,12 @@ const WORK_MODE_OPTIONS: Array<{ id: DiscoverySearchLaneDefinition["work_modes"]
   { id: "remote", label: "Remote" }
 ];
 const EMPTY_DETAILS: DiscoveryCandidateDetails = {
-  company: "",
+  company_id: "",
+  company_name: "",
   title: "",
   canonical_url: "",
   location: "",
   work_mode: "",
-  company_industry: "",
-  company_size: "",
-  company_profile_url: "",
   description_text: "",
   notes: ""
 };
@@ -76,6 +75,10 @@ export function DiscoveryMode({ data, refresh }: DiscoveryModeProps) {
   const [pending, setPending] = useState(false);
   const [editingCandidate, setEditingCandidate] = useState<DiscoveryCandidate | null>(null);
   const [ingestedPostingId, setIngestedPostingId] = useState("");
+  const companyById = useMemo(
+    () => new Map(data.companies.map(company => [company.id, company])),
+    [data.companies]
+  );
 
   useEffect(() => {
     if (selectedSearch && !editingSearch) setSearchDraft(searchUpdates(selectedSearch));
@@ -93,11 +96,11 @@ export function DiscoveryMode({ data, refresh }: DiscoveryModeProps) {
   const visibleCandidates = useMemo(
     () => selectedCandidates
       .filter(candidate => discoveryCandidateMatches(candidate, resultFilter, latestSeenAt))
-      .filter(candidate => discoveryCandidateIncludes(candidate, resultSearch))
+      .filter(candidate => discoveryCandidateIncludes(candidate, companyById.get(candidate.company_id), resultSearch))
       .sort((left, right) => Number(right.processing_status === "ready") - Number(left.processing_status === "ready")
         || Number(right.fit_score || 0) - Number(left.fit_score || 0)
         || (right.last_seen_at || "").localeCompare(left.last_seen_at || "")),
-    [latestSeenAt, resultFilter, resultSearch, selectedCandidates]
+    [companyById, latestSeenAt, resultFilter, resultSearch, selectedCandidates]
   );
 
   const counts = useMemo(
@@ -439,13 +442,10 @@ export function DiscoveryMode({ data, refresh }: DiscoveryModeProps) {
             <details className="discovery-copied-details">
               <summary>Add copied details for this role</summary>
               <div className="management-form">
-                <label className="form-field">Company <input value={captureDetails.company || ""} onChange={event => setCaptureDetails({ ...captureDetails, company: event.target.value })} /></label>
+                <label className="form-field">Company <input value={captureDetails.company_name || ""} onChange={event => setCaptureDetails({ ...captureDetails, company_name: event.target.value })} /></label>
                 <label className="form-field">Role title <input value={captureDetails.title || ""} onChange={event => setCaptureDetails({ ...captureDetails, title: event.target.value })} /></label>
                 <label className="form-field">Location <input value={captureDetails.location || ""} onChange={event => setCaptureDetails({ ...captureDetails, location: event.target.value })} /></label>
                 <label className="form-field">Work mode <input value={captureDetails.work_mode || ""} onChange={event => setCaptureDetails({ ...captureDetails, work_mode: event.target.value })} placeholder="Remote, Hybrid, or On-site" /></label>
-                <label className="form-field">Company industry <input value={captureDetails.company_industry || ""} onChange={event => setCaptureDetails({ ...captureDetails, company_industry: event.target.value })} /></label>
-                <label className="form-field">Company size <input value={captureDetails.company_size || ""} onChange={event => setCaptureDetails({ ...captureDetails, company_size: event.target.value })} placeholder="For example, 201–500 employees" /></label>
-                <label className="form-field full">Company profile URL <input type="url" value={captureDetails.company_profile_url || ""} onChange={event => setCaptureDetails({ ...captureDetails, company_profile_url: event.target.value })} /></label>
                 <label className="form-field full">Employer posting URL <input type="url" value={captureDetails.canonical_url || ""} onChange={event => setCaptureDetails({ ...captureDetails, canonical_url: event.target.value })} /></label>
                 <label className="form-field full">Posting description <textarea value={captureDetails.description_text || ""} onChange={event => setCaptureDetails({ ...captureDetails, description_text: event.target.value })} /></label>
               </div>
@@ -510,23 +510,25 @@ export function DiscoveryMode({ data, refresh }: DiscoveryModeProps) {
             </tr>
           </thead>
           <tbody>
-            {visibleCandidates.map(candidate => (
+            {visibleCandidates.map(candidate => {
+              const company = companyById.get(candidate.company_id);
+              return (
               <tr key={candidate.id}>
                 <td className="role-cell candidate-title-cell">
                   <strong>{candidate.title || "Role details needed"}</strong>
                   <span className="cell-subtle">{candidateLocationLabel(candidate)}</span>
                 </td>
                 <td>
-                  {candidate.company_id
-                    ? <Link to={routes.companyDetail(candidate.company_id)}>{candidate.company || "Company needed"}</Link>
-                    : candidate.company || "Company needed"}
+                  {company
+                    ? <Link to={routes.companyDetail(company.id)}>{company.name}</Link>
+                    : "Company needed"}
                   <span className="cell-subtle">{titleCase(candidate.source_platform || "manual")}</span>
                 </td>
-                <td className="discovery-metadata-cell" title={candidate.company_industry || undefined}>
-                  {candidate.company_industry || "—"}
+                <td className="discovery-metadata-cell" title={company?.industry || undefined}>
+                  {company?.industry || "—"}
                 </td>
-                <td className="discovery-metadata-cell" title={candidate.company_size || undefined}>
-                  {candidate.company_size || "—"}
+                <td className="discovery-metadata-cell" title={company?.company_size || undefined}>
+                  {company?.company_size || "—"}
                 </td>
                 <td
                   className="candidate-score-cell discovery-fit-cell"
@@ -561,7 +563,8 @@ export function DiscoveryMode({ data, refresh }: DiscoveryModeProps) {
                   </div>
                 </td>
               </tr>
-            ))}
+              );
+            })}
           </tbody>
         </table>
         <div className="empty-state" style={{ display: visibleCandidates.length ? "none" : "block" }}>
@@ -572,6 +575,7 @@ export function DiscoveryMode({ data, refresh }: DiscoveryModeProps) {
       {editingCandidate ? (
         <CandidateDetailsModal
           candidate={editingCandidate}
+          companies={data.companies}
           pending={pending}
           close={() => setEditingCandidate(null)}
           save={saveCandidateDetails}
@@ -583,27 +587,27 @@ export function DiscoveryMode({ data, refresh }: DiscoveryModeProps) {
 
 function CandidateDetailsModal({
   candidate,
+  companies,
   pending,
   close,
   save
 }: {
   candidate: DiscoveryCandidate;
+  companies: Company[];
   pending: boolean;
   close: () => void;
   save: (updates: DiscoveryCandidateDetails) => Promise<void>;
 }) {
   const [draft, setDraft] = useState<DiscoveryCandidateDetails>({
-    company: candidate.company,
+    company_id: candidate.company_id,
     title: candidate.title,
     canonical_url: candidate.canonical_url,
     location: candidate.location,
     work_mode: candidate.work_mode,
-    company_industry: candidate.company_industry,
-    company_size: candidate.company_size,
-    company_profile_url: candidate.company_profile_url,
     description_text: candidate.description_text,
     notes: candidate.notes
   });
+  const linkedCompany = companies.find(company => company.id === draft.company_id);
 
   return (
     <div className="modal-backdrop">
@@ -613,13 +617,22 @@ function CandidateDetailsModal({
           <button className="button compact" type="button" onClick={close}><XIcon size={18} /> Close</button>
         </div>
         <form className="management-form" onSubmit={event => { event.preventDefault(); void save(draft); }}>
-          <label className="form-field">Company <input required value={draft.company || ""} onChange={event => setDraft({ ...draft, company: event.target.value })} /></label>
+          <label className="form-field">
+            Company
+            <select required value={draft.company_id || ""} onChange={event => setDraft({ ...draft, company_id: event.target.value })}>
+              <option value="">Select a company</option>
+              {companies.map(company => <option key={company.id} value={company.id}>{company.name}</option>)}
+            </select>
+          </label>
           <label className="form-field">Role title <input required value={draft.title || ""} onChange={event => setDraft({ ...draft, title: event.target.value })} /></label>
           <label className="form-field">Location <input value={draft.location || ""} onChange={event => setDraft({ ...draft, location: event.target.value })} /></label>
           <label className="form-field">Work mode <input value={draft.work_mode || ""} onChange={event => setDraft({ ...draft, work_mode: event.target.value })} placeholder="Remote, Hybrid, or On-site" /></label>
-          <label className="form-field">Company industry <input value={draft.company_industry || ""} onChange={event => setDraft({ ...draft, company_industry: event.target.value })} /></label>
-          <label className="form-field">Company size <input value={draft.company_size || ""} onChange={event => setDraft({ ...draft, company_size: event.target.value })} placeholder="For example, 201–500 employees" /></label>
-          <label className="form-field full">Company profile URL <input type="url" value={draft.company_profile_url || ""} onChange={event => setDraft({ ...draft, company_profile_url: event.target.value })} /></label>
+          {linkedCompany ? (
+            <div className="form-field full discovery-company-source">
+              <span>{[linkedCompany.industry, linkedCompany.company_size].filter(Boolean).join(" · ") || "Company details have not been researched yet."}</span>
+              <Link to={routes.companyDetail(linkedCompany.id)}>View or research company details</Link>
+            </div>
+          ) : null}
           <label className="form-field full">Employer posting URL <input type="url" value={draft.canonical_url || ""} onChange={event => setDraft({ ...draft, canonical_url: event.target.value })} /></label>
           <label className="form-field full">Posting description <textarea className="discovery-description-input" value={draft.description_text || ""} onChange={event => setDraft({ ...draft, description_text: event.target.value })} /></label>
           <label className="form-field full">Notes <textarea value={draft.notes || ""} onChange={event => setDraft({ ...draft, notes: event.target.value })} /></label>
@@ -707,16 +720,16 @@ function processingLabel(candidate: DiscoveryCandidate) {
   return titleCase(candidate.processing_status);
 }
 
-function discoveryCandidateIncludes(candidate: DiscoveryCandidate, search: string) {
+function discoveryCandidateIncludes(candidate: DiscoveryCandidate, company: Company | undefined, search: string) {
   const query = search.trim().toLowerCase();
   if (!query) return true;
   return [
-    candidate.company,
+    company?.name,
     candidate.title,
     candidate.location,
     candidate.work_mode,
-    candidate.company_industry,
-    candidate.company_size,
+    company?.industry,
+    company?.company_size,
     candidate.source_platform,
     candidate.fit_summary,
     candidate.description_excerpt,

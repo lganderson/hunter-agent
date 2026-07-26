@@ -216,16 +216,11 @@ def discovery_candidates_table_sql(table="discovery_candidates", if_not_exists=T
         "id TEXT PRIMARY KEY, "
         "search_id TEXT NOT NULL DEFAULT '', "
         "company_id TEXT NOT NULL DEFAULT '', "
-        "company TEXT NOT NULL DEFAULT '', "
         "title TEXT NOT NULL DEFAULT '', "
         "url TEXT NOT NULL DEFAULT '', "
         "canonical_url TEXT NOT NULL DEFAULT '', "
         "location TEXT NOT NULL DEFAULT '', "
         "work_mode TEXT NOT NULL DEFAULT '', "
-        "company_industry TEXT NOT NULL DEFAULT '', "
-        "company_size TEXT NOT NULL DEFAULT '', "
-        "company_profile_url TEXT NOT NULL DEFAULT '', "
-        "company_metadata_source TEXT NOT NULL DEFAULT '', "
         "source_platform TEXT NOT NULL DEFAULT '', "
         "captured_at TEXT NOT NULL DEFAULT '', "
         "last_seen_at TEXT NOT NULL DEFAULT '', "
@@ -244,12 +239,67 @@ def discovery_candidates_table_sql(table="discovery_candidates", if_not_exists=T
     )
 
 
-def migrate_discovery_candidates_constraint(connection):
+def migrate_discovery_candidates_schema(connection):
     definition = connection.execute(
         "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'discovery_candidates'"
     ).fetchone()
-    if not definition or "UNIQUE(url)" not in (definition["sql"] or "").replace(" ", ""):
+    if not definition:
         return
+    current_columns = set(table_columns(connection, "discovery_candidates"))
+    target_columns = set(schema.DISCOVERY_CANDIDATE_FIELDS)
+    compact_definition = (definition["sql"] or "").replace(" ", "")
+    if current_columns == target_columns and "UNIQUE(url)" not in compact_definition:
+        return
+    legacy_company_fields = {
+        "company",
+        "company_industry",
+        "company_size",
+        "company_profile_url",
+        "company_metadata_source",
+    }
+    if legacy_company_fields.issubset(current_columns):
+        legacy_rows = connection.execute(
+            "SELECT company_id, company, company_industry, company_size, "
+            "company_profile_url, company_metadata_source, canonical_url, url, "
+            "last_seen_at, captured_at FROM discovery_candidates "
+            "WHERE company_id <> ''"
+        ).fetchall()
+        for row in legacy_rows:
+            source = (
+                storage.clean(row["company_metadata_source"])
+                or storage.clean(row["canonical_url"])
+                or storage.clean(row["url"])
+            )
+            observed_at = storage.clean(row["last_seen_at"]) or storage.clean(row["captured_at"])
+            connection.execute(
+                "UPDATE companies SET "
+                "name = CASE WHEN name = '' THEN ? ELSE name END, "
+                "industry = CASE WHEN industry = '' THEN ? ELSE industry END, "
+                "company_size = CASE WHEN company_size = '' THEN ? ELSE company_size END, "
+                "company_profile_url = CASE WHEN company_profile_url = '' THEN ? ELSE company_profile_url END, "
+                "company_metadata_source = CASE "
+                "WHEN company_metadata_source = '' AND (? <> '' OR ? <> '' OR ? <> '') THEN ? "
+                "ELSE company_metadata_source END, "
+                "company_metadata_checked_at = CASE "
+                "WHEN company_metadata_checked_at = '' AND (? <> '' OR ? <> '' OR ? <> '') THEN ? "
+                "ELSE company_metadata_checked_at END "
+                "WHERE upper(id) = upper(?)",
+                (
+                    storage.clean(row["company"]),
+                    storage.clean(row["company_industry"]),
+                    storage.clean(row["company_size"]),
+                    storage.clean(row["company_profile_url"]),
+                    storage.clean(row["company_industry"]),
+                    storage.clean(row["company_size"]),
+                    storage.clean(row["company_profile_url"]),
+                    source,
+                    storage.clean(row["company_industry"]),
+                    storage.clean(row["company_size"]),
+                    storage.clean(row["company_profile_url"]),
+                    observed_at,
+                    storage.clean(row["company_id"]),
+                ),
+            )
     fields = schema.DISCOVERY_CANDIDATE_FIELDS
     quoted_fields = ", ".join(f'"{field}"' for field in fields)
     rows = connection.execute(f"SELECT {quoted_fields} FROM discovery_candidates").fetchall()
@@ -511,9 +561,9 @@ def initialize():
         migrate_discovery_search_lanes(connection)
         connection.execute(discovery_candidates_table_sql())
         ensure_text_columns(connection, "discovery_candidates", schema.DISCOVERY_CANDIDATE_FIELDS)
-        migrate_discovery_candidates_constraint(connection)
+        migrate_discovery_candidates_schema(connection)
         connection.execute(
-            "INSERT INTO meta(key, value) VALUES('schema_version', '14') "
+            "INSERT INTO meta(key, value) VALUES('schema_version', '15') "
             "ON CONFLICT(key) DO UPDATE SET value=excluded.value"
         )
 
@@ -871,7 +921,7 @@ def read_discovery_candidates():
     with connect() as connection:
         rows = connection.execute(
             f"SELECT {quoted_fields} FROM discovery_candidates "
-            "ORDER BY captured_at DESC, lower(company), lower(title), id"
+            "ORDER BY captured_at DESC, lower(title), id"
         ).fetchall()
     return [
         {

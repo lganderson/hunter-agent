@@ -832,17 +832,17 @@ def candidate_rank_key(candidate):
 
 
 def connect_candidate_company(candidate, seen_at=""):
-    company = companies.record_discovered_company(candidate, seen_at=seen_at)
+    company = None
+    if candidate.get("company_id"):
+        try:
+            company = companies.get_company(candidate.get("company_id", ""))
+        except ValueError:
+            candidate["company_id"] = ""
+    if company is None:
+        company = companies.record_discovered_company(candidate, seen_at=seen_at)
     if company is None:
         return None
     candidate["company_id"] = company.get("id", "")
-    for candidate_field, company_field in [
-        ("company_industry", "industry"),
-        ("company_size", "company_size"),
-        ("company_profile_url", "company_profile_url"),
-    ]:
-        if not candidate.get(candidate_field) and company.get(company_field):
-            candidate[candidate_field] = company.get(company_field, "")
     return company
 
 
@@ -1159,17 +1159,6 @@ def run_search(
             company_suggestion_count += len(research.get("suggestions", []))
             company_by_id[company_id] = research.get("company", company)
 
-    for candidate in selected:
-        company = company_by_id.get(candidate.get("company_id", ""))
-        if not company:
-            continue
-        if not candidate.get("company_industry"):
-            candidate["company_industry"] = company.get("industry", "")
-        if not candidate.get("company_size"):
-            candidate["company_size"] = company.get("company_size", "")
-        if not candidate.get("company_profile_url"):
-            candidate["company_profile_url"] = company.get("company_profile_url", "")
-
     rows = repository.read_discovery_candidates()
     captured = []
     new_count = 0
@@ -1191,6 +1180,14 @@ def run_search(
             new_count += 1
 
     repository.write_discovery_candidates(rows)
+    stored_by_id = {
+        row.get("id", ""): row
+        for row in repository.read_discovery_candidates()
+    }
+    captured = [
+        stored_by_id.get(candidate.get("id", ""), candidate)
+        for candidate in captured
+    ]
     result = {
         "search": get_search(search["id"]),
         "captured": captured,
@@ -1476,31 +1473,25 @@ def extracted_candidate(url, fetcher=None):
 
 def apply_manual_details(candidate, details):
     for field in [
-        "company",
+        "company_id",
         "title",
         "canonical_url",
-        "company_id",
         "location",
         "work_mode",
-        "company_industry",
-        "company_size",
-        "company_profile_url",
         "notes",
     ]:
         value = storage.clean((details or {}).get(field, ""))
         if value:
-            if field == "company_industry":
-                candidate[field] = companies.normalize_company_industry(value)
-            elif field == "company_size":
-                candidate[field] = companies.normalize_company_size(value)
-            elif field == "canonical_url":
+            if field == "canonical_url":
                 candidate[field] = companies.normalize_url(value)
-            elif field == "company_profile_url":
-                candidate[field] = companies.normalize_company_profile_url(value)
             else:
                 candidate[field] = value
-    if any((details or {}).get(field) for field in ["company_industry", "company_size", "company_profile_url"]):
-        candidate["company_metadata_source"] = "manual"
+    company_name = storage.clean(
+        (details or {}).get("company_name", "")
+        or (details or {}).get("company", "")
+    )
+    if company_name:
+        candidate["company"] = company_name
     description = str((details or {}).get("description_text", "") or "").strip()
     if description:
         candidate["description_text"] = description[:MAX_DESCRIPTION_CHARS]
@@ -1514,7 +1505,10 @@ def apply_manual_details(candidate, details):
 
 
 def processing_status(candidate):
-    has_identity = bool(candidate.get("company") and candidate.get("title"))
+    has_identity = bool(
+        (candidate.get("company_id") or candidate.get("company"))
+        and candidate.get("title")
+    )
     has_posting_details = meaningful_description(candidate.get("description_text", ""))
     has_lane_evidence = bool(
         candidate.get("location")
@@ -1561,6 +1555,9 @@ def candidate_identity_keys(candidate):
 
 
 def normalized_candidate_company(candidate):
+    company_id = storage.clean(candidate.get("company_id", "")).upper()
+    if company_id:
+        return company_id
     return re.sub(r"[^a-z0-9]+", "", storage.clean(candidate.get("company", "")).lower())
 
 
@@ -1605,15 +1602,11 @@ def merge_candidate(existing, incoming):
     )
     for field in [
         "url",
-        "company",
         "title",
         "canonical_url",
         "location",
         "work_mode",
-        "company_industry",
-        "company_size",
-        "company_profile_url",
-        "company_metadata_source",
+        "company_id",
         "source_platform",
         "description_text",
         "description_excerpt",
@@ -1639,7 +1632,7 @@ def merge_candidate(existing, incoming):
             or richer_description
             or richer_title
             or richer_location
-            or replace_partial_linkedin_details and field in {"url", "company", "title", "location", "work_mode"}
+            or replace_partial_linkedin_details and field in {"url", "title", "location", "work_mode"}
         )
         if incoming.get(field) and replaceable:
             existing[field] = incoming[field]
@@ -1681,8 +1674,8 @@ def capture_candidates(search_id, capture_text, details=None, fetcher=None):
         )
         if len(urls) == 1:
             apply_manual_details(candidate, details or {})
-        score_candidate(candidate, timestamp)
         connect_candidate_company(candidate, seen_at=timestamp)
+        score_candidate(candidate, timestamp)
         existing = matching_candidate(rows, candidate)
         if existing:
             merge_candidate(existing, candidate)
@@ -1691,6 +1684,14 @@ def capture_candidates(search_id, capture_text, details=None, fetcher=None):
             rows.append(candidate)
             captured.append(candidate)
     repository.write_discovery_candidates(rows)
+    stored_by_id = {
+        row.get("id", ""): row
+        for row in repository.read_discovery_candidates()
+    }
+    captured = [
+        stored_by_id.get(candidate.get("id", ""), candidate)
+        for candidate in captured
+    ]
     return {"captured": captured, "count": len(captured)}
 
 
@@ -1701,10 +1702,10 @@ def update_candidate_details(candidate_id, updates):
     if row is None:
         raise ValueError(f"No Discovery candidate found with id {candidate_id}.")
     apply_manual_details(row, updates or {})
-    score_candidate(row, now_iso())
     connect_candidate_company(row, seen_at=now_iso())
+    score_candidate(row, now_iso())
     repository.write_discovery_candidates(rows)
-    return row
+    return get_candidate(candidate_id)
 
 
 def update_candidate_status(candidate_id, status):
@@ -1739,8 +1740,8 @@ def matching_application(candidate):
 
 def ingest_candidate(candidate_id):
     candidate = get_candidate(candidate_id)
-    if not candidate.get("company") or not candidate.get("title"):
-        raise ValueError("Add the company and role title before ingesting this Discovery result.")
+    if not candidate.get("company_id") or not candidate.get("title"):
+        raise ValueError("Link a company and add the role title before ingesting this Discovery result.")
     existing = matching_application(candidate)
     if existing:
         updated = update_candidate_status(candidate_id, "ingested")
@@ -1751,24 +1752,7 @@ def ingest_candidate(candidate_id):
         repository.write_discovery_candidates(rows)
         return {"candidate": get_candidate(candidate_id), "posting": existing, "created": False}
 
-    company = None
-    if candidate.get("company_id"):
-        try:
-            company = companies.get_company(candidate.get("company_id", ""))
-        except ValueError:
-            company = None
-    if company is None:
-        company = matching_company(candidate.get("company", ""))
-    if company is None:
-        company = companies.upsert_company("", {"name": candidate.get("company", "")})
-    company = companies.update_company_metadata(
-        company.get("id", ""),
-        candidate,
-        source_url=candidate.get("company_metadata_source")
-        or candidate.get("canonical_url")
-        or candidate.get("url", ""),
-        checked_at=candidate.get("last_seen_at", ""),
-    )
+    company = companies.get_company(candidate.get("company_id", ""))
     source_url = candidate.get("canonical_url") or candidate.get("url", "")
     search = get_search(candidate.get("search_id", ""))
     posting = applications.create_application(
