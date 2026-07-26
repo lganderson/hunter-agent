@@ -507,6 +507,43 @@ class AppHandler(SimpleHTTPRequestHandler):
             self.send_json({"company": company})
             return
 
+        if path == "/api/companies/research":
+            payload = self.read_json()
+            try:
+                result = company_store.research_company(payload.get("id", ""))
+            except ValueError as exc:
+                self.send_json({"error": str(exc)}, status=400)
+                return
+            except RuntimeError as exc:
+                self.send_json({"error": str(exc)}, status=502)
+                return
+            self.send_json(result)
+            return
+
+        if path == "/api/companies/track":
+            payload = self.read_json()
+            try:
+                company = company_store.track_company(payload.get("id", ""))
+            except ValueError as exc:
+                self.send_json({"error": str(exc)}, status=400)
+                return
+            self.send_json({"company": company})
+            return
+
+        if path == "/api/companies/metadata-suggestions/resolve":
+            payload = self.read_json()
+            try:
+                company = company_store.resolve_company_metadata_suggestion(
+                    payload.get("id", ""),
+                    payload.get("suggestion_id", ""),
+                    payload.get("action", ""),
+                )
+            except ValueError as exc:
+                self.send_json({"error": str(exc)}, status=400)
+                return
+            self.send_json({"company": company})
+            return
+
         if path == "/api/companies/check":
             payload = self.read_json()
             try:
@@ -662,6 +699,7 @@ class AppHandler(SimpleHTTPRequestHandler):
 def main(argv=None):
     argv = argv or sys.argv[1:]
     port = int(argv[0]) if argv else 8010
+    discovery_store.sync_discovered_companies()
     server = ThreadingHTTPServer(("127.0.0.1", port), AppHandler)
     print(f"Serving Hunter at http://127.0.0.1:{port}/")
     server.serve_forever()

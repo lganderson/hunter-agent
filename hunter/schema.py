@@ -73,8 +73,18 @@ COMPANY_FIELDS = [
     "name",
     "aliases",
     "interest_status",
+    "tracking_status",
+    "discovered_at",
+    "last_seen_at",
     "website",
     "careers_url",
+    "industry",
+    "company_size",
+    "company_profile_url",
+    "company_metadata_source",
+    "company_metadata_checked_at",
+    "company_metadata_suggestions_json",
+    "company_research_status",
     "notes",
     "last_checked_at",
     "last_check_status",
@@ -158,12 +168,17 @@ DISCOVERY_SEARCH_FIELDS = [
 DISCOVERY_CANDIDATE_FIELDS = [
     "id",
     "search_id",
+    "company_id",
     "company",
     "title",
     "url",
     "canonical_url",
     "location",
     "work_mode",
+    "company_industry",
+    "company_size",
+    "company_profile_url",
+    "company_metadata_source",
     "source_platform",
     "captured_at",
     "last_seen_at",
@@ -282,6 +297,8 @@ DEFAULT_OUTCOME = ""
 DEFAULT_PRIORITY = "medium"
 DEFAULT_COMPANY_INTEREST_STATUS = "neutral"
 COMPANY_INTEREST_STATUSES = {"interested", "neutral", "archived"}
+DEFAULT_COMPANY_TRACKING_STATUS = "tracked"
+COMPANY_TRACKING_STATUSES = {"discovered", "tracked"}
 COMPANY_POSTING_CANDIDATE_STATUSES = {"new", "ignored", "ingested", "unavailable"}
 COMPANY_POSTING_CANDIDATE_SCAN_STATES = {"current", "not-seen", "verification-pending", "unavailable"}
 DISCOVERY_CANDIDATE_STATUSES = {"new", "ignored", "ingested"}

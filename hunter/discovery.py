@@ -26,6 +26,7 @@ LINKEDIN_CONTINUE_YIELD = 8
 RAW_DISCOVERY_RESULT_LIMIT = 200
 DISCOVERY_RESULT_LIMIT = 50
 DETAIL_ENRICHMENT_LIMIT = 12
+COMPANY_RESEARCH_LIMIT = 3
 MIN_READY_DESCRIPTION_CHARS = 500
 TPM_QUERY_FAMILIES = [
     {
@@ -750,6 +751,16 @@ def apply_browser_details(candidate, details):
         "title": storage.clean((details or {}).get("title", "")),
         "canonical_url": companies.normalize_url((details or {}).get("canonical_url", "")),
         "location": storage.clean((details or {}).get("location", "")),
+        "company_industry": companies.normalize_company_industry(
+            (details or {}).get("company_industry", "")
+        ),
+        "company_size": companies.normalize_company_size((details or {}).get("company_size", "")),
+        "company_profile_url": companies.normalize_company_profile_url(
+            (details or {}).get("company_profile_url", "")
+        ),
+        "company_metadata_source": companies.normalize_url(
+            (details or {}).get("company_metadata_source", "")
+        ),
         "description_text": str((details or {}).get("description_text", "") or "").strip()[:MAX_DESCRIPTION_CHARS],
     }
     for field, value in updates.items():
@@ -797,6 +808,10 @@ def enrich_workday_candidate(candidate, fetcher=None):
     details = {
         "title": enriched.get("title", ""),
         "location": enriched.get("location", ""),
+        "company_industry": enriched.get("company_industry", ""),
+        "company_size": enriched.get("company_size", ""),
+        "company_profile_url": enriched.get("company_profile_url", ""),
+        "company_metadata_source": candidate.get("canonical_url") or candidate.get("url", ""),
         "description_text": enriched.get("description", ""),
     }
     return apply_browser_details(candidate, details)
@@ -816,12 +831,48 @@ def candidate_rank_key(candidate):
     )
 
 
+def connect_candidate_company(candidate, seen_at=""):
+    company = companies.record_discovered_company(candidate, seen_at=seen_at)
+    if company is None:
+        return None
+    candidate["company_id"] = company.get("id", "")
+    for candidate_field, company_field in [
+        ("company_industry", "industry"),
+        ("company_size", "company_size"),
+        ("company_profile_url", "company_profile_url"),
+    ]:
+        if not candidate.get(candidate_field) and company.get(company_field):
+            candidate[candidate_field] = company.get(company_field, "")
+    return company
+
+
+def sync_discovered_companies():
+    rows = repository.read_discovery_candidates()
+    linked_count = 0
+    changed = False
+    for candidate in rows:
+        previous_company_id = candidate.get("company_id", "")
+        company = connect_candidate_company(
+            candidate,
+            seen_at=candidate.get("last_seen_at") or candidate.get("captured_at") or now_iso(),
+        )
+        if not company:
+            continue
+        if candidate.get("company_id", "") != previous_company_id:
+            linked_count += 1
+            changed = True
+    if changed:
+        repository.write_discovery_candidates(rows)
+    return linked_count
+
+
 def run_search(
     search_id,
     search_fetcher=None,
     posting_fetcher=None,
     browser_searcher=None,
     browser_detailer=None,
+    company_researcher=None,
 ):
     search = get_search(search_id)
     timestamp = now_iso()
@@ -838,6 +889,7 @@ def run_search(
             return browser_discovery.search(engine, value, page=page, browser=chrome_browser)
 
         browser_detailer = chrome_browser.details
+        company_researcher = chrome_browser.company
 
     attempted_sources = 0
     failed_sources = 0
@@ -994,8 +1046,19 @@ def run_search(
     if browser_detailer is not None:
         enrichment_candidates = [
             candidate
-            for candidate in sorted(prepared, key=candidate_rank_key, reverse=True)
-            if candidate.get("processing_status") != "ready"
+            for candidate in sorted(
+                prepared,
+                key=lambda item: (
+                    item.get("processing_status") != "ready",
+                    candidate_rank_key(item),
+                ),
+                reverse=True,
+            )
+            if (
+                candidate.get("processing_status") != "ready"
+                or not candidate.get("company_industry")
+                or not candidate.get("company_size")
+            )
         ][:DETAIL_ENRICHMENT_LIMIT]
         for candidate in enrichment_candidates:
             try:
@@ -1009,6 +1072,11 @@ def run_search(
                 continue
             previous_status = candidate.get("processing_status", "")
             previous_description = candidate.get("description_text", "")
+            previous_company_metadata = (
+                candidate.get("company_industry", ""),
+                candidate.get("company_size", ""),
+                candidate.get("company_profile_url", ""),
+            )
             apply_browser_details(candidate, details)
             score_candidate(candidate, timestamp)
             context = candidate.get("_match_context", {})
@@ -1020,6 +1088,12 @@ def run_search(
             if (
                 candidate.get("processing_status") != previous_status
                 or candidate.get("description_text", "") != previous_description
+                or previous_company_metadata
+                != (
+                    candidate.get("company_industry", ""),
+                    candidate.get("company_size", ""),
+                    candidate.get("company_profile_url", ""),
+                )
             ):
                 enriched_count += 1
 
@@ -1045,6 +1119,56 @@ def run_search(
     qualified_count = len(prepared)
     selected = sorted(prepared, key=candidate_rank_key, reverse=True)[:DISCOVERY_RESULT_LIMIT]
     limited_count = max(0, qualified_count - len(selected))
+    company_by_id = {}
+    for candidate in selected:
+        company = connect_candidate_company(candidate, seen_at=timestamp)
+        if company:
+            company_by_id[company.get("id", "")] = company
+
+    company_researched_count = 0
+    company_suggestion_count = 0
+    company_research_attempt_count = 0
+    researched_company_ids = set()
+    if company_researcher is not None:
+        for candidate in selected:
+            company_id = candidate.get("company_id", "")
+            company = company_by_id.get(company_id)
+            if (
+                not company
+                or company_id in researched_company_ids
+                or company.get("industry") and company.get("company_size")
+            ):
+                continue
+            if company_research_attempt_count >= COMPANY_RESEARCH_LIMIT:
+                break
+            company_research_attempt_count += 1
+            try:
+                research = companies.research_company(
+                    company_id,
+                    researcher=company_researcher,
+                )
+            except RuntimeError as exc:
+                errors.append(
+                    f"Company research for {company.get('name', 'company')}: "
+                    f"{storage.clean(str(exc))}"
+                )
+                researched_company_ids.add(company_id)
+                continue
+            researched_company_ids.add(company_id)
+            company_researched_count += 1
+            company_suggestion_count += len(research.get("suggestions", []))
+            company_by_id[company_id] = research.get("company", company)
+
+    for candidate in selected:
+        company = company_by_id.get(candidate.get("company_id", ""))
+        if not company:
+            continue
+        if not candidate.get("company_industry"):
+            candidate["company_industry"] = company.get("industry", "")
+        if not candidate.get("company_size"):
+            candidate["company_size"] = company.get("company_size", "")
+        if not candidate.get("company_profile_url"):
+            candidate["company_profile_url"] = company.get("company_profile_url", "")
 
     rows = repository.read_discovery_candidates()
     captured = []
@@ -1079,6 +1203,8 @@ def run_search(
         "duplicate_count": duplicate_count,
         "limited_count": limited_count,
         "enriched_count": enriched_count,
+        "company_researched_count": company_researched_count,
+        "company_suggestion_count": company_suggestion_count,
         "sources": source_runs,
         "errors": errors,
     }
@@ -1100,6 +1226,8 @@ def run_search(
                     "duplicate_count",
                     "limited_count",
                     "enriched_count",
+                    "company_researched_count",
+                    "company_suggestion_count",
                 ]
             }
         )
@@ -1310,6 +1438,7 @@ def extracted_candidate(url, fetcher=None):
     job = structured_job(page_html)
     title = storage.clean(str(job.get("title", "") or "")) or meta.get("og:title", "") or page_title(page_html)
     company = organization_name(job) or meta.get("og:site_name", "")
+    company_metadata = companies.structured_company_metadata(page_html, job)
     description = job_description(job)
     if not description and page_html and parsed_host not in LINKEDIN_HOSTS:
         description = companies.clean_html_text(page_html)[:MAX_DESCRIPTION_CHARS]
@@ -1336,6 +1465,8 @@ def extracted_candidate(url, fetcher=None):
         "canonical_url": canonical_url,
         "location": location,
         "work_mode": work_mode_from_text(location, description),
+        **company_metadata,
+        "company_metadata_source": final_url if any(company_metadata.values()) else "",
         "source_platform": source_platform(final_url or url),
         "description_text": description,
         "warnings": "\n".join(dict.fromkeys(warnings)),
@@ -1344,10 +1475,32 @@ def extracted_candidate(url, fetcher=None):
 
 
 def apply_manual_details(candidate, details):
-    for field in ["company", "title", "canonical_url", "location", "work_mode", "notes"]:
+    for field in [
+        "company",
+        "title",
+        "canonical_url",
+        "company_id",
+        "location",
+        "work_mode",
+        "company_industry",
+        "company_size",
+        "company_profile_url",
+        "notes",
+    ]:
         value = storage.clean((details or {}).get(field, ""))
         if value:
-            candidate[field] = value
+            if field == "company_industry":
+                candidate[field] = companies.normalize_company_industry(value)
+            elif field == "company_size":
+                candidate[field] = companies.normalize_company_size(value)
+            elif field == "canonical_url":
+                candidate[field] = companies.normalize_url(value)
+            elif field == "company_profile_url":
+                candidate[field] = companies.normalize_company_profile_url(value)
+            else:
+                candidate[field] = value
+    if any((details or {}).get(field) for field in ["company_industry", "company_size", "company_profile_url"]):
+        candidate["company_metadata_source"] = "manual"
     description = str((details or {}).get("description_text", "") or "").strip()
     if description:
         candidate["description_text"] = description[:MAX_DESCRIPTION_CHARS]
@@ -1457,6 +1610,10 @@ def merge_candidate(existing, incoming):
         "canonical_url",
         "location",
         "work_mode",
+        "company_industry",
+        "company_size",
+        "company_profile_url",
+        "company_metadata_source",
         "source_platform",
         "description_text",
         "description_excerpt",
@@ -1525,6 +1682,7 @@ def capture_candidates(search_id, capture_text, details=None, fetcher=None):
         if len(urls) == 1:
             apply_manual_details(candidate, details or {})
         score_candidate(candidate, timestamp)
+        connect_candidate_company(candidate, seen_at=timestamp)
         existing = matching_candidate(rows, candidate)
         if existing:
             merge_candidate(existing, candidate)
@@ -1544,6 +1702,7 @@ def update_candidate_details(candidate_id, updates):
         raise ValueError(f"No Discovery candidate found with id {candidate_id}.")
     apply_manual_details(row, updates or {})
     score_candidate(row, now_iso())
+    connect_candidate_company(row, seen_at=now_iso())
     repository.write_discovery_candidates(rows)
     return row
 
@@ -1563,11 +1722,7 @@ def update_candidate_status(candidate_id, status):
 
 
 def matching_company(company_name):
-    wanted = companies.normalized_key(company_name)
-    return next(
-        (company for company in repository.read_companies() if wanted and wanted in companies.company_keys(company)),
-        None,
-    )
+    return companies.matching_company_record(company_name)
 
 
 def matching_application(candidate):
@@ -1596,9 +1751,24 @@ def ingest_candidate(candidate_id):
         repository.write_discovery_candidates(rows)
         return {"candidate": get_candidate(candidate_id), "posting": existing, "created": False}
 
-    company = matching_company(candidate.get("company", ""))
+    company = None
+    if candidate.get("company_id"):
+        try:
+            company = companies.get_company(candidate.get("company_id", ""))
+        except ValueError:
+            company = None
+    if company is None:
+        company = matching_company(candidate.get("company", ""))
     if company is None:
         company = companies.upsert_company("", {"name": candidate.get("company", "")})
+    company = companies.update_company_metadata(
+        company.get("id", ""),
+        candidate,
+        source_url=candidate.get("company_metadata_source")
+        or candidate.get("canonical_url")
+        or candidate.get("url", ""),
+        checked_at=candidate.get("last_seen_at", ""),
+    )
     source_url = candidate.get("canonical_url") or candidate.get("url", "")
     search = get_search(candidate.get("search_id", ""))
     posting = applications.create_application(

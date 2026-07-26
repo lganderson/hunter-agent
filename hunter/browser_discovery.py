@@ -216,6 +216,35 @@ DETAIL_RESULTS_SCRIPT = r"""
   const organization = job.hiringOrganization && typeof job.hiringOrganization === "object"
     ? text(job.hiringOrganization.name || "")
     : "";
+  const organizationObjects = [];
+  if (job.hiringOrganization && typeof job.hiringOrganization === "object") {
+    organizationObjects.push(job.hiringOrganization);
+  }
+  for (const item of jobObjects) {
+    const types = Array.isArray(item?.["@type"]) ? item["@type"] : [item?.["@type"]];
+    if (!types.some(type => ["Organization", "Corporation", "LocalBusiness"].includes(type))) continue;
+    if (organization && text(item.name || "").toLowerCase() !== organization.toLowerCase()) continue;
+    organizationObjects.push(item);
+  }
+  const structuredIndustry = organizationObjects
+    .map(item => item.industry || item.naics || "")
+    .flat()
+    .map(text)
+    .filter(Boolean)
+    .join(", ");
+  const sizeText = value => {
+    if (!value) return "";
+    if (typeof value === "object") {
+      const minimum = text(value.minValue || "");
+      const maximum = text(value.maxValue || "");
+      value = minimum && maximum ? `${minimum}–${maximum}` : (value.value || minimum || maximum || "");
+    }
+    const cleaned = text(String(value)).replace(/\s*(?:employees?|people)\s*$/i, "").trim();
+    return /\d/.test(cleaned) ? `${cleaned} employees` : "";
+  };
+  const structuredSize = organizationObjects
+    .map(item => sizeText(item.numberOfEmployees || item.employees))
+    .find(Boolean) || "";
   const locationParts = [];
   const locations = Array.isArray(job.jobLocation) ? job.jobLocation : (job.jobLocation ? [job.jobLocation] : []);
   for (const item of locations) {
@@ -260,6 +289,38 @@ DETAIL_RESULTS_SCRIPT = r"""
     "[data-automation-id='jobPostingDescription']",
     "main"
   ]);
+  const topCompanyLink = document.querySelector(
+    ".job-details-jobs-unified-top-card__company-name a[href*='/company/'], "
+    + ".topcard__org-name-link[href*='/company/']"
+  );
+  const companyCard = document.querySelector(".jobs-company__box")
+    || document.querySelector(".jobs-company__card")
+    || document.querySelector("[data-view-name='job-details-about-company']")
+    || topCompanyLink?.closest("section");
+  const companyLines = (companyCard?.innerText || "")
+    .split(/\n+/)
+    .map(text)
+    .filter(Boolean);
+  const employeeLineIndex = companyLines.findIndex(line => (
+    /\b\d[\d,\s]*(?:[-–]\s*\d[\d,\s]*|\+)?\s+employees?\b/i.test(line)
+  ));
+  const visibleSize = employeeLineIndex >= 0
+    ? sizeText(companyLines[employeeLineIndex].match(/\b\d[\d,\s]*(?:[-–]\s*\d[\d,\s]*|\+)?\s+employees?\b/i)?.[0] || "")
+    : "";
+  const visibleIndustry = employeeLineIndex > 0
+    ? companyLines.slice(0, employeeLineIndex).reverse().find(line => (
+      line.toLowerCase() !== organization.toLowerCase()
+      && line.length <= 100
+      && !/\b(?:followers?|follow|about|employees?|jobs?)\b/i.test(line)
+    )) || ""
+    : "";
+  const organizationProfile = organizationObjects
+    .map(item => Array.isArray(item.sameAs) ? item.sameAs[0] : (item.sameAs || item.url || ""))
+    .map(text)
+    .find(Boolean) || "";
+  const companyProfile = companyCard?.querySelector('a[href*="/company/"]')?.href
+    || topCompanyLink?.href
+    || organizationProfile;
   const canonical = document.querySelector('link[rel="canonical"]')?.href || location.href;
   const outboundApply = Array.from(document.querySelectorAll("a[href]")).find(anchor => {
     const href = anchor.href || "";
@@ -278,9 +339,117 @@ DETAIL_RESULTS_SCRIPT = r"""
     title,
     company,
     location: [...new Set([...locationParts, visibleLocation].filter(Boolean))].join("; "),
+    company_industry: structuredIndustry || visibleIndustry,
+    company_size: structuredSize || visibleSize,
+    company_profile_url: companyProfile,
+    company_metadata_source: (structuredIndustry || visibleIndustry || structuredSize || visibleSize || companyProfile)
+      ? location.href
+      : "",
     description_text: description.slice(0, 80000)
   };
   return JSON.stringify({blocked: false, reason: "", items: [item]});
+})()
+"""
+
+COMPANY_RESULTS_SCRIPT = r"""
+(() => {
+  const pageText = (document.body?.innerText || "").toLowerCase();
+  const blocked = /\/(login|authwall|checkpoint)\b/i.test(location.pathname)
+    || pageText.includes("sign in or join linkedin")
+    || pageText.includes("let's do a quick security check")
+    || pageText.includes("verify you are a human")
+    || pageText.includes("unusual traffic from your computer network");
+  if (blocked) {
+    return JSON.stringify({
+      blocked: true,
+      reason: "The company page needs sign-in or verification in the Hunter Chrome profile.",
+      items: []
+    });
+  }
+
+  const text = value => (value || "").replace(/\s+/g, " ").trim();
+  const objects = [];
+  for (const script of document.querySelectorAll('script[type="application/ld+json"]')) {
+    try {
+      const decoded = JSON.parse(script.textContent || "{}");
+      const pending = Array.isArray(decoded) ? decoded : [decoded];
+      for (const item of pending) {
+        if (!item || typeof item !== "object") continue;
+        objects.push(item);
+        if (Array.isArray(item["@graph"])) objects.push(...item["@graph"]);
+      }
+    } catch (_error) {
+      // Visible company details remain available when structured data is malformed.
+    }
+  }
+  const organization = objects.find(item => {
+    const types = Array.isArray(item?.["@type"]) ? item["@type"] : [item?.["@type"]];
+    return types.some(type => ["Organization", "Corporation", "LocalBusiness"].includes(type));
+  }) || {};
+  const labeledValue = labels => {
+    const wanted = labels.map(label => label.toLowerCase());
+    for (const term of document.querySelectorAll("dt")) {
+      if (!wanted.includes(text(term.textContent || "").toLowerCase())) continue;
+      const value = text(term.nextElementSibling?.textContent || "");
+      if (value) return value;
+    }
+    const lines = (document.body?.innerText || "").split(/\n+/).map(text).filter(Boolean);
+    for (let index = 0; index < lines.length - 1; index += 1) {
+      if (wanted.includes(lines[index].toLowerCase())) return lines[index + 1];
+    }
+    return "";
+  };
+  const sizeText = value => {
+    if (!value) return "";
+    if (typeof value === "object") {
+      const minimum = text(value.minValue || "");
+      const maximum = text(value.maxValue || "");
+      value = minimum && maximum ? `${minimum}–${maximum}` : (value.value || minimum || maximum || "");
+    }
+    const cleaned = text(String(value)).replace(/\s*(?:employees?|people)\s*$/i, "").trim();
+    return /\d/.test(cleaned) ? `${cleaned} employees` : "";
+  };
+  const sameAs = Array.isArray(organization.sameAs) ? organization.sameAs : [organization.sameAs];
+  const websiteValue = labeledValue(["Website"]);
+  const websiteLink = Array.from(document.querySelectorAll("a[href]")).find(anchor => (
+    text(anchor.textContent || "").toLowerCase() === websiteValue.toLowerCase()
+    || text(anchor.getAttribute("aria-label") || "").toLowerCase().includes("website")
+  ));
+  const name = text(organization.name || "")
+    || text(document.querySelector("h1")?.textContent || "");
+  const industry = text(organization.industry || organization.naics || "")
+    || labeledValue(["Industry"]);
+  const companySize = sizeText(organization.numberOfEmployees || organization.employees)
+    || sizeText(labeledValue(["Company size", "Company Size"]));
+  const outboundUrl = value => {
+    try {
+      const parsed = new URL(value || "", location.href);
+      if (parsed.hostname.endsWith("linkedin.com") && parsed.pathname.includes("/redir/redirect")) {
+        return parsed.searchParams.get("url") || "";
+      }
+      return parsed.hostname.endsWith("linkedin.com") ? "" : parsed.href;
+    } catch (_error) {
+      return "";
+    }
+  };
+  const website = outboundUrl(websiteLink?.href || "")
+    || (/^https?:\/\//i.test(websiteValue) ? websiteValue : "")
+    || outboundUrl(text(organization.url || ""));
+  const profileUrl = document.querySelector('link[rel="canonical"]')?.href
+    || sameAs.map(text).find(value => value.includes("/company/"))
+    || location.href;
+  return JSON.stringify({
+    blocked: false,
+    reason: "",
+    items: [{
+      company: name,
+      company_industry: industry,
+      company_size: companySize,
+      company_profile_url: profileUrl,
+      company_metadata_source: location.href,
+      website
+    }]
+  });
 })()
 """
 
@@ -412,6 +581,34 @@ class HunterChrome:
 
     def details(self, url):
         items = self._search_tab(url, DETAIL_RESULTS_SCRIPT, scroll=True)
+        return items[0] if items else {}
+
+    def company(self, name, profile_url=""):
+        target_url = (profile_url or "").strip()
+        if not target_url:
+            results = self.google(f'site:linkedin.com/company "{name}"')
+            target_url = next(
+                (
+                    item.get("url", "")
+                    for item in results
+                    if "linkedin.com" in urlparse(item.get("url", "")).netloc.lower()
+                    and "/company/" in urlparse(item.get("url", "")).path.lower()
+                ),
+                "",
+            )
+        if not target_url:
+            return {}
+        parsed = urlparse(target_url)
+        if "linkedin.com" in parsed.netloc.lower() and "/company/" in parsed.path.lower():
+            segments = [segment for segment in parsed.path.split("/") if segment]
+            try:
+                company_index = segments.index("company")
+            except ValueError:
+                company_index = -1
+            if company_index >= 0 and len(segments) > company_index + 1:
+                company_path = f"/company/{segments[company_index + 1]}/about/"
+                target_url = urlunparse(parsed._replace(path=company_path, query="", fragment=""))
+        items = self._search_tab(target_url, COMPANY_RESULTS_SCRIPT, scroll=True)
         return items[0] if items else {}
 
 

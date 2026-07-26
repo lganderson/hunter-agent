@@ -76,9 +76,16 @@ class HunterCompaniesTest(unittest.TestCase):
                 row[1]
                 for row in connection.execute("PRAGMA table_info(company_posting_candidates)").fetchall()
             }
+            company_columns = {
+                row[1]
+                for row in connection.execute("PRAGMA table_info(companies)").fetchall()
+            }
             self.assertIn("location", candidate_columns)
             self.assertIn("source_platform", candidate_columns)
             self.assertIn("scan_state", candidate_columns)
+            self.assertIn("industry", company_columns)
+            self.assertIn("company_size", company_columns)
+            self.assertIn("company_metadata_source", company_columns)
 
     def test_upsert_company_auto_associates_exact_posting_and_syncs_action_company(self):
         sqlite_store.initialize()
@@ -97,6 +104,150 @@ class HunterCompaniesTest(unittest.TestCase):
         self.assertEqual(app["company_id"], "CO0001")
         self.assertEqual(app["company"], "Apple")
         self.assertEqual(action["company"], "Apple")
+
+    def test_initialize_adds_company_metadata_columns_without_losing_existing_company(self):
+        with sqlite_store.connect() as connection:
+            connection.execute(
+                "CREATE TABLE companies ("
+                "id TEXT PRIMARY KEY, name TEXT NOT NULL DEFAULT '', aliases TEXT NOT NULL DEFAULT '', "
+                "interest_status TEXT NOT NULL DEFAULT 'neutral', website TEXT NOT NULL DEFAULT '', "
+                "careers_url TEXT NOT NULL DEFAULT '', notes TEXT NOT NULL DEFAULT '', "
+                "last_checked_at TEXT NOT NULL DEFAULT '', last_check_status TEXT NOT NULL DEFAULT '')"
+            )
+            connection.execute(
+                "INSERT INTO companies(id, name, interest_status) VALUES('CO0001', 'Example Labs', 'interested')"
+            )
+
+        sqlite_store.initialize()
+
+        company = repository.read_companies()[0]
+        self.assertEqual(company["name"], "Example Labs")
+        self.assertEqual(company["interest_status"], "interested")
+        self.assertEqual(company["industry"], "")
+        self.assertEqual(company["company_size"], "")
+        self.assertEqual(company["tracking_status"], "tracked")
+
+    def test_manual_company_metadata_is_normalized_and_preserved_from_automatic_updates(self):
+        sqlite_store.initialize()
+        company = companies.upsert_company(
+            "",
+            {
+                "name": "Example Labs",
+                "industry": "Software Development",
+                "company_size": "201 - 500 people",
+                "company_profile_url": "https://www.linkedin.com/company/example-labs/",
+            },
+        )
+
+        refreshed = companies.update_company_metadata(
+            company["id"],
+            {
+                "company_industry": "Technology, Information and Internet",
+                "company_size": "501-1,000 employees",
+            },
+            source_url="https://www.linkedin.com/jobs/view/123",
+        )
+
+        self.assertEqual(refreshed["industry"], "Software Development")
+        self.assertEqual(refreshed["company_size"], "201–500 employees")
+        self.assertEqual(refreshed["company_metadata_source"], "manual")
+        suggestions = companies.company_metadata_suggestions(refreshed)
+        self.assertEqual(
+            {suggestion["field"] for suggestion in suggestions},
+            {"industry", "company_size"},
+        )
+
+    def test_discovery_records_company_without_enabling_career_tracking(self):
+        sqlite_store.initialize()
+
+        discovered = companies.record_discovered_company(
+            {
+                "company": "Example Labs",
+                "company_industry": "Software Development",
+                "company_size": "51-200 employees",
+                "company_metadata_source": "https://www.linkedin.com/jobs/view/123",
+            },
+            seen_at="2026-07-25T10:00:00",
+        )
+        seen_again = companies.record_discovered_company(
+            {"company": "Example Labs"},
+            seen_at="2026-07-25T11:00:00",
+        )
+
+        self.assertEqual(discovered["tracking_status"], "discovered")
+        self.assertEqual(discovered["industry"], "Software Development")
+        self.assertEqual(discovered["company_size"], "51–200 employees")
+        self.assertEqual(seen_again["id"], discovered["id"])
+        self.assertEqual(seen_again["last_seen_at"], "2026-07-25T11:00:00")
+        self.assertEqual(companies.check_all_company_postings()["checked_count"], 0)
+        self.assertEqual(companies.check_all_company_postings()["skipped"][0]["reason"], "not tracked")
+
+    def test_research_fills_blanks_and_saves_conflicts_for_review(self):
+        sqlite_store.initialize()
+        company = companies.upsert_company(
+            "",
+            {
+                "name": "Example Labs",
+                "industry": "Software Development",
+                "tracking_status": "discovered",
+            },
+        )
+
+        result = companies.research_company(
+            company["id"],
+            researcher=lambda name, profile: {
+                "company_industry": "Technology, Information and Internet",
+                "company_size": "201-500 employees",
+                "company_profile_url": "https://www.linkedin.com/company/example-labs/about/",
+                "company_metadata_source": "https://www.linkedin.com/company/example-labs/about/",
+            },
+        )
+
+        self.assertEqual(result["company"]["industry"], "Software Development")
+        self.assertEqual(result["company"]["company_size"], "201–500 employees")
+        self.assertEqual(
+            result["company"]["company_profile_url"],
+            "https://www.linkedin.com/company/example-labs",
+        )
+        self.assertEqual(result["applied_fields"], ["company_size", "company_profile_url"])
+        self.assertEqual(result["suggestions"][0]["field"], "industry")
+
+        resolved = companies.resolve_company_metadata_suggestion(
+            company["id"],
+            result["suggestions"][0]["id"],
+            "apply",
+        )
+        self.assertEqual(resolved["industry"], "Technology, Information and Internet")
+        self.assertEqual(companies.company_metadata_suggestions(resolved), [])
+
+    def test_company_recommendation_uses_discovery_fit_without_changing_tracking(self):
+        sqlite_store.initialize()
+        company = companies.record_discovered_company({"company": "Example Labs"})
+        rows = []
+        titles = ["Technical Program Manager, Platform", "Senior Program Manager, Security"]
+        for index in range(2):
+            row = {field: "" for field in schema.DISCOVERY_CANDIDATE_FIELDS}
+            row.update(
+                {
+                    "id": f"DC000{index + 1}",
+                    "company_id": company["id"],
+                    "company": company["name"],
+                    "title": titles[index],
+                    "url": f"https://jobs.example.com/{index + 1}",
+                    "status": "new",
+                    "processing_status": "ready",
+                    "fit_score": "70",
+                }
+            )
+            rows.append(row)
+        repository.write_discovery_candidates(rows)
+
+        payload_company = app_state.build_payload()["companies"][0]
+
+        self.assertEqual(payload_company["tracking_status"], "discovered")
+        self.assertEqual(payload_company["discovery_role_count"], 2)
+        self.assertEqual(payload_company["recommended_discovery_role_count"], 2)
+        self.assertIn("Hunter suggests tracking", payload_company["tracking_recommendation"])
 
     def test_link_and_unlink_company_contact(self):
         sqlite_store.initialize()
@@ -2640,6 +2791,9 @@ class HunterCompaniesTest(unittest.TestCase):
         self.assertIn("hunter_upsert_company", tool_names)
         self.assertIn("hunter_archive_company", tool_names)
         self.assertIn("hunter_restore_company", tool_names)
+        self.assertIn("hunter_research_company", tool_names)
+        self.assertIn("hunter_track_company", tool_names)
+        self.assertIn("hunter_resolve_company_metadata_suggestion", tool_names)
         self.assertIn("hunter_check_company_postings", tool_names)
         self.assertIn("hunter_get_company_candidate", tool_names)
         self.assertIn("hunter_list_company_candidates", tool_names)

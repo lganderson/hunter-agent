@@ -6,10 +6,14 @@ import {
   checkCompanyPostings,
   ingestCompanyCandidate,
   linkCompanyContact,
+  researchCompany,
+  resolveCompanyMetadataSuggestion,
   restoreCompany,
+  trackCompany,
   unlinkCompanyContact,
   updateCompanyCandidate,
-  upsertCompany
+  upsertCompany,
+  type CompanyMetadataSuggestion
 } from "../core/api";
 import { routes } from "../core/routes";
 import { dateOnlyLabel, titleCase } from "../core/format";
@@ -38,10 +42,12 @@ type CompanyDetailPageProps = CompaniesPageProps & {
 
 const INTEREST_STATUSES = ["interested", "neutral", "archived"];
 const DEFAULT_INTEREST_STATUSES = ["interested", "neutral"];
+const TRACKING_STATUSES = ["tracked", "discovered"];
 
 export function CompaniesPage({ data, refresh }: CompaniesPageProps) {
   const [search, setSearch] = useState("");
   const [interestStatuses, setInterestStatuses] = useState<string[]>(DEFAULT_INTEREST_STATUSES);
+  const [trackingStatuses, setTrackingStatuses] = useState<string[]>(TRACKING_STATUSES);
   const [checkingCompanyId, setCheckingCompanyId] = useState("");
   const [operationStatus, setOperationStatus] = useState("");
 
@@ -50,28 +56,33 @@ export function CompaniesPage({ data, refresh }: CompaniesPageProps) {
     return data.companies
       .filter(company => {
         if (!interestStatuses.includes(company.interest_status)) return false;
+        if (!trackingStatuses.includes(company.tracking_status)) return false;
         if (!query) return true;
         return [
           company.id,
           company.name,
           company.aliases,
           company.interest_status,
+          company.tracking_status,
           company.website,
           company.careers_url,
+          company.industry,
+          company.company_size,
           company.notes,
           company.last_check_status
         ].join(" ").toLowerCase().includes(query);
       })
       .sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
-  }, [data.companies, interestStatuses, search]);
+  }, [data.companies, interestStatuses, search, trackingStatuses]);
 
   function clearFilters() {
     setSearch("");
     setInterestStatuses(DEFAULT_INTEREST_STATUSES);
+    setTrackingStatuses(TRACKING_STATUSES);
   }
 
   async function checkCareersFromTable(company: Company) {
-    if (!company.careers_url || checkingCompanyId) return;
+    if (company.tracking_status !== "tracked" || !company.careers_url || checkingCompanyId) return;
     setCheckingCompanyId(company.id);
     setOperationStatus(`Checking ${company.name}...`);
     try {
@@ -80,6 +91,21 @@ export function CompaniesPage({ data, refresh }: CompaniesPageProps) {
       setOperationStatus(`${company.name}: ${result.company.last_check_status}`);
     } catch (error) {
       setOperationStatus(`Could not check ${company.name}. ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setCheckingCompanyId("");
+    }
+  }
+
+  async function trackFromTable(company: Company) {
+    if (checkingCompanyId) return;
+    setCheckingCompanyId(company.id);
+    setOperationStatus(`Tracking ${company.name}...`);
+    try {
+      await trackCompany(company.id);
+      await refresh();
+      setOperationStatus(`${company.name} is now tracked. Career-page checks remain available when a careers URL is saved.`);
+    } catch (error) {
+      setOperationStatus(`Could not track ${company.name}. ${error instanceof Error ? error.message : String(error)}`);
     } finally {
       setCheckingCompanyId("");
     }
@@ -95,6 +121,7 @@ export function CompaniesPage({ data, refresh }: CompaniesPageProps) {
             <input value={search} onChange={event => setSearch(event.target.value)} type="search" placeholder="Search companies, careers URLs, notes..." />
           </label>
           <MultiFilter label="Interest" values={INTEREST_STATUSES} selected={interestStatuses} onChange={setInterestStatuses} />
+          <MultiFilter label="Tracking" values={TRACKING_STATUSES} selected={trackingStatuses} onChange={setTrackingStatuses} />
           <button className="button" type="button" onClick={clearFilters}><FilterIcon size={16} /> Clear</button>
           <a className="button icon-button" href="/api/companies/export" aria-label="Export company data" title="Export company data"><DownloadIcon /></a>
           <Link className="button primary" to={routes.companyNew}><ListIcon /> New Company</Link>
@@ -106,6 +133,7 @@ export function CompaniesPage({ data, refresh }: CompaniesPageProps) {
               <tr>
                 <th>Company</th>
                 <th>Interest</th>
+                <th>Tracking</th>
                 <th>Careers URL</th>
                 <th>Last check</th>
                 <th>Actions</th>
@@ -114,20 +142,27 @@ export function CompaniesPage({ data, refresh }: CompaniesPageProps) {
             <tbody>
               {rows.map(company => (
                 <tr key={company.id} data-company-id={company.id}>
-                  <td className="role-cell"><Link className="row-select" to={routes.companyDetail(company.id)}><strong>{company.name}</strong><span>{company.aliases || company.id}</span></Link></td>
+                  <td className="role-cell"><Link className="row-select" to={routes.companyDetail(company.id)}><strong>{company.name}</strong><span>{companyMetadataSummary(company) || company.aliases || company.id}</span></Link></td>
                   <td>{titleCase(company.interest_status)}</td>
+                  <td><TrackingBadge company={company} /></td>
                   <td>{company.careers_url ? <a href={company.careers_url} target="_blank" rel="noreferrer">Open</a> : "None"}</td>
                   <td><LastCheckCell company={company} /></td>
                   <td>
                     <button
                       className="button compact table-action-button"
                       type="button"
-                      disabled={!company.careers_url || Boolean(checkingCompanyId)}
-                      onClick={() => checkCareersFromTable(company)}
-                      aria-label={`Check careers page for ${company.name}`}
+                      disabled={(company.tracking_status === "tracked" && !company.careers_url) || Boolean(checkingCompanyId)}
+                      onClick={() => company.tracking_status === "tracked"
+                        ? checkCareersFromTable(company)
+                        : trackFromTable(company)}
+                      aria-label={company.tracking_status === "tracked"
+                        ? `Check careers page for ${company.name}`
+                        : `Track ${company.name}`}
                     >
-                      <SearchIcon size={16} />
-                      {checkingCompanyId === company.id ? "Checking" : "Check"}
+                      {company.tracking_status === "tracked" ? <SearchIcon size={16} /> : <ListIcon size={16} />}
+                      {checkingCompanyId === company.id
+                        ? company.tracking_status === "tracked" ? "Checking" : "Tracking"
+                        : company.tracking_status === "tracked" ? "Check" : "Track"}
                     </button>
                   </td>
                 </tr>
@@ -198,6 +233,9 @@ export function CompanyDetailPage({ data, refresh, createNew = false }: CompanyD
   const [operationStatus, setOperationStatus] = useState("");
   const [activeCandidateActionId, setActiveCandidateActionId] = useState("");
   const [isCheckingCareers, setIsCheckingCareers] = useState(false);
+  const [isResearching, setIsResearching] = useState(false);
+  const [isTracking, setIsTracking] = useState(false);
+  const [activeSuggestionId, setActiveSuggestionId] = useState("");
 
   const linkedContactIds = useMemo(
     () => new Set(data.company_contacts.filter(link => link.company_id === company?.id).map(link => link.contact_id)),
@@ -253,6 +291,10 @@ export function CompanyDetailPage({ data, refresh, createNew = false }: CompanyD
     [data.contacts, linkedContactIds]
   );
   const [contactId, setContactId] = useState(availableContacts[0]?.id || "");
+  const metadataSuggestions = useMemo(
+    () => parseCompanyMetadataSuggestions(company?.company_metadata_suggestions_json || ""),
+    [company?.company_metadata_suggestions_json]
+  );
 
   useEffect(() => {
     setContactId(availableContacts[0]?.id || "");
@@ -269,6 +311,9 @@ export function CompanyDetailPage({ data, refresh, createNew = false }: CompanyD
         interest_status: String(form.get("interest_status") || ""),
         website: String(form.get("website") || ""),
         careers_url: String(form.get("careers_url") || ""),
+        industry: String(form.get("industry") || ""),
+        company_size: String(form.get("company_size") || ""),
+        company_profile_url: String(form.get("company_profile_url") || ""),
         notes: String(form.get("notes") || "")
       });
       await refresh();
@@ -280,7 +325,7 @@ export function CompanyDetailPage({ data, refresh, createNew = false }: CompanyD
   }
 
   async function checkCareers() {
-    if (!company || isCheckingCareers) return;
+    if (!company || company.tracking_status !== "tracked" || isCheckingCareers) return;
     setIsCheckingCareers(true);
     setOperationStatus("Checking careers page...");
     try {
@@ -294,6 +339,57 @@ export function CompanyDetailPage({ data, refresh, createNew = false }: CompanyD
       setOperationStatus(`Could not check careers page. ${error instanceof Error ? error.message : String(error)}`);
     } finally {
       setIsCheckingCareers(false);
+    }
+  }
+
+  async function researchCurrentCompany() {
+    if (!company || isResearching) return;
+    setIsResearching(true);
+    setOperationStatus("Hunter is researching company information in the signed-in browser...");
+    try {
+      const result = await researchCompany(company.id);
+      await refresh();
+      const filled = result.applied_fields.length;
+      const suggested = result.suggestions.length;
+      setOperationStatus(
+        filled || suggested
+          ? `Research complete. Filled ${filled} blank field${filled === 1 ? "" : "s"} and added ${suggested} suggestion${suggested === 1 ? "" : "s"} for review.`
+          : "Research complete. Hunter found no new company information."
+      );
+    } catch (error) {
+      setOperationStatus(`Could not research company. ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setIsResearching(false);
+    }
+  }
+
+  async function trackCurrentCompany() {
+    if (!company || isTracking) return;
+    setIsTracking(true);
+    setOperationStatus("Adding company to explicit tracking...");
+    try {
+      await trackCompany(company.id);
+      await refresh();
+      setOperationStatus("Company is now tracked. Hunter can use its careers URL in Companies mode.");
+    } catch (error) {
+      setOperationStatus(`Could not track company. ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setIsTracking(false);
+    }
+  }
+
+  async function resolveMetadataSuggestion(suggestion: CompanyMetadataSuggestion, action: "apply" | "dismiss") {
+    if (!company || activeSuggestionId) return;
+    setActiveSuggestionId(suggestion.id);
+    setOperationStatus(`${action === "apply" ? "Applying" : "Dismissing"} company information suggestion...`);
+    try {
+      await resolveCompanyMetadataSuggestion(company.id, suggestion.id, action);
+      await refresh();
+      setOperationStatus(action === "apply" ? "Company information updated." : "Suggestion dismissed.");
+    } catch (error) {
+      setOperationStatus(`Could not resolve suggestion. ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setActiveSuggestionId("");
     }
   }
 
@@ -408,15 +504,25 @@ export function CompanyDetailPage({ data, refresh, createNew = false }: CompanyD
           <div>
             <div className="company-title-line">
               <h1>{company.name || "Unnamed company"}</h1>
+              <TrackingBadge company={company} />
               <span className={`company-interest ${company.interest_status || "neutral"}`}>{titleCase(company.interest_status || "neutral")}</span>
             </div>
-            <p>{company.aliases ? `Also known as ${company.aliases}` : `Company record ${company.id}`}</p>
+            <p>{companyMetadataSummary(company) || `Company record ${company.id}`}</p>
+            {company.aliases ? <span className="company-aliases">Also known as {company.aliases}</span> : null}
           </div>
         </div>
         <div className="company-primary-actions">
+          <button className="button" type="button" disabled={isResearching} onClick={researchCurrentCompany}>
+            <SearchIcon size={16} /> {isResearching ? "Researching…" : "Research company"}
+          </button>
+          {company.tracking_status === "discovered" ? (
+            <button className="button primary" type="button" disabled={isTracking} onClick={trackCurrentCompany}>
+              <ListIcon size={16} /> {isTracking ? "Tracking…" : "Track company"}
+            </button>
+          ) : null}
           {company.website ? <a className="button" href={company.website} target="_blank" rel="noreferrer"><ExternalIcon size={16} /> Website</a> : null}
           {company.careers_url ? <a className="button" href={company.careers_url} target="_blank" rel="noreferrer"><ExternalIcon size={16} /> Careers</a> : null}
-          <button className="button primary" type="button" disabled={!company.careers_url || isCheckingCareers} onClick={checkCareers}>
+          <button className="button primary" type="button" disabled={company.tracking_status !== "tracked" || !company.careers_url || isCheckingCareers} onClick={checkCareers}>
             <SearchIcon size={16} /> {isCheckingCareers ? "Checking…" : "Check careers"}
           </button>
         </div>
@@ -432,8 +538,8 @@ export function CompanyDetailPage({ data, refresh, createNew = false }: CompanyD
         <Link className="company-stat" to={routes.contactsFiltered({ company_id: company.id })} aria-label={`View contacts linked to ${company.name}`}>
           <span>Contacts</span><strong>{linkedContacts.length}</strong><small>{linkedContacts.length ? "Linked to this company" : "No relationships yet"}</small>
         </Link>
-        <Link className="company-stat" to={routes.candidatesFiltered({ companies: company.id, status: "all", latest: "true" })} aria-label={`View candidates from the latest ${company.name} careers check`}>
-          <span>Last careers check</span><strong className="company-stat-date">{lastCheckDetail(company)}</strong><small>{lastCheckChip(company.last_check_status).label}</small>
+        <Link className="company-stat" to={routes.candidatesFiltered({ mode: "discovery" })} aria-label="View Discovery roles">
+          <span>Discovery roles</span><strong>{company.discovery_role_count || 0}</strong><small>{company.recommended_discovery_role_count || 0} recommended</small>
         </Link>
       </div>
 
@@ -535,6 +641,38 @@ export function CompanyDetailPage({ data, refresh, createNew = false }: CompanyD
         </div>
 
         <aside className="company-workspace-rail">
+          {company.tracking_recommendation || metadataSuggestions.length ? (
+            <article className="panel company-rail-panel company-suggestions-panel">
+              <div className="company-section-header compact">
+                <div><h2>Hunter suggestions</h2><p>Review source-backed changes before they replace existing information.</p></div>
+              </div>
+              {company.tracking_recommendation ? (
+                <div className="company-tracking-suggestion">
+                  <p>{company.tracking_recommendation}</p>
+                  {company.tracking_status === "discovered" ? (
+                    <button className="button compact primary" type="button" disabled={isTracking} onClick={trackCurrentCompany}>
+                      Track company
+                    </button>
+                  ) : null}
+                </div>
+              ) : null}
+              <div className="company-metadata-suggestions">
+                {metadataSuggestions.map(suggestion => (
+                  <article className="company-metadata-suggestion" key={suggestion.id}>
+                    <strong>{companyFieldLabel(suggestion.field)}</strong>
+                    <div><span>Current</span><p>{suggestion.current || "Blank"}</p></div>
+                    <div><span>Hunter found</span><p>{suggestion.suggested}</p></div>
+                    {suggestion.source_url ? <a href={suggestion.source_url} target="_blank" rel="noreferrer">View evidence</a> : null}
+                    <div className="company-suggestion-actions">
+                      <button className="button compact primary" type="button" disabled={Boolean(activeSuggestionId)} onClick={() => resolveMetadataSuggestion(suggestion, "apply")}>Apply</button>
+                      <button className="button compact" type="button" disabled={Boolean(activeSuggestionId)} onClick={() => resolveMetadataSuggestion(suggestion, "dismiss")}>Dismiss</button>
+                    </div>
+                  </article>
+                ))}
+              </div>
+            </article>
+          ) : null}
+
           <article className="panel company-rail-panel">
             <div className="company-section-header compact">
               <div><h2>Company details</h2><p>Edit research context and tracking settings.</p></div>
@@ -550,7 +688,9 @@ export function CompanyDetailPage({ data, refresh, createNew = false }: CompanyD
 
           <article className="panel company-rail-panel">
             <div className="company-section-header compact"><div><h2>Careers source</h2><p>Source health and discovery evidence.</p></div></div>
-            {careerSource ? (
+            {company.tracking_status === "discovered" ? (
+              <div className="company-section-empty">This company is stored from Discovery but is not in career-page tracking. Track it when you want Companies mode to scan its careers source.</div>
+            ) : careerSource ? (
               <div className="company-source-body">
                 <dl className="company-detail-list">
                   <div><dt>Platform</dt><dd>{titleCase(careerSource.platform_type.replaceAll("_", " "))}</dd></div>
@@ -580,6 +720,17 @@ function CompanyForm({ company, onSubmit }: { company: Company | null; onSubmit:
       <label className="form-field">Aliases <input name="aliases" type="text" defaultValue={company?.aliases || ""} /></label>
       <label className="form-field">Website <input name="website" type="url" defaultValue={company?.website || ""} /></label>
       <label className="form-field">Careers URL <input name="careers_url" type="url" defaultValue={company?.careers_url || ""} /></label>
+      <label className="form-field">Industry <input name="industry" type="text" defaultValue={company?.industry || ""} placeholder="For example, Software Development" /></label>
+      <label className="form-field">Company size <input name="company_size" type="text" defaultValue={company?.company_size || ""} placeholder="For example, 201–500 employees" /></label>
+      <label className="form-field full">Company profile URL <input name="company_profile_url" type="url" defaultValue={company?.company_profile_url || ""} /></label>
+      {company?.company_metadata_checked_at ? (
+        <div className="company-metadata-source form-field full">
+          <span>Company information updated {dateOnlyLabel(company.company_metadata_checked_at)}.</span>
+          {company.company_metadata_source && company.company_metadata_source !== "manual"
+            ? <a href={company.company_metadata_source} target="_blank" rel="noreferrer">View source</a>
+            : <span>Manually maintained</span>}
+        </div>
+      ) : null}
       <label className="form-field full">Notes <textarea name="notes" defaultValue={company?.notes || ""} /></label>
       <div className="form-field full"><button className="button primary" type="submit"><FilterIcon size={16} /> Save company</button></div>
     </form>
@@ -589,6 +740,43 @@ function CompanyForm({ company, onSubmit }: { company: Company | null; onSubmit:
 function candidateDateLabel(candidate: CompanyPostingCandidate) {
   const value = candidate.last_seen_at || candidate.first_seen_at;
   return value ? dateOnlyLabel(value) : "unknown";
+}
+
+function companyMetadataSummary(company: Company) {
+  return [company.industry, company.company_size].filter(Boolean).join(" · ");
+}
+
+function TrackingBadge({ company }: { company: Company }) {
+  return (
+    <span className={`company-tracking ${company.tracking_status || "tracked"}`}>
+      {company.tracking_status === "discovered" ? "Discovered" : "Tracked"}
+    </span>
+  );
+}
+
+function parseCompanyMetadataSuggestions(value: string): CompanyMetadataSuggestion[] {
+  try {
+    const parsed = JSON.parse(value || "[]") as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((item): item is CompanyMetadataSuggestion => (
+      Boolean(item)
+      && typeof item === "object"
+      && typeof (item as CompanyMetadataSuggestion).id === "string"
+      && typeof (item as CompanyMetadataSuggestion).field === "string"
+      && typeof (item as CompanyMetadataSuggestion).suggested === "string"
+    ));
+  } catch {
+    return [];
+  }
+}
+
+function companyFieldLabel(field: CompanyMetadataSuggestion["field"]) {
+  return {
+    industry: "Industry",
+    company_size: "Company size",
+    company_profile_url: "Company profile",
+    website: "Website"
+  }[field];
 }
 
 function candidateLocationLabel(candidate: CompanyPostingCandidate) {

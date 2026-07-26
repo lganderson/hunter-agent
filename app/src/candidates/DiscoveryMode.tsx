@@ -49,6 +49,9 @@ const EMPTY_DETAILS: DiscoveryCandidateDetails = {
   canonical_url: "",
   location: "",
   work_mode: "",
+  company_industry: "",
+  company_size: "",
+  company_profile_url: "",
   description_text: "",
   notes: ""
 };
@@ -175,6 +178,8 @@ export function DiscoveryMode({ data, refresh }: DiscoveryModeProps) {
         + `${result.qualified_count} qualified after validation and lane matching; `
         + `${result.new_count} are new and ${result.updated_count} were refreshed. `
         + `${result.enriched_count} posting${result.enriched_count === 1 ? "" : "s"} gained verified details. `
+        + `Hunter researched ${result.company_researched_count} compan${result.company_researched_count === 1 ? "y" : "ies"}`
+        + `${result.company_suggestion_count ? ` and queued ${result.company_suggestion_count} company information suggestion${result.company_suggestion_count === 1 ? "" : "s"}` : ""}. `
         + `${result.duplicate_count} duplicate${result.duplicate_count === 1 ? "" : "s"} collapsed.`
         + `${limitSuffix}${errorSuffix}`
       );
@@ -296,7 +301,7 @@ export function DiscoveryMode({ data, refresh }: DiscoveryModeProps) {
       {selectedSearch ? (
         <div className="discovery-source-note">
           <strong>Hunter Chrome</strong>
-          <span>Discovery runs weighted exact, senior, and adjacent-role searches, continues paging while each page yields useful new postings, and automatically enriches the strongest incomplete results before fit scoring. Watched-company career scans stay in Companies.</span>
+          <span>Discovery runs weighted exact, senior, and adjacent-role searches, continues paging while each page yields useful new postings, and automatically enriches posting details, company industry, and employee range. Watched-company career scans stay in Companies.</span>
         </div>
       ) : null}
       {selectedSearch?.last_run_at && Object.keys(selectedSearch.last_run_summary || {}).length ? (
@@ -306,6 +311,7 @@ export function DiscoveryMode({ data, refresh }: DiscoveryModeProps) {
             Reviewed {selectedSearch.last_run_summary.evaluated_count || 0};
             {" "}{selectedSearch.last_run_summary.qualified_count || 0} qualified;
             {" "}{selectedSearch.last_run_summary.enriched_count || 0} enriched;
+            {" "}{selectedSearch.last_run_summary.company_researched_count || 0} companies researched;
             {" "}{selectedSearch.last_run_summary.duplicate_count || 0} duplicates collapsed.
           </span>
         </div>
@@ -437,6 +443,9 @@ export function DiscoveryMode({ data, refresh }: DiscoveryModeProps) {
                 <label className="form-field">Role title <input value={captureDetails.title || ""} onChange={event => setCaptureDetails({ ...captureDetails, title: event.target.value })} /></label>
                 <label className="form-field">Location <input value={captureDetails.location || ""} onChange={event => setCaptureDetails({ ...captureDetails, location: event.target.value })} /></label>
                 <label className="form-field">Work mode <input value={captureDetails.work_mode || ""} onChange={event => setCaptureDetails({ ...captureDetails, work_mode: event.target.value })} placeholder="Remote, Hybrid, or On-site" /></label>
+                <label className="form-field">Company industry <input value={captureDetails.company_industry || ""} onChange={event => setCaptureDetails({ ...captureDetails, company_industry: event.target.value })} /></label>
+                <label className="form-field">Company size <input value={captureDetails.company_size || ""} onChange={event => setCaptureDetails({ ...captureDetails, company_size: event.target.value })} placeholder="For example, 201–500 employees" /></label>
+                <label className="form-field full">Company profile URL <input type="url" value={captureDetails.company_profile_url || ""} onChange={event => setCaptureDetails({ ...captureDetails, company_profile_url: event.target.value })} /></label>
                 <label className="form-field full">Employer posting URL <input type="url" value={captureDetails.canonical_url || ""} onChange={event => setCaptureDetails({ ...captureDetails, canonical_url: event.target.value })} /></label>
                 <label className="form-field full">Posting description <textarea value={captureDetails.description_text || ""} onChange={event => setCaptureDetails({ ...captureDetails, description_text: event.target.value })} /></label>
               </div>
@@ -492,6 +501,8 @@ export function DiscoveryMode({ data, refresh }: DiscoveryModeProps) {
             <tr>
               <th>Candidate</th>
               <th>Company</th>
+              <th>Industry</th>
+              <th>Size</th>
               <th>Fit</th>
               <th>Processing</th>
               <th>Last seen</th>
@@ -506,20 +517,28 @@ export function DiscoveryMode({ data, refresh }: DiscoveryModeProps) {
                   <span className="cell-subtle">{candidateLocationLabel(candidate)}</span>
                 </td>
                 <td>
-                  {candidate.company || "Company needed"}
+                  {candidate.company_id
+                    ? <Link to={routes.companyDetail(candidate.company_id)}>{candidate.company || "Company needed"}</Link>
+                    : candidate.company || "Company needed"}
                   <span className="cell-subtle">{titleCase(candidate.source_platform || "manual")}</span>
                 </td>
-                <td className="candidate-score-cell discovery-fit-cell">
+                <td className="discovery-metadata-cell" title={candidate.company_industry || undefined}>
+                  {candidate.company_industry || "—"}
+                </td>
+                <td className="discovery-metadata-cell" title={candidate.company_size || undefined}>
+                  {candidate.company_size || "—"}
+                </td>
+                <td
+                  className="candidate-score-cell discovery-fit-cell"
+                  title={candidate.fit_summary || undefined}
+                  aria-label={candidate.processing_status === "ready"
+                    ? `Fit ${candidate.fit_score || "not scored"}. ${candidate.fit_summary || ""}`.trim()
+                    : "Fit pending verified posting details."}
+                >
                   {candidate.processing_status === "ready" ? (
-                    <>
-                      <span className={`pill ${fitClass(candidate.fit_score)}`}>{candidate.fit_score || "—"}</span>
-                      <span className="cell-subtle">{candidate.fit_summary || "Fit calculated from verified details"}</span>
-                    </>
+                    <span className={`pill ${fitClass(candidate.fit_score)}`}>{candidate.fit_score || "—"}</span>
                   ) : (
-                    <>
-                      <span className="pill fit-pending">Pending</span>
-                      <span className="cell-subtle">Fit will be calculated after posting details are verified.</span>
-                    </>
+                    <span className="pill fit-pending">Pending</span>
                   )}
                 </td>
                 <td>
@@ -579,6 +598,9 @@ function CandidateDetailsModal({
     canonical_url: candidate.canonical_url,
     location: candidate.location,
     work_mode: candidate.work_mode,
+    company_industry: candidate.company_industry,
+    company_size: candidate.company_size,
+    company_profile_url: candidate.company_profile_url,
     description_text: candidate.description_text,
     notes: candidate.notes
   });
@@ -595,6 +617,9 @@ function CandidateDetailsModal({
           <label className="form-field">Role title <input required value={draft.title || ""} onChange={event => setDraft({ ...draft, title: event.target.value })} /></label>
           <label className="form-field">Location <input value={draft.location || ""} onChange={event => setDraft({ ...draft, location: event.target.value })} /></label>
           <label className="form-field">Work mode <input value={draft.work_mode || ""} onChange={event => setDraft({ ...draft, work_mode: event.target.value })} placeholder="Remote, Hybrid, or On-site" /></label>
+          <label className="form-field">Company industry <input value={draft.company_industry || ""} onChange={event => setDraft({ ...draft, company_industry: event.target.value })} /></label>
+          <label className="form-field">Company size <input value={draft.company_size || ""} onChange={event => setDraft({ ...draft, company_size: event.target.value })} placeholder="For example, 201–500 employees" /></label>
+          <label className="form-field full">Company profile URL <input type="url" value={draft.company_profile_url || ""} onChange={event => setDraft({ ...draft, company_profile_url: event.target.value })} /></label>
           <label className="form-field full">Employer posting URL <input type="url" value={draft.canonical_url || ""} onChange={event => setDraft({ ...draft, canonical_url: event.target.value })} /></label>
           <label className="form-field full">Posting description <textarea className="discovery-description-input" value={draft.description_text || ""} onChange={event => setDraft({ ...draft, description_text: event.target.value })} /></label>
           <label className="form-field full">Notes <textarea value={draft.notes || ""} onChange={event => setDraft({ ...draft, notes: event.target.value })} /></label>
@@ -690,6 +715,8 @@ function discoveryCandidateIncludes(candidate: DiscoveryCandidate, search: strin
     candidate.title,
     candidate.location,
     candidate.work_mode,
+    candidate.company_industry,
+    candidate.company_size,
     candidate.source_platform,
     candidate.fit_summary,
     candidate.description_excerpt,

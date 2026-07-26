@@ -89,8 +89,21 @@ export type Company = {
   name: string;
   aliases: string;
   interest_status: string;
+  tracking_status: "discovered" | "tracked";
+  discovered_at: string;
+  last_seen_at: string;
   website: string;
   careers_url: string;
+  industry: string;
+  company_size: string;
+  company_profile_url: string;
+  company_metadata_source: string;
+  company_metadata_checked_at: string;
+  company_metadata_suggestions_json: string;
+  company_research_status: string;
+  discovery_role_count: number;
+  recommended_discovery_role_count: number;
+  tracking_recommendation: string;
   notes: string;
   last_checked_at: string;
   last_check_status: string;
@@ -184,17 +197,24 @@ export type DiscoveryLastRunSummary = {
   duplicate_count?: number;
   limited_count?: number;
   enriched_count?: number;
+  company_researched_count?: number;
+  company_suggestion_count?: number;
 };
 
 export type DiscoveryCandidate = {
   id: string;
   search_id: string;
+  company_id: string;
   company: string;
   title: string;
   url: string;
   canonical_url: string;
   location: string;
   work_mode: string;
+  company_industry: string;
+  company_size: string;
+  company_profile_url: string;
+  company_metadata_source: string;
   source_platform: string;
   captured_at: string;
   last_seen_at: string;
@@ -246,6 +266,8 @@ export type DiscoveryRunResult = {
   duplicate_count: number;
   limited_count: number;
   enriched_count: number;
+  company_researched_count: number;
+  company_suggestion_count: number;
   sources: DiscoverySourceRun[];
   errors: string[];
 };
@@ -402,7 +424,19 @@ export type CompanyUpdates = Partial<Omit<Company, "id" | "last_checked_at" | "l
 export type DiscoverySearchUpdates = Pick<DiscoverySearch, "name" | "keywords" | "lanes">;
 
 export type DiscoveryCandidateDetails = Partial<
-  Pick<DiscoveryCandidate, "company" | "title" | "canonical_url" | "location" | "work_mode" | "description_text" | "notes">
+  Pick<
+    DiscoveryCandidate,
+    | "company"
+    | "title"
+    | "canonical_url"
+    | "location"
+    | "work_mode"
+    | "company_industry"
+    | "company_size"
+    | "company_profile_url"
+    | "description_text"
+    | "notes"
+  >
 >;
 
 export type AgentChatMessage = {

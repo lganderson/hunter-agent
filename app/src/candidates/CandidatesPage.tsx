@@ -185,7 +185,9 @@ export function CandidatesPage({ data, refresh }: CandidateReviewPageProps) {
 
   async function checkAllCompanies() {
     const companiesToCheck = data.companies.filter(
-      company => company.interest_status.toLowerCase() !== "archived" && company.careers_url.trim()
+      company => company.tracking_status === "tracked"
+        && company.interest_status.toLowerCase() !== "archived"
+        && company.careers_url.trim()
     );
     const skippedCount = data.companies.length - companiesToCheck.length;
     const totals = {

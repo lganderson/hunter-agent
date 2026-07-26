@@ -1322,7 +1322,7 @@
 
     #companies-view table {
       table-layout: fixed;
-      min-width: 1040px;
+      min-width: 820px;
     }
 
     #candidates-view table {
@@ -1362,27 +1362,32 @@
 
     #companies-view th:nth-child(1),
     #companies-view td:nth-child(1) {
-      width: 280px;
+      width: 250px;
     }
 
     #companies-view th:nth-child(2),
     #companies-view td:nth-child(2) {
-      width: 120px;
+      width: 100px;
     }
 
     #companies-view th:nth-child(3),
     #companies-view td:nth-child(3) {
-      width: 120px;
+      width: 105px;
     }
 
     #companies-view th:nth-child(4),
     #companies-view td:nth-child(4) {
-      width: 390px;
+      width: 120px;
     }
 
     #companies-view th:nth-child(5),
     #companies-view td:nth-child(5) {
-      width: 130px;
+      width: 140px;
+    }
+
+    #companies-view th:nth-child(6),
+    #companies-view td:nth-child(6) {
+      width: 105px;
     }
 
     #candidates-view th:nth-child(1),
@@ -1828,37 +1833,50 @@
 
     #candidates-view .discovery-table th:nth-child(1),
     #candidates-view .discovery-table td:nth-child(1) {
-      width: 29%;
+      width: 23%;
     }
 
     #candidates-view .discovery-table th:nth-child(2),
     #candidates-view .discovery-table td:nth-child(2) {
-      width: 14%;
+      width: 10%;
     }
 
     #candidates-view .discovery-table th:nth-child(3),
     #candidates-view .discovery-table td:nth-child(3) {
-      width: 24%;
+      width: 12%;
     }
 
     #candidates-view .discovery-table th:nth-child(4),
     #candidates-view .discovery-table td:nth-child(4) {
-      width: 9%;
+      width: 10%;
     }
 
     #candidates-view .discovery-table th:nth-child(5),
     #candidates-view .discovery-table td:nth-child(5) {
-      width: 8%;
+      width: 7%;
     }
 
     #candidates-view .discovery-table th:nth-child(6),
     #candidates-view .discovery-table td:nth-child(6) {
-      width: 16%;
+      width: 9%;
     }
 
-    .discovery-fit-cell .cell-subtle {
-      white-space: normal;
-      line-height: 1.35;
+    #candidates-view .discovery-table th:nth-child(7),
+    #candidates-view .discovery-table td:nth-child(7) {
+      width: 8%;
+    }
+
+    #candidates-view .discovery-table th:nth-child(8),
+    #candidates-view .discovery-table td:nth-child(8) {
+      width: 21%;
+    }
+
+    .discovery-metadata-cell {
+      overflow: hidden;
+      color: var(--muted);
+      font-size: 11px;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }
 
     .pill.discovery-ready {
@@ -3478,6 +3496,13 @@
       font-size: 12px;
     }
 
+    .company-aliases {
+      display: block;
+      margin-top: 2px;
+      color: var(--muted);
+      font-size: 11px;
+    }
+
     .company-interest {
       flex: 0 0 auto;
       padding: 3px 7px;
@@ -3488,6 +3513,32 @@
       font-weight: 820;
       letter-spacing: 0.02em;
       text-transform: uppercase;
+    }
+
+    .company-tracking {
+      display: inline-flex;
+      align-items: center;
+      width: max-content;
+      padding: 3px 7px;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      color: var(--muted);
+      font-size: 10px;
+      font-weight: 800;
+      letter-spacing: .04em;
+      text-transform: uppercase;
+    }
+
+    .company-tracking.tracked {
+      border-color: color-mix(in srgb, var(--accent) 30%, var(--border));
+      background: color-mix(in srgb, var(--accent) 8%, var(--surface));
+      color: var(--accent);
+    }
+
+    .company-tracking.discovered {
+      border-color: color-mix(in srgb, var(--amber) 32%, var(--border));
+      background: var(--amber-soft);
+      color: var(--amber);
     }
 
     .company-interest.interested {
@@ -3743,6 +3794,99 @@
     .company-form .button[type="submit"] {
       justify-content: center;
       width: 100%;
+    }
+
+    .company-metadata-source {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 9px 10px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--surface);
+      color: var(--muted);
+      font-size: 11px;
+    }
+
+    .company-metadata-source a {
+      flex: 0 0 auto;
+      color: var(--accent);
+      font-weight: 700;
+      text-decoration: none;
+    }
+
+    .company-suggestions-panel {
+      border-color: color-mix(in srgb, var(--accent) 25%, var(--border));
+    }
+
+    .company-tracking-suggestion {
+      display: grid;
+      gap: 10px;
+      padding: 10px;
+      border-radius: 8px;
+      background: color-mix(in srgb, var(--accent) 7%, var(--surface));
+    }
+
+    .company-tracking-suggestion p {
+      margin: 0;
+      color: var(--text);
+      font-size: 12px;
+      line-height: 1.45;
+    }
+
+    .company-tracking-suggestion .button {
+      width: max-content;
+    }
+
+    .company-metadata-suggestions {
+      display: grid;
+      gap: 9px;
+      margin-top: 10px;
+    }
+
+    .company-metadata-suggestion {
+      display: grid;
+      gap: 7px;
+      padding: 10px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--surface);
+    }
+
+    .company-metadata-suggestion > div:not(.company-suggestion-actions) {
+      display: grid;
+      grid-template-columns: 72px minmax(0, 1fr);
+      gap: 7px;
+      align-items: baseline;
+    }
+
+    .company-metadata-suggestion span {
+      color: var(--muted);
+      font-size: 10px;
+      font-weight: 700;
+      text-transform: uppercase;
+    }
+
+    .company-metadata-suggestion p {
+      margin: 0;
+      overflow-wrap: anywhere;
+      color: var(--text);
+      font-size: 11px;
+      line-height: 1.4;
+    }
+
+    .company-metadata-suggestion > a {
+      color: var(--accent);
+      font-size: 11px;
+      font-weight: 700;
+      text-decoration: none;
+    }
+
+    .company-suggestion-actions {
+      display: flex;
+      gap: 7px;
+      margin-top: 2px;
     }
 
     .company-record-actions {

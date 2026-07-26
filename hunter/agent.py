@@ -30,6 +30,9 @@ MUTATING_TOOLS = {
     "hunter_upsert_company",
     "hunter_archive_company",
     "hunter_restore_company",
+    "hunter_research_company",
+    "hunter_track_company",
+    "hunter_resolve_company_metadata_suggestion",
     "hunter_check_company_postings",
     "hunter_link_company_contact",
     "hunter_unlink_company_contact",
@@ -57,9 +60,15 @@ directly. If the user says they submitted or applied to a posting, set stage to
 application-submitted and date_applied to today unless they provide a specific
 date. Closed postings use stage=closed plus an outcome such as rejected,
 withdrawn, accepted, declined, archived, or closed-posting.
-Companies are managed records with careers URLs, interest status, contacts, and
-posting candidates. Use company tools for company-level updates, archiving or
-restoring companies, and manual careers-page checks.
+Companies are local records with two distinct tracking states. Discovery
+companies were encountered while finding roles; tracked companies were
+explicitly promoted into Companies career-page workflows. Use
+hunter_research_company to fill blank company fields from the signed-in browser
+and create reviewable suggestions when source-backed values conflict with
+existing data. Never claim a suggestion changed the record until
+hunter_resolve_company_metadata_suggestion applies it. Use hunter_track_company
+when the user approves promoting a discovered company. Careers-page checks are
+for tracked companies only.
 If the user asks to update Search Goals or fit settings, use Hunter settings
 tools instead of only remembering the preference in the conversation.
 Use the compact local fit profile for ordinary fit/recommendation answers. If
@@ -208,6 +217,15 @@ def _tool_receipt(name, arguments):
         return f'Ingested {arguments.get("id", "the candidate")} as a tracked posting.'
     if name == "hunter_check_company_postings":
         return f'Checked the careers page for {arguments.get("id", "the company")}.'
+    if name == "hunter_research_company":
+        return f'Researched {arguments.get("id", "the company")} and saved source-backed findings locally.'
+    if name == "hunter_track_company":
+        return f'Promoted {arguments.get("id", "the company")} into explicit company tracking.'
+    if name == "hunter_resolve_company_metadata_suggestion":
+        return (
+            f'{arguments.get("action", "Resolved").capitalize()} the selected company '
+            "information suggestion."
+        )
     if name in {"hunter_upsert_contact", "hunter_link_contact", "hunter_unlink_contact"}:
         return "Updated your local contact relationships."
     if name in {

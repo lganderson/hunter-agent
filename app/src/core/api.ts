@@ -224,6 +224,41 @@ export function restoreCompany(id: string, interestStatus = "neutral"): Promise<
   return postJson<{ company: Company }>("/api/companies/restore", { id, interest_status: interestStatus });
 }
 
+export type CompanyMetadataSuggestion = {
+  id: string;
+  field: "industry" | "company_size" | "company_profile_url" | "website";
+  current: string;
+  suggested: string;
+  source_url: string;
+  reason: string;
+  observed_at: string;
+};
+
+export function researchCompany(id: string): Promise<{
+  company: Company;
+  applied_fields: string[];
+  suggestions: CompanyMetadataSuggestion[];
+  source_url: string;
+}> {
+  return postJson("/api/companies/research", { id });
+}
+
+export function trackCompany(id: string): Promise<{ company: Company }> {
+  return postJson<{ company: Company }>("/api/companies/track", { id });
+}
+
+export function resolveCompanyMetadataSuggestion(
+  id: string,
+  suggestionId: string,
+  action: "apply" | "dismiss"
+): Promise<{ company: Company }> {
+  return postJson<{ company: Company }>("/api/companies/metadata-suggestions/resolve", {
+    id,
+    suggestion_id: suggestionId,
+    action
+  });
+}
+
 export type CompanyCheckResult = {
   company: Company;
   career_source: CompanyCareerSource | null;

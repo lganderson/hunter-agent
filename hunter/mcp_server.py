@@ -366,10 +366,13 @@ def tool_unlink_contact(args):
 def tool_list_companies(args):
     search = storage.clean(args.get("search", "")).lower()
     interest_status = storage.clean(args.get("interest_status", "")).lower()
+    tracking_status = storage.clean(args.get("tracking_status", "")).lower()
     limit = requested_limit(args, default=50)
     rows = []
     for company in company_store.list_companies():
         if interest_status and company.get("interest_status", "").lower() != interest_status:
+            continue
+        if tracking_status and company.get("tracking_status", "").lower() != tracking_status:
             continue
         haystack = " ".join(compact_company(company).values()).lower()
         if search and search not in haystack:
@@ -423,6 +426,32 @@ def tool_archive_company(args):
 def tool_restore_company(args):
     company = company_store.restore_company(args.get("id", ""), args.get("interest_status", "neutral"))
     return text_result({"company": compact_company(company)})
+
+
+def tool_research_company(args):
+    result = company_store.research_company(args.get("id", ""))
+    return text_result(
+        {
+            "company": compact_company(result["company"], detail=True),
+            "applied_fields": result.get("applied_fields", []),
+            "suggestions": result.get("suggestions", []),
+            "source_url": result.get("source_url", ""),
+        }
+    )
+
+
+def tool_track_company(args):
+    company = company_store.track_company(args.get("id", ""))
+    return text_result({"company": compact_company(company)})
+
+
+def tool_resolve_company_metadata_suggestion(args):
+    company = company_store.resolve_company_metadata_suggestion(
+        args.get("id", ""),
+        args.get("suggestion_id", ""),
+        args.get("action", ""),
+    )
+    return text_result({"company": compact_company(company, detail=True)})
 
 
 def tool_check_company_postings(args):
@@ -834,12 +863,13 @@ TOOLS = {
         "handler": tool_unlink_contact,
     },
     "hunter_list_companies": {
-        "description": "List managed Hunter companies with optional search and interest filters.",
+        "description": "List local Hunter companies, including explicitly tracked companies and employers encountered through Discovery.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "search": {"type": "string"},
                 "interest_status": {"type": "string", "enum": sorted(schema.COMPANY_INTEREST_STATUSES)},
+                "tracking_status": {"type": "string", "enum": sorted(schema.COMPANY_TRACKING_STATUSES)},
                 "limit": {"type": "integer", "minimum": 1, "maximum": 100},
             },
         },
@@ -870,8 +900,12 @@ TOOLS = {
                         "name": {"type": "string"},
                         "aliases": {"type": "string"},
                         "interest_status": {"type": "string", "enum": sorted(schema.COMPANY_INTEREST_STATUSES)},
+                        "tracking_status": {"type": "string", "enum": sorted(schema.COMPANY_TRACKING_STATUSES)},
                         "website": {"type": "string"},
                         "careers_url": {"type": "string"},
+                        "industry": {"type": "string"},
+                        "company_size": {"type": "string"},
+                        "company_profile_url": {"type": "string"},
                         "notes": {"type": "string"},
                     },
                     "additionalProperties": False,
@@ -901,6 +935,37 @@ TOOLS = {
             "required": ["id"],
         },
         "handler": tool_restore_company,
+    },
+    "hunter_research_company": {
+        "description": "Use the signed-in Hunter Chrome profile to research a company. Blank fields are filled automatically; conflicting source-backed values are saved as reviewable suggestions.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"id": {"type": "string"}},
+            "required": ["id"],
+        },
+        "handler": tool_research_company,
+    },
+    "hunter_track_company": {
+        "description": "Promote a company encountered through Discovery into the explicitly tracked set used by Companies career-page workflows.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"id": {"type": "string"}},
+            "required": ["id"],
+        },
+        "handler": tool_track_company,
+    },
+    "hunter_resolve_company_metadata_suggestion": {
+        "description": "Apply or dismiss one source-backed company metadata suggestion after review.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "id": {"type": "string"},
+                "suggestion_id": {"type": "string"},
+                "action": {"type": "string", "enum": ["apply", "dismiss"]},
+            },
+            "required": ["id", "suggestion_id", "action"],
+        },
+        "handler": tool_resolve_company_metadata_suggestion,
     },
     "hunter_check_company_postings": {
         "description": "Manually check a company's careers URL and record new posting candidates for review. Returns capped candidate summaries with counts.",

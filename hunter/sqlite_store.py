@@ -215,12 +215,17 @@ def discovery_candidates_table_sql(table="discovery_candidates", if_not_exists=T
         f"CREATE TABLE {qualifier}{table} ("
         "id TEXT PRIMARY KEY, "
         "search_id TEXT NOT NULL DEFAULT '', "
+        "company_id TEXT NOT NULL DEFAULT '', "
         "company TEXT NOT NULL DEFAULT '', "
         "title TEXT NOT NULL DEFAULT '', "
         "url TEXT NOT NULL DEFAULT '', "
         "canonical_url TEXT NOT NULL DEFAULT '', "
         "location TEXT NOT NULL DEFAULT '', "
         "work_mode TEXT NOT NULL DEFAULT '', "
+        "company_industry TEXT NOT NULL DEFAULT '', "
+        "company_size TEXT NOT NULL DEFAULT '', "
+        "company_profile_url TEXT NOT NULL DEFAULT '', "
+        "company_metadata_source TEXT NOT NULL DEFAULT '', "
         "source_platform TEXT NOT NULL DEFAULT '', "
         "captured_at TEXT NOT NULL DEFAULT '', "
         "last_seen_at TEXT NOT NULL DEFAULT '', "
@@ -405,12 +410,27 @@ def initialize():
             "name TEXT NOT NULL DEFAULT '', "
             "aliases TEXT NOT NULL DEFAULT '', "
             "interest_status TEXT NOT NULL DEFAULT 'neutral', "
+            "tracking_status TEXT NOT NULL DEFAULT 'tracked', "
+            "discovered_at TEXT NOT NULL DEFAULT '', "
+            "last_seen_at TEXT NOT NULL DEFAULT '', "
             "website TEXT NOT NULL DEFAULT '', "
             "careers_url TEXT NOT NULL DEFAULT '', "
+            "industry TEXT NOT NULL DEFAULT '', "
+            "company_size TEXT NOT NULL DEFAULT '', "
+            "company_profile_url TEXT NOT NULL DEFAULT '', "
+            "company_metadata_source TEXT NOT NULL DEFAULT '', "
+            "company_metadata_checked_at TEXT NOT NULL DEFAULT '', "
+            "company_metadata_suggestions_json TEXT NOT NULL DEFAULT '[]', "
+            "company_research_status TEXT NOT NULL DEFAULT '', "
             "notes TEXT NOT NULL DEFAULT '', "
             "last_checked_at TEXT NOT NULL DEFAULT '', "
             "last_check_status TEXT NOT NULL DEFAULT ''"
             ")"
+        )
+        ensure_text_columns(connection, "companies", schema.COMPANY_FIELDS)
+        connection.execute(
+            "UPDATE companies SET tracking_status = 'tracked' "
+            "WHERE trim(tracking_status) = ''"
         )
         connection.execute(
             "CREATE TABLE IF NOT EXISTS company_contacts ("
@@ -493,7 +513,7 @@ def initialize():
         ensure_text_columns(connection, "discovery_candidates", schema.DISCOVERY_CANDIDATE_FIELDS)
         migrate_discovery_candidates_constraint(connection)
         connection.execute(
-            "INSERT INTO meta(key, value) VALUES('schema_version', '12') "
+            "INSERT INTO meta(key, value) VALUES('schema_version', '14') "
             "ON CONFLICT(key) DO UPDATE SET value=excluded.value"
         )
 

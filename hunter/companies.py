@@ -20,8 +20,12 @@ EDITABLE_FIELDS = {
     "name",
     "aliases",
     "interest_status",
+    "tracking_status",
     "website",
     "careers_url",
+    "industry",
+    "company_size",
+    "company_profile_url",
     "notes",
 }
 JOB_BOARD_HOST_MARKERS = {
@@ -116,6 +120,84 @@ def normalize_aliases(value):
     return ", ".join(split_aliases(value))
 
 
+def normalize_company_industry(value):
+    if isinstance(value, list):
+        values = [storage.clean(str(item or "")) for item in value]
+        return ", ".join(dict.fromkeys(item for item in values if item))
+    return storage.clean(str(value or ""))
+
+
+def normalize_company_profile_url(value):
+    normalized = normalize_url(str(value or ""))
+    parsed = urlparse(normalized)
+    if "linkedin.com" not in parsed.netloc.lower():
+        return normalized
+    match = re.search(r"/company/([^/?#]+)", parsed.path, re.I)
+    if not match:
+        return normalized
+    return f"https://www.linkedin.com/company/{match.group(1)}"
+
+
+def normalize_company_size(value):
+    if isinstance(value, dict):
+        minimum = storage.clean(str(value.get("minValue", "") or ""))
+        maximum = storage.clean(str(value.get("maxValue", "") or ""))
+        exact = storage.clean(str(value.get("value", "") or ""))
+        if minimum and maximum:
+            value = f"{minimum}–{maximum}"
+        else:
+            value = exact or minimum or maximum
+    cleaned = storage.clean(str(value or ""))
+    if not cleaned:
+        return ""
+    cleaned = re.sub(r"\s*(?:employees?|people)\s*$", "", cleaned, flags=re.I).strip()
+    cleaned = re.sub(r"\s*[-–]\s*", "–", cleaned)
+    if not re.search(r"\d", cleaned):
+        return ""
+    return f"{cleaned} employees"
+
+
+def structured_company_metadata(page_html, job=None):
+    objects = json_ld_objects(page_html)
+    hiring = job.get("hiringOrganization") if isinstance(job, dict) else {}
+    organizations = [hiring] if isinstance(hiring, dict) else []
+    hiring_name = normalized_key(hiring.get("name", "")) if isinstance(hiring, dict) else ""
+    for item in objects:
+        item_type = item.get("@type", "")
+        item_types = item_type if isinstance(item_type, list) else [item_type]
+        if not any(value in {"Organization", "Corporation", "LocalBusiness"} for value in item_types):
+            continue
+        item_name = normalized_key(item.get("name", ""))
+        if hiring_name and item_name and item_name != hiring_name:
+            continue
+        organizations.append(item)
+
+    industry = ""
+    company_size = ""
+    profile_url = ""
+    for organization in organizations:
+        if not industry:
+            industry = normalize_company_industry(
+                organization.get("industry")
+                or organization.get("naics")
+            )
+        if not company_size:
+            company_size = normalize_company_size(
+                organization.get("numberOfEmployees")
+                or organization.get("employees")
+            )
+        if not profile_url:
+            same_as = organization.get("sameAs") or organization.get("url") or ""
+            if isinstance(same_as, list):
+                same_as = next((value for value in same_as if storage.clean(str(value or ""))), "")
+            profile_url = normalize_company_profile_url(str(same_as or ""))
+    return {
+        "company_industry": industry,
+        "company_size": company_size,
+        "company_profile_url": profile_url,
+    }
+
+
 def company_keys(company):
     keys = {normalized_key(company.get("name", ""))}
     keys.update(normalized_key(alias) for alias in split_aliases(company.get("aliases", "")))
@@ -144,6 +226,13 @@ def validate_interest_status(value):
     status = storage.clean(value).lower() or schema.DEFAULT_COMPANY_INTEREST_STATUS
     if status not in schema.COMPANY_INTEREST_STATUSES:
         raise ValueError(f"Unsupported company interest status: {status}")
+    return status
+
+
+def validate_tracking_status(value):
+    status = storage.clean(value).lower() or schema.DEFAULT_COMPANY_TRACKING_STATUS
+    if status not in schema.COMPANY_TRACKING_STATUSES:
+        raise ValueError(f"Unsupported company tracking status: {status}")
     return status
 
 
@@ -178,8 +267,11 @@ def upsert_company(company_id="", updates=None):
         row = {field: "" for field in schema.COMPANY_FIELDS}
         row["id"] = next_company_id(rows)
         row["interest_status"] = schema.DEFAULT_COMPANY_INTEREST_STATUS
+        row["tracking_status"] = schema.DEFAULT_COMPANY_TRACKING_STATUS
+        row["company_metadata_suggestions_json"] = "[]"
         rows.append(row)
 
+    metadata_changed_fields = set()
     for field, value in (updates or {}).items():
         if field not in EDITABLE_FIELDS:
             continue
@@ -187,14 +279,303 @@ def upsert_company(company_id="", updates=None):
             row[field] = normalize_aliases(value)
         elif field == "interest_status":
             row[field] = validate_interest_status(value)
+        elif field == "tracking_status":
+            row[field] = validate_tracking_status(value)
+        elif field == "industry":
+            cleaned = normalize_company_industry(value)
+            if cleaned != row.get(field, ""):
+                metadata_changed_fields.add(field)
+            row[field] = cleaned
+        elif field == "company_size":
+            cleaned = normalize_company_size(value)
+            if cleaned != row.get(field, ""):
+                metadata_changed_fields.add(field)
+            row[field] = cleaned
+        elif field == "company_profile_url":
+            cleaned = normalize_company_profile_url(value)
+            if cleaned != row.get(field, ""):
+                metadata_changed_fields.add(field)
+            row[field] = cleaned
+        elif field == "website":
+            cleaned = normalize_url(value)
+            if cleaned != row.get(field, ""):
+                metadata_changed_fields.add(field)
+            row[field] = cleaned
         else:
             row[field] = storage.clean(value)
 
     if not row.get("name"):
         raise ValueError("Company name is required.")
+    if metadata_changed_fields:
+        row["company_metadata_source"] = "manual"
+        row["company_metadata_checked_at"] = now_iso()
+        row["company_metadata_suggestions_json"] = json.dumps(
+            [
+                item
+                for item in company_metadata_suggestions(row)
+                if item.get("field", "") not in metadata_changed_fields
+            ],
+            ensure_ascii=False,
+            sort_keys=True,
+        )
 
     repository.write_companies(rows)
     associate_matching_postings(row.get("id", ""))
+    return get_company(row.get("id", ""))
+
+
+def company_metadata_suggestions(company):
+    try:
+        suggestions = json.loads(company.get("company_metadata_suggestions_json", "") or "[]")
+    except (TypeError, ValueError):
+        return []
+    return [item for item in suggestions if isinstance(item, dict)]
+
+
+def company_metadata_value(field, value):
+    if field == "industry":
+        return normalize_company_industry(value)
+    if field == "company_size":
+        return normalize_company_size(value)
+    if field in {"company_profile_url", "website"}:
+        if field == "company_profile_url":
+            return normalize_company_profile_url(value)
+        return normalize_url(str(value or ""))
+    return storage.clean(str(value or ""))
+
+
+def company_metadata_suggestion(field, current, suggested, source_url, observed_at):
+    identity = hashlib.sha256(
+        f"{field}|{suggested}|{source_url}".encode("utf-8")
+    ).hexdigest()[:16]
+    return {
+        "id": identity,
+        "field": field,
+        "current": current,
+        "suggested": suggested,
+        "source_url": source_url,
+        "reason": "Hunter found a different source-backed value.",
+        "observed_at": observed_at,
+    }
+
+
+def update_company_metadata(company_id, metadata=None, source_url="", checked_at=""):
+    rows = repository.read_companies()
+    wanted = storage.clean(company_id).upper()
+    row = next((item for item in rows if item.get("id", "").upper() == wanted), None)
+    if row is None:
+        raise ValueError(f"No company found with id {company_id}.")
+
+    incoming = metadata or {}
+    normalized = {
+        "industry": company_metadata_value(
+            "industry",
+            incoming.get("company_industry") or incoming.get("industry"),
+        ),
+        "company_size": company_metadata_value("company_size", incoming.get("company_size")),
+        "company_profile_url": company_metadata_value(
+            "company_profile_url",
+            incoming.get("company_profile_url", ""),
+        ),
+        "website": company_metadata_value("website", incoming.get("website", "")),
+    }
+    observed_at = storage.clean(checked_at) or now_iso()
+    cleaned_source = storage.clean(source_url)
+    normalized_source = "manual" if cleaned_source == "manual" else normalize_url(cleaned_source)
+    suggestions = company_metadata_suggestions(row)
+    suggestions_by_field = {item.get("field", ""): item for item in suggestions}
+    changed = False
+    for field, value in normalized.items():
+        current = company_metadata_value(field, row.get(field, ""))
+        if not value or value == current:
+            continue
+        if not current:
+            row[field] = value
+            changed = True
+            suggestions_by_field.pop(field, None)
+            continue
+        suggestions_by_field[field] = company_metadata_suggestion(
+            field,
+            current,
+            value,
+            normalized_source,
+            observed_at,
+        )
+    new_suggestions = list(suggestions_by_field.values())
+    suggestions_changed = new_suggestions != suggestions
+    if changed or suggestions_changed:
+        if changed:
+            row["company_metadata_source"] = normalized_source
+            row["company_metadata_checked_at"] = observed_at
+        row["company_metadata_suggestions_json"] = json.dumps(
+            new_suggestions,
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        repository.write_companies(rows)
+    return get_company(row.get("id", ""))
+
+
+def company_domain(value):
+    host = urlparse(normalize_url(value)).netloc.lower().removeprefix("www.")
+    return host
+
+
+def matching_company_record(name="", profile_url="", website=""):
+    wanted_name = normalized_key(name)
+    wanted_profile = normalize_company_profile_url(profile_url)
+    wanted_domain = company_domain(website)
+    for company in repository.read_companies():
+        if wanted_name and wanted_name in company_keys(company):
+            return company
+        if (
+            wanted_profile
+            and normalize_company_profile_url(company.get("company_profile_url", "")) == wanted_profile
+        ):
+            return company
+        if wanted_domain and company_domain(company.get("website", "")) == wanted_domain:
+            return company
+    return None
+
+
+def record_discovered_company(metadata, seen_at=""):
+    name = storage.clean(metadata.get("company", "") or metadata.get("name", ""))
+    if not name:
+        return None
+    timestamp = storage.clean(seen_at) or now_iso()
+    company = matching_company_record(
+        name,
+        metadata.get("company_profile_url", ""),
+        metadata.get("website", ""),
+    )
+    if company is None:
+        company = upsert_company(
+            "",
+            {
+                "name": name,
+                "tracking_status": "discovered",
+            },
+        )
+
+    rows = repository.read_companies()
+    row = next(item for item in rows if item.get("id", "") == company.get("id", ""))
+    row["discovered_at"] = row.get("discovered_at", "") or timestamp
+    row["last_seen_at"] = max(row.get("last_seen_at", ""), timestamp)
+    repository.write_companies(rows)
+    return update_company_metadata(
+        company.get("id", ""),
+        metadata,
+        source_url=metadata.get("company_metadata_source")
+        or metadata.get("canonical_url")
+        or metadata.get("url", ""),
+        checked_at=timestamp,
+    )
+
+
+def track_company(company_id):
+    return upsert_company(company_id, {"tracking_status": "tracked"})
+
+
+def set_company_research_status(company_id, status):
+    rows = repository.read_companies()
+    wanted = storage.clean(company_id).upper()
+    row = next((item for item in rows if item.get("id", "").upper() == wanted), None)
+    if row is None:
+        raise ValueError(f"No company found with id {company_id}.")
+    row["company_research_status"] = storage.clean(status)
+    repository.write_companies(rows)
+    return get_company(row.get("id", ""))
+
+
+def research_company(company_id, researcher=None):
+    company = get_company(company_id)
+    if researcher is None:
+        from . import browser_discovery
+
+        browser = browser_discovery.HunterChrome()
+        browser.find_window()
+        researcher = browser.company
+    before = dict(company)
+    before_suggestion_ids = {
+        item.get("id", "")
+        for item in company_metadata_suggestions(company)
+    }
+    try:
+        researched = researcher(
+            company.get("name", ""),
+            company.get("company_profile_url", ""),
+        ) or {}
+    except RuntimeError as exc:
+        set_company_research_status(company_id, f"error: {storage.clean(str(exc))}")
+        raise
+    source_url = (
+        researched.get("company_metadata_source")
+        or researched.get("company_profile_url")
+        or company.get("company_profile_url", "")
+    )
+    updated = update_company_metadata(
+        company_id,
+        researched,
+        source_url=source_url,
+        checked_at=now_iso(),
+    )
+    fields = ["industry", "company_size", "company_profile_url", "website"]
+    applied_fields = [
+        field
+        for field in fields
+        if updated.get(field, "") and updated.get(field, "") != before.get(field, "")
+    ]
+    suggestions = company_metadata_suggestions(updated)
+    new_suggestions = [
+        item
+        for item in suggestions
+        if item.get("id", "") not in before_suggestion_ids
+    ]
+    if applied_fields or new_suggestions:
+        status = (
+            f"ok: filled {len(applied_fields)}, "
+            f"suggested {len(new_suggestions)}"
+        )
+    else:
+        status = "ok: no new company information"
+    updated = set_company_research_status(company_id, status)
+    return {
+        "company": updated,
+        "applied_fields": applied_fields,
+        "suggestions": new_suggestions,
+        "source_url": storage.clean(source_url),
+    }
+
+
+def resolve_company_metadata_suggestion(company_id, suggestion_id, action):
+    rows = repository.read_companies()
+    wanted = storage.clean(company_id).upper()
+    row = next((item for item in rows if item.get("id", "").upper() == wanted), None)
+    if row is None:
+        raise ValueError(f"No company found with id {company_id}.")
+    suggestions = company_metadata_suggestions(row)
+    suggestion = next(
+        (item for item in suggestions if item.get("id", "") == storage.clean(suggestion_id)),
+        None,
+    )
+    if suggestion is None:
+        raise ValueError("Company metadata suggestion was not found.")
+    normalized_action = storage.clean(action).lower()
+    if normalized_action not in {"apply", "dismiss"}:
+        raise ValueError("Suggestion action must be apply or dismiss.")
+    if normalized_action == "apply":
+        field = suggestion.get("field", "")
+        if field not in {"industry", "company_size", "company_profile_url", "website"}:
+            raise ValueError(f"Unsupported company metadata field: {field}")
+        row[field] = company_metadata_value(field, suggestion.get("suggested", ""))
+        row["company_metadata_source"] = storage.clean(suggestion.get("source_url", ""))
+        row["company_metadata_checked_at"] = now_iso()
+    row["company_metadata_suggestions_json"] = json.dumps(
+        [item for item in suggestions if item.get("id", "") != suggestion.get("id", "")],
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    repository.write_companies(rows)
     return get_company(row.get("id", ""))
 
 
@@ -247,7 +628,10 @@ def unlink_contact(company_id, contact_id):
 
 
 def normalize_url(value):
-    parsed = urlparse((value or "").strip())
+    cleaned = (value or "").strip()
+    if not cleaned:
+        return ""
+    parsed = urlparse(cleaned)
     scheme = "https" if parsed.scheme.lower() in {"http", "https", ""} else parsed.scheme.lower()
     ignored_query_prefixes = {"utm_"}
     ignored_query_keys = set()
@@ -2700,6 +3084,20 @@ def enrich_workday_cxs_candidate(candidate, fetch):
     extra_location = storage.clean(str(info.get("location", "") or info.get("locationsText", "") or ""))
     if extra_location:
         enriched["location"] = ", ".join(dict.fromkeys([candidate.get("location", ""), extra_location]))
+    hiring_profile = hiring.get("sameAs") or hiring.get("url") or ""
+    if isinstance(hiring_profile, list):
+        hiring_profile = next((value for value in hiring_profile if storage.clean(str(value or ""))), "")
+    enriched.update(
+        {
+            "company_industry": normalize_company_industry(
+                hiring.get("industry") or hiring.get("naics")
+            ),
+            "company_size": normalize_company_size(
+                hiring.get("numberOfEmployees") or hiring.get("employees")
+            ),
+            "company_profile_url": normalize_url(str(hiring_profile or "")),
+        }
+    )
     enriched["search_text"] = " ".join(
         part
         for part in [
@@ -4523,6 +4921,8 @@ def career_sources_equivalent(left, right):
 
 def check_company_postings(company_id, fetcher=None):
     company = get_company(company_id)
+    if company.get("tracking_status", "").lower() != "tracked":
+        raise ValueError("Track this discovered company before checking its careers page.")
     careers_url = storage.clean(company.get("careers_url", ""))
     if not careers_url:
         raise ValueError("Company careers_url is required before checking postings.")
@@ -4747,6 +5147,9 @@ def check_all_company_postings(fetcher=None):
     errors = []
     for company in repository.read_companies():
         company_id = company.get("id", "")
+        if company.get("tracking_status", "").lower() != "tracked":
+            skipped.append({"company": company, "reason": "not tracked"})
+            continue
         if company.get("interest_status", "").lower() == "archived":
             skipped.append({"company": company, "reason": "archived"})
             continue

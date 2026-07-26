@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 from urllib.parse import quote, unquote_plus
 
-from hunter import app_state, browser_discovery, discovery, paths, repository, sqlite_store
+from hunter import app_state, browser_discovery, companies, discovery, paths, repository, sqlite_store
 
 
 class HunterDiscoveryTest(unittest.TestCase):
@@ -195,7 +195,12 @@ class HunterDiscoveryTest(unittest.TestCase):
             "@type": "JobPosting",
             "title": "Senior Technical Program Manager",
             "description": "Lead developer platform programs and cross-functional launches.",
-            "hiringOrganization": {"name": "Example Labs"},
+            "hiringOrganization": {
+              "name": "Example Labs",
+              "industry": "Software Development",
+              "numberOfEmployees": {"minValue": 201, "maxValue": 500},
+              "sameAs": "https://www.linkedin.com/company/example-labs"
+            },
             "jobLocation": {"address": {"addressLocality": "Minneapolis", "addressRegion": "MN"}}
           }
         </script></head></html>
@@ -221,6 +226,9 @@ class HunterDiscoveryTest(unittest.TestCase):
         linkedin = next(candidate for candidate in result["captured"] if candidate["source_platform"] == "linkedin")
         self.assertEqual(linkedin["company"], "Network Company")
         self.assertEqual(linkedin["processing_status"], "partial")
+        employer = next(candidate for candidate in result["captured"] if candidate["source_platform"] == "ashby")
+        self.assertEqual(employer["company_industry"], "Software Development")
+        self.assertEqual(employer["company_size"], "201–500 employees")
 
         rerun = discovery.run_search(
             search["id"],
@@ -380,6 +388,10 @@ class HunterDiscoveryTest(unittest.TestCase):
                 "title": "Technical Program Manager, Platform",
                 "company": "Example Labs",
                 "location": "Remote; United States",
+                "company_industry": "Software Development",
+                "company_size": "51-200 employees",
+                "company_profile_url": "https://www.linkedin.com/company/example-labs",
+                "company_metadata_source": linkedin_url,
                 "description_text": details_text,
             },
         )
@@ -388,9 +400,65 @@ class HunterDiscoveryTest(unittest.TestCase):
         self.assertEqual(result["enriched_count"], 1)
         self.assertEqual(candidate["processing_status"], "ready")
         self.assertEqual(candidate["location"], "Remote; United States")
+        self.assertEqual(candidate["company_industry"], "Software Development")
+        self.assertEqual(candidate["company_size"], "51–200 employees")
         self.assertNotIn(discovery.LINKEDIN_DETAILS_WARNING, candidate["warnings"])
         self.assertTrue(result["search"]["last_run_at"])
         self.assertEqual(result["search"]["last_run_summary"]["enriched_count"], 1)
+
+    def test_search_researches_missing_company_information_and_links_company(self):
+        search = self.save_search("Technical platforms", "technical program manager")
+        linkedin_url = "https://www.linkedin.com/jobs/view/1234567890"
+        research_calls = []
+        details_text = (
+            "Lead technical platform programs across planning, execution, dependency management, risk reviews, "
+            "stakeholder communication, launch readiness, operating mechanisms, and continuous improvement. "
+            "Partner with product and engineering teams to translate customer needs into clear requirements, "
+            "measurable milestones, and durable delivery systems across distributed engineering teams."
+        )
+
+        result = discovery.run_search(
+            search["id"],
+            browser_searcher=lambda engine, value, page: (
+                [{
+                    "url": linkedin_url,
+                    "title": "Technical Program Manager",
+                    "company": "Example Labs",
+                    "location": "United States",
+                    "snippet": "Remote technical program role.",
+                }]
+                if engine == "linkedin"
+                else []
+            ),
+            browser_detailer=lambda url: {
+                "title": "Technical Program Manager, Platform",
+                "company": "Example Labs",
+                "location": "Remote; United States",
+                "description_text": details_text,
+            },
+            company_researcher=lambda name, profile: (
+                research_calls.append((name, profile))
+                or {
+                    "company_industry": "Software Development",
+                    "company_size": "201-500 employees",
+                    "company_profile_url": "https://www.linkedin.com/company/example-labs/about/",
+                    "company_metadata_source": "https://www.linkedin.com/company/example-labs/about/",
+                }
+            ),
+        )
+
+        candidate = result["captured"][0]
+        company = companies.get_company(candidate["company_id"])
+        self.assertEqual(research_calls, [("Example Labs", "")])
+        self.assertEqual(result["company_researched_count"], 1)
+        self.assertEqual(result["company_suggestion_count"], 0)
+        self.assertEqual(company["tracking_status"], "discovered")
+        self.assertEqual(company["industry"], "Software Development")
+        self.assertEqual(candidate["company_size"], "201–500 employees")
+        self.assertEqual(
+            candidate["company_profile_url"],
+            "https://www.linkedin.com/company/example-labs",
+        )
 
     def test_workday_redirect_payload_is_not_ready(self):
         candidate = {
@@ -541,7 +609,12 @@ class HunterDiscoveryTest(unittest.TestCase):
             "@type": "JobPosting",
             "title": "Senior Technical Program Manager, Developer Platform",
             "description": "Own the developer platform roadmap, customer workflows, requirements, and cross-functional launch. Lead planning, execution, risk management, technical dependency reviews, stakeholder communication, release readiness, operational mechanisms, and continuous improvement across multiple engineering teams. Translate customer needs into durable program requirements and measurable delivery outcomes. Partner with product and engineering leaders to define milestones, resolve ambiguity, and communicate progress. Build repeatable mechanisms for roadmap planning, launch governance, and post-launch learning.",
-            "hiringOrganization": {"name": "Example Labs"},
+            "hiringOrganization": {
+              "name": "Example Labs",
+              "industry": "Software Development",
+              "numberOfEmployees": "201-500",
+              "sameAs": "https://www.linkedin.com/company/example-labs"
+            },
             "jobLocation": {"address": {"addressLocality": "Minneapolis", "addressRegion": "MN", "addressCountry": "US"}}
           }
           </script>
@@ -563,10 +636,26 @@ class HunterDiscoveryTest(unittest.TestCase):
         self.assertEqual(candidate["company"], "Example Labs")
         self.assertEqual(candidate["title"], "Senior Technical Program Manager, Developer Platform")
         self.assertEqual(candidate["location"], "Minneapolis, MN, US")
+        self.assertEqual(candidate["company_industry"], "Software Development")
+        self.assertEqual(candidate["company_size"], "201–500 employees")
+        self.assertTrue(candidate["company_id"])
+        discovered_company = next(
+            row for row in repository.read_companies()
+            if row["id"] == candidate["company_id"]
+        )
+        self.assertEqual(discovered_company["tracking_status"], "discovered")
         self.assertEqual(candidate["processing_status"], "ready")
         self.assertGreaterEqual(int(candidate["fit_score"]), 45)
         self.assertEqual(second["captured"][0]["id"], candidate["id"])
         self.assertEqual(len(repository.read_discovery_candidates()), 1)
+        ingested = discovery.ingest_candidate(candidate["id"])
+        company = next(
+            row for row in repository.read_companies()
+            if row["id"] == ingested["posting"]["company_id"]
+        )
+        self.assertEqual(company["industry"], "Software Development")
+        self.assertEqual(company["company_size"], "201–500 employees")
+        self.assertEqual(company["company_profile_url"], "https://www.linkedin.com/company/example-labs")
 
     def test_lane_location_and_work_modes_are_fully_configurable(self):
         search = self.save_search(
