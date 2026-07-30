@@ -511,6 +511,14 @@ class HunterDiscoveryTest(unittest.TestCase):
                 if source["source"] == "employer-web"
             )
         )
+        self.assertTrue(
+            all(
+                "-site:remotezest.up.railway.app" in source["query"]
+                and "-theladders.com" in source["query"]
+                for source in result["sources"]
+                if source["source"] == "employer-web"
+            )
+        )
         self.assertEqual(result["found_count"], 2)
         self.assertEqual(result["new_count"], 2)
         self.assertEqual({candidate["source_platform"] for candidate in result["captured"]}, {"ashby", "linkedin"})
@@ -1468,6 +1476,24 @@ class HunterDiscoveryTest(unittest.TestCase):
         self.assertEqual(aggregator["source_trust"], "aggregator")
         self.assertFalse(aggregator["recommendation_eligible"])
         self.assertNotIn("Direct employer posting available", aggregator["fit_strengths"])
+
+    def test_remote_reposting_sites_are_low_trust_aggregators(self):
+        for url in [
+            "https://remotezest.up.railway.app/job/remote-senior-technical-program-manager-25",
+            "https://remoteclickjobs-production.up.railway.app/job/remote-technical-program-manager-14",
+            "https://remowork.life/jobs/example",
+            "https://remoteineurope.com/job/lead-technical-program-manager",
+            "https://www.theladders.com/job/example",
+            "https://jobs.usvetjobs.com/job/program-manager/85207456",
+        ]:
+            with self.subTest(url=url):
+                trust = discovery.candidate_source_trust(
+                    {
+                        "canonical_url": url,
+                        "source_platform": "employer",
+                    }
+                )
+                self.assertEqual(trust["id"], "aggregator")
 
     def test_apply_and_undo_search_exclusions_only_changes_matching_new_roles(self):
         search = {field: "" for field in schema.DISCOVERY_SEARCH_FIELDS}

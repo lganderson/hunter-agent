@@ -92,8 +92,14 @@ LOW_TRUST_SOURCE_HOSTS = {
     "jobright.ai",
     "jobs.capitalfactory.com",
     "lensa.com",
+    "remoteclickjobs-production.up.railway.app",
+    "remoteineurope.com",
+    "remowork.life",
+    "remotezest.up.railway.app",
     "swiftcruit.ai",
     "tealhq.com",
+    "theladders.com",
+    "usvetjobs.com",
 }
 IGNORE_REASONS = {
     "wrong-role",
@@ -133,7 +139,10 @@ BUILT_IN_SEARCH_STRATEGIES = [
         "label": "Direct posting pages",
         "query": (
             "job careers -indeed.com -glassdoor.com -ziprecruiter.com "
-            "-simplyhired.com -jooble.org "
+            "-simplyhired.com -jooble.org -theladders.com -usvetjobs.com "
+            "-remowork.life -remoteineurope.com "
+            "-site:remotezest.up.railway.app "
+            "-site:remoteclickjobs-production.up.railway.app "
             + " ".join(f"-site:{domain}" for domain in sorted(BUILT_IN_SEARCH_DOMAINS))
         ),
         "recent_days": SEARCH_LOOKBACK_DAYS,
