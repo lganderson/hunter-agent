@@ -172,6 +172,28 @@ class HunterDiscoveryTest(unittest.TestCase):
 
         self.assertEqual(len(scroll_calls), 4)
 
+    def test_hunter_chrome_leaves_verification_tab_open_for_attention(self):
+        browser = browser_discovery.HunterChrome(sleeper=lambda _seconds: None)
+        browser.window_id = "123"
+        browser._open_tab = lambda _url: "456"
+        browser._wait_until_ready = lambda _tab_id, expected_url="": {"ready": "complete"}
+        closed_tabs = []
+        browser._close_tab = closed_tabs.append
+        browser._execute = lambda _tab_id, _script: (
+            '{"blocked":true,"reason":"Google needs verification in the Hunter Chrome profile.","items":[]}'
+        )
+
+        with self.assertRaisesRegex(
+            browser_discovery.BrowserDiscoveryError,
+            "needs verification",
+        ):
+            browser._search_tab(
+                "https://www.google.com/search?q=test",
+                browser_discovery.GOOGLE_RESULTS_SCRIPT,
+            )
+
+        self.assertEqual(closed_tabs, [])
+
     def test_browser_results_exclude_builtin_aggregator_network(self):
         results = discovery.normalize_browser_results(
             [
@@ -310,11 +332,11 @@ class HunterDiscoveryTest(unittest.TestCase):
         families = discovery.search_keyword_families(search)
         self.assertEqual(
             [family["id"] for family in families],
-            ["exact", "senior", "adjacent", "variants"],
+            ["exact", "senior", "adjacent"],
         )
         self.assertIn('"staff technical program manager"', families[1]["query"])
         self.assertIn('"technical project manager"', families[2]["query"])
-        self.assertIn('"technical delivery manager"', families[3]["query"])
+        self.assertIn('"technical delivery manager"', families[2]["query"])
         self.assertIn("location=Minnesota", opened["url"])
         self.assertEqual(len(opened["lanes"]), 2)
         self.assertIn("location=United+States", opened["lanes"][1]["url"])
@@ -548,13 +570,9 @@ class HunterDiscoveryTest(unittest.TestCase):
             len(discovery.search_keyword_families(search))
             * len(discovery.BUILT_IN_SEARCH_STRATEGIES)
         )
-        expected_linkedin_followups = (
-            len(search["lanes"])
-            * len(discovery.search_keyword_families(search))
-        )
         self.assertEqual(
             len(browser_requests),
-            len(search["lanes"]) * expected_requests_per_lane + expected_linkedin_followups,
+            len(search["lanes"]) * expected_requests_per_lane,
         )
         self.assertEqual({request[0] for request in browser_requests}, {"google", "linkedin"})
         self.assertEqual(
@@ -563,15 +581,15 @@ class HunterDiscoveryTest(unittest.TestCase):
         )
         self.assertEqual(
             {page for engine, _value, page in browser_requests if engine == "linkedin"},
-            {0, 1},
+            {0},
         )
         self.assertTrue(any("google.com" not in value and "Minnesota" in value for engine, value, _page in browser_requests if engine == "google"))
         self.assertTrue(any("linkedin.com/jobs/search" in value for engine, value, _page in browser_requests if engine == "linkedin"))
         self.assertEqual({source["engine"] for source in result["sources"]}, {"hunter-chrome-google", "hunter-chrome-linkedin"})
-        self.assertEqual({source["page_count"] for source in result["sources"]}, {1, 2})
+        self.assertEqual({source["page_count"] for source in result["sources"]}, {1})
         self.assertEqual(
             {source["query_family"] for source in result["sources"]},
-            {"exact", "senior", "adjacent", "variants"},
+            {"exact", "senior", "adjacent"},
         )
         self.assertEqual(result["found_count"], 2)
         self.assertEqual(result["qualified_count"], 2)
@@ -583,7 +601,7 @@ class HunterDiscoveryTest(unittest.TestCase):
 
         def browser_searcher(engine, value, page):
             browser_requests.append((engine, page))
-            count = 10 if page == 0 else 2
+            count = (15 if engine == "linkedin" else 10) if page == 0 else 2
             return [
                 {
                     "url": f"https://jobs.example.com/jobs/{engine}/{page}/{index}",
@@ -869,28 +887,35 @@ class HunterDiscoveryTest(unittest.TestCase):
         self.assertEqual(result["limited_count"], 1)
         self.assertEqual(len(repository.read_discovery_candidates()), 2)
 
-    def test_search_now_stops_when_a_paged_source_requests_verification(self):
+    def test_search_preserves_partial_results_and_pauses_blocked_engine(self):
         search = self.save_search("Technical platforms", "technical program manager")
         browser_requests = []
 
         def browser_searcher(engine, value, page):
             browser_requests.append((engine, page))
+            if engine == "linkedin":
+                return []
             if page == 1:
                 raise browser_discovery.BrowserDiscoveryError("Google needs verification in Hunter Chrome.")
             return [
                 {
-                    "url": f"https://jobs.example.com/job/{index}",
+                    "url": f"https://www.linkedin.com/jobs/view/{1234567800 + index}",
                     "title": f"Technical Program Manager {index}",
                     "snippet": "Minnesota technical program role.",
                 }
                 for index in range(10)
             ]
 
-        with self.assertRaisesRegex(RuntimeError, "needs verification"):
-            discovery.run_search(search["id"], browser_searcher=browser_searcher)
+        result = discovery.run_search(search["id"], browser_searcher=browser_searcher)
 
-        self.assertEqual(browser_requests, [("google", 0), ("google", 1)])
-        self.assertEqual(repository.read_discovery_candidates(), [])
+        self.assertEqual(
+            [(engine, page) for engine, page in browser_requests if engine == "google"],
+            [("google", 0), ("google", 1)],
+        )
+        self.assertEqual(result["evaluated_count"], 10)
+        self.assertEqual(result["found_count"], 10)
+        self.assertEqual(len(result["errors"]), 1)
+        self.assertIn("needs verification", result["errors"][0])
 
     def test_open_web_source_keeps_postings_but_rejects_career_indexes(self):
         self.assertFalse(discovery.likely_individual_posting("https://example.com/careers", "Careers"))

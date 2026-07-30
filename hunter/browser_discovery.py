@@ -637,6 +637,7 @@ class HunterChrome:
                 self.sleeper(target_delay - elapsed)
         self.last_search_at = time.monotonic()
         tab_id = self._open_tab(url)
+        close_tab = True
         try:
             self._wait_until_ready(tab_id, expected_url=url)
             if scroll == "linkedin-results":
@@ -664,10 +665,12 @@ class HunterChrome:
             except json.JSONDecodeError as exc:
                 raise BrowserDiscoveryError("Hunter Chrome returned an unreadable search result.") from exc
             if payload.get("blocked"):
+                close_tab = False
                 raise BrowserDiscoveryError(payload.get("reason") or "The search site needs attention in Hunter Chrome.")
             return payload.get("items", [])
         finally:
-            self._close_tab(tab_id)
+            if close_tab:
+                self._close_tab(tab_id)
 
     def google(self, query, page=0):
         url = GOOGLE_SEARCH_URL.format(

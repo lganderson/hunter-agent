@@ -19,12 +19,11 @@ ALL_WORK_MODES = ["on-site", "hybrid", "remote"]
 YAHOO_SEARCH_URL = "https://search.yahoo.com/search?p={query}"
 DUCKDUCKGO_SEARCH_URL = "https://html.duckduckgo.com/html/?q={query}"
 SEARCH_RESULT_LIMIT = 10
-GOOGLE_PAGE_COUNT = 3
-LINKEDIN_PAGE_COUNT = 3
-GOOGLE_CONTINUE_YIELD = 4
-LINKEDIN_CONTINUE_YIELD = 3
-MIN_LINKEDIN_PAGES_WITH_RESULTS = 2
-SEARCH_LOOKBACK_DAYS = 45
+GOOGLE_PAGE_COUNT = 2
+LINKEDIN_PAGE_COUNT = 2
+GOOGLE_CONTINUE_YIELD = 5
+LINKEDIN_CONTINUE_YIELD = 12
+SEARCH_LOOKBACK_DAYS = 90
 RAW_DISCOVERY_RESULT_LIMIT = 200
 DISCOVERY_RESULT_LIMIT = 50
 DETAIL_ENRICHMENT_LIMIT = 12
@@ -55,17 +54,10 @@ TPM_QUERY_FAMILIES = [
     {
         "id": "adjacent",
         "label": "Adjacent technical program roles",
-        "terms": ["technical project manager", "engineering program manager"],
-    },
-    {
-        "id": "variants",
-        "label": "Technical program leadership variants",
         "terms": [
-            "technical program lead",
+            "technical project manager",
+            "engineering program manager",
             "technical delivery manager",
-            "program manager engineering",
-            "AI program manager",
-            "platform program manager",
         ],
     },
 ]
@@ -496,12 +488,9 @@ def location_query(lane):
             "Saint Paul",
             "St. Paul",
             "Twin Cities",
-            "MN",
         ],
         "united states": [
             "United States",
-            "U.S.",
-            "USA",
             "US Remote",
             "Remote USA",
         ],
@@ -1314,6 +1303,8 @@ def run_search(
     duplicate_count = 0
     skip_reasons = {}
     screened_reasons = {}
+    blocked_engines = {}
+    reported_browser_errors = set()
 
     def record_reason(counter, reason, count=1):
         if count and reason:
@@ -1336,6 +1327,7 @@ def run_search(
             for strategy in BUILT_IN_SEARCH_STRATEGIES:
                 query = discovery_query(search, lane, strategy, family["query"])
                 attempted_sources += 1
+                browser_engine = "linkedin" if strategy["id"] == "linkedin" else "google"
                 engine = ""
                 source_items = []
                 source_seen = set()
@@ -1344,7 +1336,10 @@ def run_search(
                 )
                 successful_pages = 0
                 source_error = ""
-                for page in range(page_limit):
+                skipped_after_verification = browser_engine in blocked_engines
+                if skipped_after_verification:
+                    source_error = blocked_engines[browser_engine]
+                for page in range(0 if skipped_after_verification else page_limit):
                     attempts = []
                     try:
                         if search_fetcher is not None:
@@ -1368,7 +1363,9 @@ def run_search(
                             )
                         successful_pages += 1
                     except browser_discovery.BrowserDiscoveryError as exc:
-                        raise RuntimeError(storage.clean(str(exc))) from exc
+                        source_error = storage.clean(str(exc))
+                        blocked_engines[browser_engine] = source_error
+                        break
                     except RuntimeError as exc:
                         page_items = []
                         source_error = storage.clean(str(exc))
@@ -1390,21 +1387,20 @@ def run_search(
                         if strategy["id"] == "linkedin"
                         else GOOGLE_CONTINUE_YIELD
                     )
-                    if (
-                        strategy["id"] == "linkedin"
-                        and page + 1 < MIN_LINKEDIN_PAGES_WITH_RESULTS
-                        and page_new_count > 0
-                    ):
-                        continue
                     if page_new_count < continue_yield:
                         break
 
                 if successful_pages == 0:
                     failed_sources += 1
-                if source_error:
+                if (
+                    source_error
+                    and not skipped_after_verification
+                    and browser_engine not in reported_browser_errors
+                ):
                     errors.append(
                         f"{strategy['label']} · {lane.get('label') or lane.get('location')}: {source_error}"
                     )
+                    reported_browser_errors.add(browser_engine)
                 source_runs.append(
                     {
                         "source": strategy["id"],
