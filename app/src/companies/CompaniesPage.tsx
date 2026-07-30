@@ -4,6 +4,7 @@ import { DownloadIcon, ExternalIcon, FilterIcon, ListIcon, SearchIcon } from "..
 import {
   archiveCompany,
   checkCompanyPostings,
+  dismissSuggestion,
   ingestDiscoveryCandidate,
   ingestCompanyCandidate,
   linkCompanyContact,
@@ -43,7 +44,7 @@ type CompanyDetailPageProps = CompaniesPageProps & {
   createNew?: boolean;
 };
 
-const INTEREST_STATUSES = ["interested", "neutral", "archived"];
+const INTEREST_STATUSES = ["interested", "neutral", "not-interested", "archived"];
 const DEFAULT_INTEREST_STATUSES = ["interested", "neutral"];
 const TRACKING_STATUSES = ["tracked", "discovered"];
 
@@ -238,6 +239,7 @@ export function CompanyDetailPage({ data, refresh, createNew = false }: CompanyD
   const [isCheckingCareers, setIsCheckingCareers] = useState(false);
   const [isResearching, setIsResearching] = useState(false);
   const [isTracking, setIsTracking] = useState(false);
+  const [isUpdatingInterest, setIsUpdatingInterest] = useState(false);
   const [isMerging, setIsMerging] = useState(false);
   const [activeSuggestionId, setActiveSuggestionId] = useState("");
 
@@ -277,9 +279,11 @@ export function CompanyDetailPage({ data, refresh, createNew = false }: CompanyD
   );
   const mergeSuggestions = useMemo(
     () => (data.company_merge_suggestions || []).filter(
-      suggestion => suggestion.keep_company_id === company?.id || suggestion.merge_company_id === company?.id
+      suggestion => (
+        suggestion.keep_company_id === company?.id || suggestion.merge_company_id === company?.id
+      ) && !(data.dismissed_suggestion_ids || []).includes(`company-merge:${suggestion.id}`)
     ),
-    [company?.id, data.company_merge_suggestions]
+    [company?.id, data.company_merge_suggestions, data.dismissed_suggestion_ids]
   );
   const [candidateFilter, setCandidateFilter] = useState<CandidateFilter>("recommended");
   const recommendedCount = useMemo(
@@ -312,6 +316,16 @@ export function CompanyDetailPage({ data, refresh, createNew = false }: CompanyD
   const metadataSuggestions = useMemo(
     () => parseCompanyMetadataSuggestions(company?.company_metadata_suggestions_json || ""),
     [company?.company_metadata_suggestions_json]
+  );
+  const decisionSuggestionId = company ? `company-decision:${company.id}` : "";
+  const trackingSuggestionId = company ? `company-tracking:${company.id}` : "";
+  const showDecisionSuggestion = Boolean(
+    company?.decision_recommendation
+    && !(data.dismissed_suggestion_ids || []).includes(decisionSuggestionId)
+  );
+  const showTrackingSuggestion = Boolean(
+    company?.tracking_recommendation
+    && !(data.dismissed_suggestion_ids || []).includes(trackingSuggestionId)
   );
 
   useEffect(() => {
@@ -396,6 +410,29 @@ export function CompanyDetailPage({ data, refresh, createNew = false }: CompanyD
     }
   }
 
+  async function updateInterestPreference(interestStatus: "neutral" | "not-interested") {
+    if (!company || isUpdatingInterest) return;
+    setIsUpdatingInterest(true);
+    setOperationStatus(
+      interestStatus === "not-interested"
+        ? "Removing this company from Discovery..."
+        : "Returning this company to Discovery..."
+    );
+    try {
+      await upsertCompany(company.id, { interest_status: interestStatus });
+      await refresh();
+      setOperationStatus(
+        interestStatus === "not-interested"
+          ? "Company marked not interested. Its existing and future roles are hidden from Discovery."
+          : "Company returned to neutral. Its stored roles can appear in Discovery again."
+      );
+    } catch (error) {
+      setOperationStatus(`Could not update company interest. ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setIsUpdatingInterest(false);
+    }
+  }
+
   async function resolveMetadataSuggestion(suggestion: CompanyMetadataSuggestion, action: "apply" | "dismiss") {
     if (!company || activeSuggestionId) return;
     setActiveSuggestionId(suggestion.id);
@@ -406,6 +443,21 @@ export function CompanyDetailPage({ data, refresh, createNew = false }: CompanyD
       setOperationStatus(action === "apply" ? "Company information updated." : "Suggestion dismissed.");
     } catch (error) {
       setOperationStatus(`Could not resolve suggestion. ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setActiveSuggestionId("");
+    }
+  }
+
+  async function dismissCompanySuggestion(suggestionId: string) {
+    if (!suggestionId || activeSuggestionId) return;
+    setActiveSuggestionId(suggestionId);
+    setOperationStatus("Dismissing Hunter suggestion...");
+    try {
+      await dismissSuggestion(suggestionId);
+      await refresh();
+      setOperationStatus("Suggestion dismissed. Company data was not changed.");
+    } catch (error) {
+      setOperationStatus(`Could not dismiss suggestion. ${error instanceof Error ? error.message : String(error)}`);
     } finally {
       setActiveSuggestionId("");
     }
@@ -562,6 +614,21 @@ export function CompanyDetailPage({ data, refresh, createNew = false }: CompanyD
           </div>
         </div>
         <div className="company-primary-actions">
+          {company.interest_status === "not-interested" ? (
+            <button className="button" type="button" disabled={isUpdatingInterest} onClick={() => void updateInterestPreference("neutral")}>
+              {isUpdatingInterest ? "Updating…" : "Reconsider company"}
+            </button>
+          ) : company.interest_status !== "archived" ? (
+            <button
+              className="button"
+              type="button"
+              disabled={isUpdatingInterest}
+              title="Hide this company’s existing and future roles from Discovery"
+              onClick={() => void updateInterestPreference("not-interested")}
+            >
+              {isUpdatingInterest ? "Updating…" : "Not interested"}
+            </button>
+          ) : null}
           <button className="button" type="button" disabled={isResearching} onClick={researchCurrentCompany}>
             <SearchIcon size={16} /> {isResearching ? "Researching…" : "Research company"}
           </button>
@@ -720,19 +787,38 @@ export function CompanyDetailPage({ data, refresh, createNew = false }: CompanyD
         </div>
 
         <aside className="company-workspace-rail">
-          {company.tracking_recommendation || metadataSuggestions.length || mergeSuggestions.length ? (
+          {showTrackingSuggestion || showDecisionSuggestion || metadataSuggestions.length || mergeSuggestions.length ? (
             <article className="panel company-rail-panel company-suggestions-panel">
               <div className="company-section-header compact">
-                <div><h2>Hunter suggestions</h2><p>Review source-backed changes before they replace existing information.</p></div>
+                <div><span className="eyebrow">Learn from your decisions</span><h2>Hunter suggestions</h2><p>Nothing changes automatically. Review each suggestion before applying it.</p></div>
               </div>
-              {company.tracking_recommendation ? (
+              {showDecisionSuggestion ? (
+                <div className="company-tracking-suggestion">
+                  <p>{company.decision_recommendation}</p>
+                  <div className="company-suggestion-actions">
+                    <button
+                      className="button compact"
+                      type="button"
+                      disabled={isUpdatingInterest || Boolean(activeSuggestionId)}
+                      onClick={() => void updateInterestPreference("not-interested")}
+                    >
+                      {isUpdatingInterest ? "Updating…" : "Mark not interested"}
+                    </button>
+                    <button className="button compact" type="button" disabled={Boolean(activeSuggestionId)} onClick={() => void dismissCompanySuggestion(decisionSuggestionId)}>Dismiss</button>
+                  </div>
+                </div>
+              ) : null}
+              {showTrackingSuggestion ? (
                 <div className="company-tracking-suggestion">
                   <p>{company.tracking_recommendation}</p>
-                  {company.tracking_status === "discovered" ? (
-                    <button className="button compact primary" type="button" disabled={isTracking} onClick={trackCurrentCompany}>
-                      Track company
-                    </button>
-                  ) : null}
+                  <div className="company-suggestion-actions">
+                    {company.tracking_status === "discovered" ? (
+                      <button className="button compact primary" type="button" disabled={isTracking || Boolean(activeSuggestionId)} onClick={trackCurrentCompany}>
+                        Track company
+                      </button>
+                    ) : null}
+                    <button className="button compact" type="button" disabled={Boolean(activeSuggestionId)} onClick={() => void dismissCompanySuggestion(trackingSuggestionId)}>Dismiss</button>
+                  </div>
                 </div>
               ) : null}
               {mergeSuggestions.map(suggestion => {
@@ -744,9 +830,12 @@ export function CompanyDetailPage({ data, refresh, createNew = false }: CompanyD
                     <strong>Possible duplicate company</strong>
                     <p>{otherName}</p>
                     <span>{suggestion.reason}</span>
-                    <button className="button compact primary" type="button" disabled={isMerging} onClick={() => mergeSuggestedCompany(suggestion)}>
-                      {isMerging ? "Merging…" : suggestion.keep_company_id === company.id ? `Merge ${otherName} here` : `Merge into ${otherName}`}
-                    </button>
+                    <div className="company-suggestion-actions">
+                      <button className="button compact primary" type="button" disabled={isMerging || Boolean(activeSuggestionId)} onClick={() => mergeSuggestedCompany(suggestion)}>
+                        {isMerging ? "Merging…" : suggestion.keep_company_id === company.id ? `Merge ${otherName} here` : `Merge into ${otherName}`}
+                      </button>
+                      <button className="button compact" type="button" disabled={Boolean(activeSuggestionId)} onClick={() => void dismissCompanySuggestion(`company-merge:${suggestion.id}`)}>Dismiss</button>
+                    </div>
                   </div>
                 );
               })}
@@ -809,6 +898,7 @@ function CompanyForm({ company, onSubmit }: { company: Company | null; onSubmit:
       <label className="form-field">Interest <select name="interest_status" defaultValue={company?.interest_status || "neutral"}>
         <option value="interested">Interested</option>
         <option value="neutral">Neutral</option>
+        <option value="not-interested">Not interested</option>
         <option value="archived">Archived</option>
       </select></label>
       <label className="form-field">Aliases <input name="aliases" type="text" defaultValue={company?.aliases || ""} /></label>

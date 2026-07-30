@@ -190,6 +190,8 @@ DISCOVERY_CANDIDATE_FIELDS = [
     "freshness_status",
     "freshness_checked_at",
     "ingested_application_id",
+    "ignore_reason",
+    "ignore_reason_detail",
     "notes",
 ]
 
@@ -295,7 +297,7 @@ DEFAULT_STAGE = "posting-review"
 DEFAULT_OUTCOME = ""
 DEFAULT_PRIORITY = "medium"
 DEFAULT_COMPANY_INTEREST_STATUS = "neutral"
-COMPANY_INTEREST_STATUSES = {"interested", "neutral", "archived"}
+COMPANY_INTEREST_STATUSES = {"interested", "neutral", "not-interested", "archived"}
 DEFAULT_COMPANY_TRACKING_STATUS = "tracked"
 COMPANY_TRACKING_STATUSES = {"discovered", "tracked"}
 COMPANY_POSTING_CANDIDATE_STATUSES = {"new", "ignored", "ingested", "unavailable"}

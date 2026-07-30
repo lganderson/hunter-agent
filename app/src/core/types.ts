@@ -103,7 +103,10 @@ export type Company = {
   company_research_status: string;
   discovery_role_count: number;
   recommended_discovery_role_count: number;
+  ignored_role_count: number;
+  ingested_role_count: number;
   tracking_recommendation: string;
+  decision_recommendation: string;
   notes: string;
   last_checked_at: string;
   last_check_status: string;
@@ -200,6 +203,8 @@ export type DiscoverySearch = {
 
 export type DiscoveryPreferenceSuggestion = {
   id: string;
+  search_id: string;
+  search_name: string;
   term: string;
   ignored_count: number;
   sample_titles: string[];
@@ -209,6 +214,7 @@ export type DiscoveryPreferenceSuggestion = {
 export type DiscoveryLastRunSummary = {
   evaluated_count?: number;
   qualified_count?: number;
+  screened_count?: number;
   found_count?: number;
   new_count?: number;
   updated_count?: number;
@@ -227,6 +233,7 @@ export type DiscoveryCandidate = {
   id: string;
   search_id: string;
   company_id: string;
+  company?: string;
   title: string;
   url: string;
   canonical_url: string;
@@ -247,9 +254,15 @@ export type DiscoveryCandidate = {
   source_urls: string[];
   freshness_status: string;
   freshness_checked_at: string;
+  ignore_reason: string;
+  ignore_reason_detail: string;
   fit_strengths: string[];
   fit_gaps: string[];
   source_confidence: string;
+  source_trust: "employer" | "network" | "aggregator" | "unverified" | "closed";
+  source_trust_label: string;
+  is_direct_employer_source: boolean;
+  recommendation_eligible: boolean;
   lane_match: string;
   ingested_application_id: string;
   notes: string;
@@ -284,6 +297,7 @@ export type DiscoveryRunResult = {
   captured: DiscoveryCandidate[];
   evaluated_count: number;
   qualified_count: number;
+  screened_count: number;
   found_count: number;
   new_count: number;
   updated_count: number;
@@ -303,6 +317,7 @@ export type DiscoveryEnrichmentResult = {
   posting_checked_count: number;
   posting_enriched_count: number;
   company_researched_count: number;
+  company_research_remaining_count: number;
   unavailable_count: number;
   remaining_count: number;
   ready_count: number;
@@ -351,6 +366,7 @@ export type AppState = {
   discovery_searches: DiscoverySearch[];
   discovery_candidates: DiscoveryCandidate[];
   discovery_preference_suggestions: DiscoveryPreferenceSuggestion[];
+  dismissed_suggestion_ids: string[];
 };
 
 export type SettingsStatus = {

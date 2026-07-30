@@ -2,13 +2,17 @@ import { useEffect, useMemo, useState } from "react";
 import type { FormEvent } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import {
+  applyDiscoverySearchExclusions,
   captureDiscoveryCandidates,
   continueDiscovery,
+  dismissSuggestion,
   ingestDiscoveryCandidate,
   markDiscoveryCandidateDuplicate,
   updateDiscoveryCandidate,
   updateDiscoveryCandidateDetails,
-  upsertDiscoverySearch
+  upsertCompany,
+  upsertDiscoverySearch,
+  undoDiscoverySearchExclusions
 } from "../core/api";
 import { dateOnlyLabel, titleCase } from "../core/format";
 import { routes } from "../core/routes";
@@ -29,10 +33,9 @@ type DiscoveryModeProps = {
   refresh: () => Promise<AppState>;
 };
 
-type DiscoveryFilter = "latest" | "new" | "recommended" | "needs-details" | "all" | "ignored" | "ingested" | "duplicate" | "unavailable";
+type DiscoveryFilter = "new" | "recommended" | "needs-details" | "all" | "ignored" | "ingested" | "duplicate" | "unavailable";
 
 const DISCOVERY_FILTERS: Array<{ id: DiscoveryFilter; label: string }> = [
-  { id: "latest", label: "Latest" },
   { id: "new", label: "New" },
   { id: "recommended", label: "Recommended" },
   { id: "needs-details", label: "Needs details" },
@@ -42,6 +45,17 @@ const DISCOVERY_FILTERS: Array<{ id: DiscoveryFilter; label: string }> = [
   { id: "duplicate", label: "Duplicates" },
   { id: "unavailable", label: "Closed" }
 ];
+const DISCOVERY_EXCLUDED_COMPANY_INTEREST_STATUSES = new Set(["not-interested", "archived"]);
+const IGNORE_REASON_OPTIONS = [
+  { id: "wrong-role", label: "Wrong role" },
+  { id: "company", label: "Company" },
+  { id: "level", label: "Wrong level" },
+  { id: "industry", label: "Industry" },
+  { id: "location", label: "Location" },
+  { id: "stale", label: "Stale posting" },
+  { id: "poor-source", label: "Poor source" },
+  { id: "other", label: "Other" }
+] as const;
 
 const WORK_MODE_OPTIONS: Array<{ id: DiscoverySearchLaneDefinition["work_modes"][number]; label: string }> = [
   { id: "on-site", label: "On-site" },
@@ -80,6 +94,9 @@ export function DiscoveryMode({ data, refresh }: DiscoveryModeProps) {
   const [editingCandidate, setEditingCandidate] = useState<DiscoveryCandidate | null>(null);
   const [reviewCandidateId, setReviewCandidateId] = useState("");
   const [ingestedPostingId, setIngestedPostingId] = useState("");
+  const [exclusionUndoIds, setExclusionUndoIds] = useState<string[]>([]);
+  const [applyExistingExclusions, setApplyExistingExclusions] = useState(true);
+  const [dismissingSuggestionId, setDismissingSuggestionId] = useState("");
   const companyById = useMemo(
     () => new Map(data.companies.map(company => [company.id, company])),
     [data.companies]
@@ -89,46 +106,72 @@ export function DiscoveryMode({ data, refresh }: DiscoveryModeProps) {
     if (selectedSearch && !editingSearch) setSearchDraft(searchUpdates(selectedSearch));
   }, [editingSearch, selectedSearch]);
 
-  const selectedCandidates = data.discovery_candidates;
-  const latestSeenAt = useMemo(
-    () => selectedCandidates.reduce(
-      (latest, candidate) => candidate.last_seen_at > latest ? candidate.last_seen_at : latest,
-      ""
+  const discoveryExcludedCompanyIds = useMemo(
+    () => new Set(
+      data.companies
+        .filter(company => DISCOVERY_EXCLUDED_COMPANY_INTEREST_STATUSES.has(company.interest_status))
+        .map(company => company.id)
     ),
-    [selectedCandidates]
+    [data.companies]
   );
-
+  const selectedCandidates = useMemo(
+    () => data.discovery_candidates.filter(
+      candidate => !candidate.company_id || !discoveryExcludedCompanyIds.has(candidate.company_id)
+    ),
+    [data.discovery_candidates, discoveryExcludedCompanyIds]
+  );
+  const preferenceSuggestions = useMemo(
+    () => (data.discovery_preference_suggestions || []).filter(
+      suggestion => suggestion.search_id === selectedSearch?.id
+        && !(data.dismissed_suggestion_ids || []).includes(suggestion.id)
+        && !selectedSearch.excluded_terms.some(
+          term => term.toLowerCase() === suggestion.term.toLowerCase()
+        )
+    ),
+    [data.discovery_preference_suggestions, data.dismissed_suggestion_ids, selectedSearch]
+  );
   const visibleCandidates = useMemo(
     () => selectedCandidates
-      .filter(candidate => discoveryCandidateMatches(candidate, resultFilter, latestSeenAt))
+      .filter(candidate => discoveryCandidateMatches(candidate, resultFilter))
       .filter(candidate => discoveryCandidateIncludes(candidate, companyById.get(candidate.company_id), resultSearch))
-      .sort((left, right) => Number(right.processing_status === "ready") - Number(left.processing_status === "ready")
-        || Number(right.fit_score || 0) - Number(left.fit_score || 0)
-        || (right.last_seen_at || "").localeCompare(left.last_seen_at || "")),
-    [companyById, latestSeenAt, resultFilter, resultSearch, selectedCandidates]
+      .sort(discoveryCandidateComparator),
+    [companyById, resultFilter, resultSearch, selectedCandidates]
   );
 
   const counts = useMemo(
     () => Object.fromEntries(
       DISCOVERY_FILTERS.map(filter => [
         filter.id,
-        selectedCandidates.filter(candidate => discoveryCandidateMatches(candidate, filter.id, latestSeenAt)).length
+        selectedCandidates.filter(candidate => discoveryCandidateMatches(candidate, filter.id)).length
       ])
     ) as Record<DiscoveryFilter, number>,
-    [latestSeenAt, selectedCandidates]
+    [selectedCandidates]
   );
   const reviewQueue = useMemo(
     () => [...selectedCandidates
       .filter(candidate => candidate.status === "new" && candidate.freshness_status !== "closed")]
-      .sort((left, right) => Number(right.processing_status === "ready") - Number(left.processing_status === "ready")
-        || Number(right.fit_score || 0) - Number(left.fit_score || 0)
-        || (right.last_seen_at || "").localeCompare(left.last_seen_at || "")),
+      .sort(discoveryCandidateComparator),
     [selectedCandidates]
   );
   const reviewBatch = reviewQueue.slice(0, 10);
-  const reviewCandidate = reviewBatch.find(candidate => candidate.id === reviewCandidateId) || null;
+  const reviewCandidate = selectedCandidates.find(candidate => candidate.id === reviewCandidateId) || null;
+  const activeReviewCandidates = reviewCandidate && !reviewBatch.some(candidate => candidate.id === reviewCandidate.id)
+    ? [reviewCandidate]
+    : reviewBatch;
 
   const capturedUrlCount = (captureText.match(/https?:\/\//gi) || []).length;
+  const addedExclusionTerms = useMemo(() => {
+    const current = new Set((selectedSearch?.excluded_terms || []).map(term => term.toLowerCase()));
+    return searchDraft.excluded_terms.filter(term => !current.has(term.toLowerCase()));
+  }, [searchDraft.excluded_terms, selectedSearch]);
+  const exclusionImpact = useMemo(
+    () => selectedCandidates.filter(candidate =>
+      candidate.status === "new"
+      && (!editingSearchId || candidate.search_id === editingSearchId)
+      && candidateMatchesExclusionTerms(candidate, addedExclusionTerms)
+    ),
+    [addedExclusionTerms, editingSearchId, selectedCandidates]
+  );
 
   function chooseSearch(searchId: string) {
     const params = new URLSearchParams(searchParams);
@@ -144,6 +187,7 @@ export function DiscoveryMode({ data, refresh }: DiscoveryModeProps) {
     setSearchDraft(newSearchDraft());
     setEditingSearchId("");
     setEditingSearch(true);
+    setApplyExistingExclusions(true);
   }
 
   function editSelectedSearch() {
@@ -151,6 +195,7 @@ export function DiscoveryMode({ data, refresh }: DiscoveryModeProps) {
     setSearchDraft(searchUpdates(selectedSearch));
     setEditingSearchId(selectedSearch.id);
     setEditingSearch(true);
+    setApplyExistingExclusions(true);
   }
 
   function reviewPreferenceSuggestion(term: string) {
@@ -167,6 +212,20 @@ export function DiscoveryMode({ data, refresh }: DiscoveryModeProps) {
     setOperationStatus(`Review the suggested “${term}” exclusion below, then save if it matches your intent.`);
   }
 
+  async function dismissPreferenceSuggestion(suggestionId: string) {
+    setDismissingSuggestionId(suggestionId);
+    setOperationStatus("Dismissing suggestion...");
+    try {
+      await dismissSuggestion(suggestionId);
+      await refresh();
+      setOperationStatus("Suggestion dismissed. The search itself was not changed.");
+    } catch (error) {
+      setOperationStatus(`Could not dismiss suggestion. ${errorMessage(error)}`);
+    } finally {
+      setDismissingSuggestionId("");
+    }
+  }
+
   async function saveSearch(event: FormEvent) {
     event.preventDefault();
     setPending(true);
@@ -176,15 +235,46 @@ export function DiscoveryMode({ data, refresh }: DiscoveryModeProps) {
         editingSearchId,
         searchDraft
       );
+      let appliedCount = 0;
+      let appliedIds: string[] = [];
+      if (applyExistingExclusions && exclusionImpact.length) {
+        const applied = await applyDiscoverySearchExclusions(
+          result.search.id,
+          result.search.excluded_terms
+        );
+        appliedCount = applied.count;
+        appliedIds = applied.candidate_ids;
+      }
       await refresh();
       const params = new URLSearchParams(searchParams);
       params.set("search_id", result.search.id);
       setSearchParams(params);
       setEditingSearchId(result.search.id);
       setEditingSearch(false);
-      setOperationStatus(`Saved ${result.search.name}.`);
+      setExclusionUndoIds(appliedIds);
+      setOperationStatus(
+        appliedCount
+          ? `Saved ${result.search.name} and hid ${appliedCount} current role${appliedCount === 1 ? "" : "s"} that match the new exclusions.`
+          : `Saved ${result.search.name}.`
+      );
     } catch (error) {
       setOperationStatus(`Could not save search. ${errorMessage(error)}`);
+    } finally {
+      setPending(false);
+    }
+  }
+
+  async function undoAppliedExclusions() {
+    if (!exclusionUndoIds.length) return;
+    setPending(true);
+    setOperationStatus("Restoring roles hidden by the last search edit...");
+    try {
+      const result = await undoDiscoverySearchExclusions(exclusionUndoIds);
+      await refresh();
+      setExclusionUndoIds([]);
+      setOperationStatus(`Restored ${result.count} role${result.count === 1 ? "" : "s"} to New. The search exclusions remain saved.`);
+    } catch (error) {
+      setOperationStatus(`Could not restore roles. ${errorMessage(error)}`);
     } finally {
       setPending(false);
     }
@@ -198,7 +288,7 @@ export function DiscoveryMode({ data, refresh }: DiscoveryModeProps) {
     try {
       const result = await continueDiscovery(selectedSearch.id);
       await refresh();
-      setResultFilter("latest");
+      setResultFilter("new");
       const errorSuffix = result.errors.length
         ? ` ${result.errors.length} source search${result.errors.length === 1 ? "" : "es"} could not be completed.`
         : "";
@@ -206,11 +296,12 @@ export function DiscoveryMode({ data, refresh }: DiscoveryModeProps) {
         ? ` Hunter retained the top ${result.found_count} and held back ${result.limited_count} lower-ranked matches.`
         : "";
       const enrichmentSuffix = result.enrichment
-        ? ` Hunter continued through ${result.enrichment.processed_count} queued role${result.enrichment.processed_count === 1 ? "" : "s"}; ${result.enrichment.ready_count} are ready for review and ${result.enrichment.remaining_count} still need work.`
+        ? ` Hunter continued through ${result.enrichment.processed_count} queued role${result.enrichment.processed_count === 1 ? "" : "s"}; ${result.enrichment.ready_count} are ready for review, ${result.enrichment.remaining_count} roles still need work, and ${result.enrichment.company_research_remaining_count || 0} companies remain in the information queue.`
         : "";
       setOperationStatus(
         `Discovery reviewed ${result.evaluated_count} unique links with adaptive paging. `
         + `${result.qualified_count} qualified after validation and lane matching; `
+        + `${result.screened_count} were kept out of the review queue; `
         + `${result.new_count} are new and ${result.updated_count} were refreshed. `
         + `${result.enriched_count} posting${result.enriched_count === 1 ? "" : "s"} gained verified details. `
         + `Hunter researched ${result.company_researched_count} compan${result.company_researched_count === 1 ? "y" : "ies"}`
@@ -241,7 +332,7 @@ export function DiscoveryMode({ data, refresh }: DiscoveryModeProps) {
       setCaptureText("");
       setCaptureDetails(EMPTY_DETAILS);
       setCaptureOpen(false);
-      const needsDetails = result.captured.filter(candidate => candidate.processing_status === "needs-details").length;
+      const needsDetails = result.captured.filter(candidate => candidate.processing_status !== "ready").length;
       setOperationStatus(
         `Processed ${result.count} role${result.count === 1 ? "" : "s"}.${needsDetails ? ` ${needsDetails} need copied details.` : ""}`
       );
@@ -257,10 +348,15 @@ export function DiscoveryMode({ data, refresh }: DiscoveryModeProps) {
     setPending(true);
     setOperationStatus("Updating role details and fit...");
     try {
-      await updateDiscoveryCandidateDetails(editingCandidate.id, updates);
+      const result = await updateDiscoveryCandidateDetails(editingCandidate.id, updates);
       await refresh();
-      setEditingCandidate(null);
-      setOperationStatus("Role details updated and fit rescored.");
+      if (result.candidate.processing_status === "ready") {
+        setEditingCandidate(null);
+        setOperationStatus("Role details verified and fit rescored.");
+      } else {
+        setEditingCandidate(result.candidate);
+        setOperationStatus("Changes saved. Complete the highlighted requirements before Hunter can verify fit.");
+      }
     } catch (error) {
       setOperationStatus(`Could not update role. ${errorMessage(error)}`);
     } finally {
@@ -268,12 +364,16 @@ export function DiscoveryMode({ data, refresh }: DiscoveryModeProps) {
     }
   }
 
-  async function setCandidateStatus(candidate: DiscoveryCandidate, status: "new" | "ignored") {
+  async function setCandidateStatus(
+    candidate: DiscoveryCandidate,
+    status: "new" | "ignored",
+    ignoreReason = ""
+  ) {
     setPending(true);
     setIngestedPostingId("");
     setOperationStatus(status === "ignored" ? "Ignoring Discovery result..." : "Returning result to New...");
     try {
-      await updateDiscoveryCandidate(candidate.id, status);
+      await updateDiscoveryCandidate(candidate.id, status, ignoreReason);
       await refresh();
       setOperationStatus(status === "ignored" ? "Discovery result ignored." : "Discovery result returned to New.");
       return true;
@@ -322,16 +422,50 @@ export function DiscoveryMode({ data, refresh }: DiscoveryModeProps) {
   }
 
   function nextReviewCandidateId(candidate: DiscoveryCandidate) {
-    const index = reviewBatch.findIndex(row => row.id === candidate.id);
-    return reviewBatch[index + 1]?.id || reviewBatch[index - 1]?.id || "";
+    const index = activeReviewCandidates.findIndex(row => row.id === candidate.id);
+    return activeReviewCandidates[index + 1]?.id || activeReviewCandidates[index - 1]?.id || "";
   }
 
-  async function reviewCandidateStatus(candidate: DiscoveryCandidate, status: "ignored" | "ingested") {
+  function nextReviewCandidateIdOutsideCompany(candidate: DiscoveryCandidate) {
+    const index = activeReviewCandidates.findIndex(row => row.id === candidate.id);
+    const remainingCandidates = [
+      ...activeReviewCandidates.slice(index + 1),
+      ...activeReviewCandidates.slice(0, index).reverse()
+    ];
+    return remainingCandidates.find(row => row.company_id !== candidate.company_id)?.id || "";
+  }
+
+  async function reviewCandidateStatus(
+    candidate: DiscoveryCandidate,
+    status: "ignored" | "ingested",
+    ignoreReason = ""
+  ) {
     const nextId = nextReviewCandidateId(candidate);
     const succeeded = status === "ignored"
-      ? await setCandidateStatus(candidate, "ignored")
+      ? await setCandidateStatus(candidate, "ignored", ignoreReason)
       : await ingestCandidate(candidate);
     if (succeeded) setReviewCandidateId(nextId);
+  }
+
+  async function markCandidateCompanyNotInterested(candidate: DiscoveryCandidate) {
+    const company = companyById.get(candidate.company_id);
+    if (!company) {
+      setOperationStatus("Add or associate a company before marking it Not interested.");
+      return;
+    }
+    const nextId = nextReviewCandidateIdOutsideCompany(candidate);
+    setPending(true);
+    setOperationStatus(`Marking ${company.name} Not interested...`);
+    try {
+      await upsertCompany(company.id, { interest_status: "not-interested" });
+      await refresh();
+      setReviewCandidateId(nextId);
+      setOperationStatus(`${company.name} marked Not interested. Its existing and future roles are hidden from Discovery.`);
+    } catch (error) {
+      setOperationStatus(`Could not update ${company.name}. ${errorMessage(error)}`);
+    } finally {
+      setPending(false);
+    }
   }
 
   async function reviewCandidateDuplicate(candidate: DiscoveryCandidate, applicationId: string) {
@@ -374,27 +508,6 @@ export function DiscoveryMode({ data, refresh }: DiscoveryModeProps) {
           </span>
         ) : null}
       </div>
-      {selectedSearch ? (
-        <div className="discovery-source-note">
-          <strong>Hunter Chrome</strong>
-          <span>Discovery runs weighted exact, senior, and adjacent-role searches, continues paging while each page yields useful new postings, and automatically enriches posting details, company industry, and employee range. Watched-company career scans stay in Companies.</span>
-        </div>
-      ) : null}
-      {selectedSearch?.last_run_at && Object.keys(selectedSearch.last_run_summary || {}).length ? (
-        <details className="discovery-run-summary">
-          <summary>
-            <strong>Last run</strong>
-            <span>
-              Reviewed {selectedSearch.last_run_summary.evaluated_count || 0};
-              {" "}{selectedSearch.last_run_summary.qualified_count || 0} qualified;
-              {" "}{selectedSearch.last_run_summary.enriched_count || 0} enriched;
-              {" "}{selectedSearch.last_run_summary.company_researched_count || 0} companies researched;
-              {" "}{selectedSearch.last_run_summary.duplicate_count || 0} duplicates collapsed.
-            </span>
-          </summary>
-          <RunDiagnostics search={selectedSearch} />
-        </details>
-      ) : null}
 
       {editingSearch ? (
         <form className="discovery-editor management-form" onSubmit={saveSearch}>
@@ -501,28 +614,67 @@ export function DiscoveryMode({ data, refresh }: DiscoveryModeProps) {
               ))}
             </div>
           </div>
-          <div className="detail-actions form-field full">
+          {exclusionImpact.length ? (
+            <section className="discovery-exclusion-preview form-field full" aria-label="Current role impact">
+              <div>
+                <strong>{exclusionImpact.length} current role{exclusionImpact.length === 1 ? "" : "s"} match the new exclusions</strong>
+                <span>{exclusionImpact.slice(0, 3).map(candidate => candidate.title).join(" · ")}</span>
+              </div>
+              <label>
+                <input
+                  type="checkbox"
+                  checked={applyExistingExclusions}
+                  onChange={event => setApplyExistingExclusions(event.target.checked)}
+                />
+                Hide these roles from New when I save
+              </label>
+            </section>
+          ) : null}
+          <div className="detail-actions form-field full discovery-editor-actions">
             <button className="button primary" type="submit" disabled={pending}><FilterIcon size={15} /> Save search</button>
             {selectedSearch ? <button className="button" type="button" onClick={() => setEditingSearch(false)}>Cancel</button> : null}
           </div>
         </form>
       ) : null}
 
-      {selectedSearch && (data.discovery_preference_suggestions || []).length ? (
-        <section className="discovery-preference-suggestions" aria-label="Suggested Discovery preferences">
-          <div>
-            <span className="eyebrow">Learn from your decisions</span>
-            <strong>Hunter found repeated patterns in ignored roles</strong>
-            <p>Nothing changes automatically. Review a suggestion in the search definition before saving it.</p>
+      {selectedSearch && preferenceSuggestions.length ? (
+        <details className="discovery-learning" aria-label="Suggestions learned from your decisions">
+          <summary>
+            <span className="discovery-learning-summary">
+              <strong>Hunter learned {preferenceSuggestions.length} {preferenceSuggestions.length === 1 ? "pattern" : "patterns"} from your decisions</strong>
+              <span>Review possible search refinements</span>
+            </span>
+            <span className="discovery-learning-review">Review suggestions</span>
+          </summary>
+          <div className="discovery-learning-panel">
+            <p>Nothing changes automatically. Review an exclusion before saving it to this search, or dismiss suggestions that are not useful.</p>
+            <div className="discovery-learning-list">
+              {preferenceSuggestions.map(suggestion => (
+                <article className="discovery-learning-item" key={suggestion.id}>
+                  <div>
+                    <strong>“{suggestion.term}”</strong>
+                    <span>Appeared in {suggestion.ignored_count} ignored roles</span>
+                  </div>
+                  <div className="discovery-learning-actions">
+                    <button className="button compact" type="button" onClick={() => reviewPreferenceSuggestion(suggestion.term)}>
+                      Review exclusion
+                    </button>
+                    <button
+                      className="icon-button"
+                      type="button"
+                      disabled={Boolean(dismissingSuggestionId)}
+                      onClick={() => void dismissPreferenceSuggestion(suggestion.id)}
+                      aria-label={`Dismiss suggestion for ${suggestion.term}`}
+                      title="Dismiss suggestion"
+                    >
+                      <XIcon size={14} />
+                    </button>
+                  </div>
+                </article>
+              ))}
+            </div>
           </div>
-          <div>
-            {(data.discovery_preference_suggestions || []).map(suggestion => (
-              <button className="button compact" type="button" key={suggestion.id} onClick={() => reviewPreferenceSuggestion(suggestion.term)}>
-                Exclude “{suggestion.term}” · {suggestion.ignored_count} ignored
-              </button>
-            ))}
-          </div>
-        </section>
+        </details>
       ) : null}
 
       {captureOpen && selectedSearch ? (
@@ -568,22 +720,12 @@ export function DiscoveryMode({ data, refresh }: DiscoveryModeProps) {
           <div className="table-operation-status-content"><span>{operationStatus}</span></div>
           <div className="table-operation-actions">
             {ingestedPostingId ? <Link className="button compact" to={routes.postingDetail(ingestedPostingId)}><BriefcaseIcon size={15} /> View posting</Link> : null}
+            {exclusionUndoIds.length && !pending ? (
+              <button className="button compact" type="button" onClick={() => void undoAppliedExclusions()}>Undo hiding roles</button>
+            ) : null}
             {!pending ? <button className="icon-button table-operation-close" type="button" onClick={() => setOperationStatus("")} aria-label="Dismiss status message"><XIcon size={15} /></button> : null}
           </div>
         </div>
-      ) : null}
-
-      {reviewQueue.length ? (
-        <section className="discovery-review-callout" aria-label="Discovery review queue">
-          <div>
-            <span className="eyebrow">Ready for your decision</span>
-            <strong>{reviewBatch.length} of {reviewQueue.length} roles in this batch</strong>
-            <p>Hunter ordered complete roles by fit and freshness. Review a bounded batch instead of scanning the entire inbox.</p>
-          </div>
-          <button className="button primary" type="button" onClick={() => setReviewCandidateId(reviewBatch[0].id)}>
-            Review next
-          </button>
-        </section>
       ) : null}
 
       <div className="toolbar discovery-results-toolbar" aria-label="Discovery result filters">
@@ -592,6 +734,16 @@ export function DiscoveryMode({ data, refresh }: DiscoveryModeProps) {
           <SearchIcon />
           <input value={resultSearch} onChange={event => setResultSearch(event.target.value)} type="search" placeholder="Search roles, companies, sources, and fit..." />
         </label>
+        {reviewQueue.length ? (
+          <button
+            className="button primary discovery-review-next"
+            type="button"
+            title={`Review the top ${reviewBatch.length} of ${reviewQueue.length} new roles, ordered by fit and freshness`}
+            onClick={() => setReviewCandidateId(reviewBatch[0].id)}
+          >
+            Review next <span>{reviewBatch.length} of {reviewQueue.length}</span>
+          </button>
+        ) : null}
         <button className="button" type="button" onClick={() => { setResultSearch(""); setResultFilter("new"); }}><FilterIcon size={15} /> Clear</button>
       </div>
 
@@ -621,9 +773,9 @@ export function DiscoveryMode({ data, refresh }: DiscoveryModeProps) {
               <th>Company</th>
               <th>Industry</th>
               <th>Size</th>
-              <th>Fit</th>
-              <th>Processing</th>
-              <th>Last seen</th>
+              <th>Match</th>
+              <th>Source</th>
+              <th>Freshness</th>
               <th>Actions</th>
             </tr>
           </thead>
@@ -660,12 +812,20 @@ export function DiscoveryMode({ data, refresh }: DiscoveryModeProps) {
                   ) : (
                     <span className="pill fit-pending">Pending</span>
                   )}
+                  <span className="cell-subtle">{processingLabel(candidate)}</span>
                 </td>
                 <td>
-                  <span className={`pill discovery-${candidate.processing_status}`}>{processingLabel(candidate)}</span>
-                  <span className="cell-subtle">{freshnessLabel(candidate)}</span>
+                  <span className={`pill source-${candidate.source_trust}`}>{candidate.source_trust_label}</span>
+                  <span className="cell-subtle">{candidate.source_confidence} confidence</span>
                 </td>
-                <td>{candidate.last_seen_at || candidate.captured_at ? dateOnlyLabel(candidate.last_seen_at || candidate.captured_at) : "Unknown"}</td>
+                <td>
+                  <span className={`pill freshness-${candidate.freshness_status || "unchecked"}`}>
+                    {freshnessShortLabel(candidate)}
+                  </span>
+                  <span className="cell-subtle">
+                    {candidate.freshness_checked_at ? dateOnlyLabel(candidate.freshness_checked_at) : "Not checked"}
+                  </span>
+                </td>
                 <td>
                   <div className="table-actions">
                     <a className="button compact" href={candidate.canonical_url || candidate.url} target="_blank" rel="noreferrer"><ExternalIcon size={15} /> Open</a>
@@ -705,20 +865,21 @@ export function DiscoveryMode({ data, refresh }: DiscoveryModeProps) {
           candidate={reviewCandidate}
           company={companyById.get(reviewCandidate.company_id)}
           applications={data.applications}
-          index={reviewBatch.findIndex(candidate => candidate.id === reviewCandidate.id)}
-          total={reviewBatch.length}
+          index={activeReviewCandidates.findIndex(candidate => candidate.id === reviewCandidate.id)}
+          total={activeReviewCandidates.length}
           pending={pending}
           close={() => setReviewCandidateId("")}
           previous={() => {
-            const index = reviewBatch.findIndex(candidate => candidate.id === reviewCandidate.id);
-            setReviewCandidateId(reviewBatch[index - 1]?.id || reviewCandidate.id);
+            const index = activeReviewCandidates.findIndex(candidate => candidate.id === reviewCandidate.id);
+            setReviewCandidateId(activeReviewCandidates[index - 1]?.id || reviewCandidate.id);
           }}
           next={() => setReviewCandidateId(nextReviewCandidateId(reviewCandidate))}
           edit={() => {
             setReviewCandidateId("");
             setEditingCandidate(reviewCandidate);
           }}
-          ignore={() => void reviewCandidateStatus(reviewCandidate, "ignored")}
+          ignore={reason => void reviewCandidateStatus(reviewCandidate, "ignored", reason)}
+          markCompanyNotInterested={() => void markCandidateCompanyNotInterested(reviewCandidate)}
           markDuplicate={applicationId => void reviewCandidateDuplicate(reviewCandidate, applicationId)}
           ingest={() => void reviewCandidateStatus(reviewCandidate, "ingested")}
         />
@@ -727,51 +888,26 @@ export function DiscoveryMode({ data, refresh }: DiscoveryModeProps) {
   );
 }
 
-function RunDiagnostics({ search }: { search: DiscoverySearch }) {
-  const summary = search.last_run_summary;
-  const sources = summary.sources || [];
-  const enrichment = summary.enrichment;
-  return (
-    <div className="discovery-run-diagnostics">
-      {enrichment ? (
-        <div className="discovery-diagnostic-metrics">
-          <span><strong>{enrichment.processed_count}</strong> queue processed</span>
-          <span><strong>{enrichment.posting_checked_count}</strong> postings checked</span>
-          <span><strong>{enrichment.ready_count}</strong> ready</span>
-          <span><strong>{enrichment.remaining_count}</strong> remaining</span>
-        </div>
-      ) : null}
-      {sources.length ? (
-        <div className="discovery-source-runs">
-          {sources.map((source, index) => (
-            <div key={`${source.source}-${source.query_family}-${source.lane_id}-${index}`}>
-              <strong>{source.label}</strong>
-              <span>{source.lane_label} · {source.query_family_label}</span>
-              <span>{source.found_count} found across {source.page_count} page{source.page_count === 1 ? "" : "s"}</span>
-            </div>
-          ))}
-        </div>
-      ) : <p>No per-source diagnostics were retained for this run.</p>}
-      {(summary.errors || []).length ? (
-        <ul className="discovery-run-errors">
-          {(summary.errors || []).map((error, index) => <li key={`${error}-${index}`}>{error}</li>)}
-        </ul>
-      ) : null}
-    </div>
-  );
-}
-
 function FitBrief({ candidate, company }: { candidate: DiscoveryCandidate; company?: Company }) {
   return (
     <section className="discovery-fit-brief" aria-label="Fit brief">
-      <div className="discovery-fit-headline">
-        <span className={`pill ${fitClass(candidate.fit_score)}`}>{candidate.fit_score || "Pending"}</span>
+      <div className="discovery-signal-strip" aria-label="Role quality signals">
         <div>
-          <strong>{candidate.fit_summary || "Hunter needs more posting details before scoring fit."}</strong>
-          <span>
-            {candidate.lane_match || "Search-lane match needs confirmation"} · {candidate.source_confidence || "Low"} source confidence
-          </span>
+          <span>Match</span>
+          <strong>{candidate.processing_status === "ready" ? candidate.fit_score || "—" : "Pending"}</strong>
         </div>
+        <div>
+          <span>Source</span>
+          <strong>{candidate.source_trust_label}</strong>
+        </div>
+        <div>
+          <span>Freshness</span>
+          <strong>{freshnessShortLabel(candidate)}</strong>
+        </div>
+      </div>
+      <div className="discovery-fit-summary">
+        <strong>{candidate.fit_summary || "Hunter needs more posting details before scoring fit."}</strong>
+        <span>{candidate.lane_match || "Search-lane match needs confirmation"}</span>
       </div>
       <div className="discovery-fit-columns">
         <div>
@@ -804,6 +940,7 @@ function CandidateReviewModal({
   next,
   edit,
   ignore,
+  markCompanyNotInterested,
   markDuplicate,
   ingest
 }: {
@@ -817,20 +954,26 @@ function CandidateReviewModal({
   previous: () => void;
   next: () => void;
   edit: () => void;
-  ignore: () => void;
+  ignore: (reason: string) => void;
+  markCompanyNotInterested: () => void;
   markDuplicate: (applicationId: string) => void;
   ingest: () => void;
 }) {
   const [duplicateOpen, setDuplicateOpen] = useState(false);
+  const [ignoreOpen, setIgnoreOpen] = useState(false);
 
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape" && ignoreOpen) {
+        setIgnoreOpen(false);
+        return;
+      }
       if (event.key === "Escape" && duplicateOpen) {
         setDuplicateOpen(false);
         return;
       }
       if (event.key === "Escape") close();
-      if (duplicateOpen) return;
+      if (duplicateOpen || ignoreOpen) return;
       if (
         event.target instanceof HTMLInputElement
         || event.target instanceof HTMLTextAreaElement
@@ -841,7 +984,7 @@ function CandidateReviewModal({
     }
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [close, duplicateOpen, next, previous]);
+  }, [close, duplicateOpen, ignoreOpen, next, previous]);
 
   return (
     <div className="modal-backdrop">
@@ -878,6 +1021,31 @@ function CandidateReviewModal({
             confirm={markDuplicate}
           />
         ) : null}
+        {ignoreOpen ? (
+          <section className="discovery-ignore-reasons" aria-label="Why are you ignoring this role?">
+            <div>
+              <strong>What made this a poor fit?</strong>
+              <span>Optional, but it helps Hunter make better suggestions.</span>
+            </div>
+            <div className="discovery-ignore-options">
+              {IGNORE_REASON_OPTIONS.map(option => (
+                <button
+                  className="button compact"
+                  key={option.id}
+                  type="button"
+                  disabled={pending}
+                  onClick={() => ignore(option.id)}
+                >
+                  {option.label}
+                </button>
+              ))}
+              <button className="button compact subtle" type="button" disabled={pending} onClick={() => ignore("")}>
+                Skip reason
+              </button>
+              <button className="icon-button" type="button" onClick={() => setIgnoreOpen(false)} aria-label="Cancel ignoring"><XIcon size={14} /></button>
+            </div>
+          </section>
+        ) : null}
         <div className="discovery-review-actions">
           <div>
             <button className="button" type="button" disabled={index <= 0 || pending} onClick={previous}>Previous</button>
@@ -886,7 +1054,18 @@ function CandidateReviewModal({
           <div>
             <a className="button" href={candidate.canonical_url || candidate.url} target="_blank" rel="noreferrer"><ExternalIcon size={15} /> Open posting</a>
             <button className="button" type="button" disabled={pending} onClick={edit}>Edit details</button>
-            <button className="button" type="button" disabled={pending} onClick={ignore}>Ignore</button>
+            <button className="button" type="button" disabled={pending} onClick={() => setIgnoreOpen(true)}>Ignore</button>
+            <button
+              className="button company-not-interested"
+              type="button"
+              disabled={pending || !company}
+              onClick={markCompanyNotInterested}
+              title={company
+                ? `Hide current and future Discovery roles from ${company.name}`
+                : "Associate a company before marking it Not interested"}
+            >
+              Not interested in company
+            </button>
             <button className="button" type="button" disabled={pending || !applications.length} onClick={() => setDuplicateOpen(true)}>
               Mark duplicate
             </button>
@@ -1046,8 +1225,10 @@ function CandidateDetailsModal({
   close: () => void;
   save: (updates: DiscoveryCandidateDetails) => Promise<void>;
 }) {
+  const initialCompany = companies.find(company => company.id === candidate.company_id);
   const [draft, setDraft] = useState<DiscoveryCandidateDetails>({
     company_id: candidate.company_id,
+    company_name: initialCompany?.name || candidate.company || "",
     title: candidate.title,
     canonical_url: candidate.canonical_url,
     location: candidate.location,
@@ -1055,7 +1236,27 @@ function CandidateDetailsModal({
     description_text: candidate.description_text,
     notes: candidate.notes
   });
-  const linkedCompany = companies.find(company => company.id === draft.company_id);
+  const [descriptionEditorOpen, setDescriptionEditorOpen] = useState(
+    () => !usableDiscoveryDescription(candidate.description_text)
+  );
+  const companyName = draft.company_name || "";
+  const detailsRequirements = candidateDetailRequirements(draft);
+  const descriptionRequired = !usableDiscoveryDescription(draft.description_text || "");
+  const linkedCompany = companies.find(company => company.id === draft.company_id)
+    || companies.find(company => normalizedCompanyName(company.name) === normalizedCompanyName(companyName));
+  const companyOptions = useMemo(
+    () => [...companies].sort((left, right) => left.name.localeCompare(right.name)),
+    [companies]
+  );
+
+  function updateCompanyName(value: string) {
+    const match = companies.find(company => normalizedCompanyName(company.name) === normalizedCompanyName(value));
+    setDraft(current => ({
+      ...current,
+      company_id: match?.id || "",
+      company_name: value
+    }));
+  }
 
   return (
     <div className="modal-backdrop">
@@ -1068,24 +1269,58 @@ function CandidateDetailsModal({
         <form className="management-form" onSubmit={event => { event.preventDefault(); void save(draft); }}>
           <label className="form-field">
             Company
-            <select required value={draft.company_id || ""} onChange={event => setDraft({ ...draft, company_id: event.target.value })}>
-              <option value="">Select a company</option>
-              {companies.map(company => <option key={company.id} value={company.id}>{company.name}</option>)}
-            </select>
+            <input
+              required
+              list="discovery-company-options"
+              value={companyName}
+              onChange={event => updateCompanyName(event.target.value)}
+              placeholder="Select or enter a company"
+              autoComplete="off"
+            />
+            <datalist id="discovery-company-options">
+              {companyOptions.map(company => <option key={company.id} value={company.name} />)}
+            </datalist>
+            <small>Select an existing company or type a new company name.</small>
           </label>
           <label className="form-field">Role title <input required value={draft.title || ""} onChange={event => setDraft({ ...draft, title: event.target.value })} /></label>
           <label className="form-field">Location <input value={draft.location || ""} onChange={event => setDraft({ ...draft, location: event.target.value })} /></label>
           <label className="form-field">Work mode <input value={draft.work_mode || ""} onChange={event => setDraft({ ...draft, work_mode: event.target.value })} placeholder="Remote, Hybrid, or On-site" /></label>
+          {detailsRequirements.length ? (
+            <div className="form-field full discovery-details-requirements" role="note">
+              <strong>Still needed before Hunter can verify this role</strong>
+              <ul>{detailsRequirements.map(requirement => <li key={requirement}>{requirement}</li>)}</ul>
+            </div>
+          ) : candidate.processing_status !== "ready" ? (
+            <div className="form-field full discovery-details-requirements complete" role="note">
+              <strong>Ready to verify</strong>
+              <span>Save these details to rescore the role.</span>
+            </div>
+          ) : null}
           {linkedCompany ? (
             <div className="form-field full discovery-company-source">
               <span>{[linkedCompany.industry, linkedCompany.company_size].filter(Boolean).join(" · ") || "Company details have not been researched yet."}</span>
               <Link to={routes.companyDetail(linkedCompany.id)}>View or research company details</Link>
             </div>
+          ) : companyName.trim() ? (
+            <div className="form-field full discovery-company-source new-company">
+              <span>Hunter will add “{companyName.trim()}” as a discovered company when you save.</span>
+            </div>
           ) : null}
           <label className="form-field full">Employer posting URL <input type="url" value={draft.canonical_url || ""} onChange={event => setDraft({ ...draft, canonical_url: event.target.value })} /></label>
-          <details className="form-field full discovery-description-editor">
-            <summary>Edit raw posting description</summary>
+          <details
+            className="form-field full discovery-description-editor"
+            open={descriptionEditorOpen}
+            onToggle={event => setDescriptionEditorOpen(event.currentTarget.open)}
+          >
+            <summary>
+              Posting description
+              {descriptionRequired ? <span className="discovery-description-required">Required</span> : null}
+            </summary>
             <textarea className="discovery-description-input" value={draft.description_text || ""} onChange={event => setDraft({ ...draft, description_text: event.target.value })} />
+            <small>
+              {(draft.description_text || "").trim().length.toLocaleString()} characters
+              {descriptionRequired ? " · Add at least 500 characters of actual posting content, not a redirect or search-page response." : " · Complete enough for fit scoring."}
+            </small>
           </details>
           <label className="form-field full">Notes <textarea value={draft.notes || ""} onChange={event => setDraft({ ...draft, notes: event.target.value })} /></label>
           <div className="detail-actions form-field full">
@@ -1096,6 +1331,39 @@ function CandidateDetailsModal({
       </article>
     </div>
   );
+}
+
+function normalizedCompanyName(value: string) {
+  return value.trim().toLocaleLowerCase();
+}
+
+function usableDiscoveryDescription(value: string) {
+  const description = value.trim();
+  if (description.length < 500) return false;
+  if (!description.startsWith("{")) return true;
+  try {
+    const payload = JSON.parse(description) as Record<string, unknown>;
+    return payload.widget !== "redirect" && !payload.externalSpa;
+  } catch {
+    return true;
+  }
+}
+
+function candidateDetailRequirements(details: DiscoveryCandidateDetails) {
+  const requirements: string[] = [];
+  if (!details.company_id && !(details.company_name || "").trim()) {
+    requirements.push("Select or add a company.");
+  }
+  if (!(details.title || "").trim()) {
+    requirements.push("Add the role title.");
+  }
+  if (!usableDiscoveryDescription(details.description_text || "")) {
+    requirements.push("Replace the captured response with the complete posting description.");
+  }
+  if (!(details.location || "").trim() && (details.work_mode || "").trim().toLocaleLowerCase() !== "remote") {
+    requirements.push("Add a location, or set the work mode to Remote.");
+  }
+  return requirements;
 }
 
 function searchUpdates(search: DiscoverySearch): DiscoverySearchUpdates {
@@ -1155,22 +1423,45 @@ function workModeLabel(mode: DiscoverySearchLaneDefinition["work_modes"][number]
   return WORK_MODE_OPTIONS.find(option => option.id === mode)?.label || titleCase(mode);
 }
 
-function discoveryCandidateMatches(candidate: DiscoveryCandidate, filter: DiscoveryFilter, latestSeenAt: string) {
-  if (filter === "latest") return Boolean(latestSeenAt) && candidate.last_seen_at === latestSeenAt;
+function discoveryCandidateMatches(candidate: DiscoveryCandidate, filter: DiscoveryFilter) {
   if (filter === "recommended") {
-    return candidate.status === "new"
-      && candidate.processing_status === "ready"
-      && Number(candidate.fit_score || 0) >= 45;
+    return candidate.recommendation_eligible;
   }
   if (filter === "needs-details") return candidate.status === "new" && candidate.processing_status !== "ready";
   if (filter === "all") return true;
   return candidate.status === filter;
 }
 
+function discoveryCandidateComparator(left: DiscoveryCandidate, right: DiscoveryCandidate) {
+  const freshnessRank: Record<string, number> = {
+    "confirmed-open": 3,
+    "": 1,
+    "needs-review": 0,
+    closed: -1
+  };
+  const sourceRank: Record<string, number> = {
+    employer: 3,
+    network: 2,
+    unverified: 1,
+    aggregator: 0,
+    closed: -1
+  };
+  return Number(right.recommendation_eligible) - Number(left.recommendation_eligible)
+    || (freshnessRank[right.freshness_status] ?? 0) - (freshnessRank[left.freshness_status] ?? 0)
+    || (sourceRank[right.source_trust] ?? 0) - (sourceRank[left.source_trust] ?? 0)
+    || Number(right.processing_status === "ready") - Number(left.processing_status === "ready")
+    || Number(right.fit_score || 0) - Number(left.fit_score || 0)
+    || (right.last_seen_at || "").localeCompare(left.last_seen_at || "");
+}
+
+function candidateMatchesExclusionTerms(candidate: DiscoveryCandidate, terms: string[]) {
+  const text = `${candidate.title} ${candidate.description_text}`.toLowerCase();
+  return terms.some(term => term.trim() && text.includes(term.trim().toLowerCase()));
+}
+
 function processingLabel(candidate: DiscoveryCandidate) {
   if (candidate.processing_status === "ready") return "Verified";
-  if (candidate.processing_status === "partial") return "Provisional";
-  return titleCase(candidate.processing_status);
+  return "Needs Details";
 }
 
 function discoveryCandidateIncludes(candidate: DiscoveryCandidate, company: Company | undefined, search: string) {
@@ -1205,6 +1496,13 @@ function freshnessLabel(candidate: DiscoveryCandidate) {
   if (candidate.freshness_status === "closed") return "Closed or no longer accepting applications";
   if (candidate.freshness_status === "needs-review") return "Freshness needs review";
   return "Freshness not checked";
+}
+
+function freshnessShortLabel(candidate: DiscoveryCandidate) {
+  if (candidate.freshness_status === "confirmed-open") return "Open";
+  if (candidate.freshness_status === "closed") return "Closed";
+  if (candidate.freshness_status === "needs-review") return "Review";
+  return "Unchecked";
 }
 
 function sourceLabel(url: string) {

@@ -2,7 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from hunter import chat_history, paths, sqlite_store
+from hunter import app_state, chat_history, paths, sqlite_store, suggestions
 
 
 class HunterAgentHistoryTest(unittest.TestCase):
@@ -54,7 +54,7 @@ class HunterAgentHistoryTest(unittest.TestCase):
         self.assertEqual(result["cleared"], 2)
         self.assertEqual(chat_history.list_messages(), [])
 
-    def test_initialize_creates_agent_messages_posting_snapshots_and_resume_versions_schema_version_fifteen(self):
+    def test_initialize_creates_runtime_tables_and_schema_version_sixteen(self):
         sqlite_store.initialize()
 
         with sqlite_store.connect() as connection:
@@ -67,6 +67,9 @@ class HunterAgentHistoryTest(unittest.TestCase):
             resume_versions_table = connection.execute(
                 "SELECT name FROM sqlite_master WHERE type='table' AND name='resume_versions'"
             ).fetchone()
+            suggestion_dismissals_table = connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='suggestion_dismissals'"
+            ).fetchone()
             version = connection.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
             snapshot_columns = {
                 row["name"] for row in connection.execute("PRAGMA table_info(posting_snapshots)").fetchall()
@@ -75,11 +78,26 @@ class HunterAgentHistoryTest(unittest.TestCase):
         self.assertEqual(table["name"], "agent_messages")
         self.assertEqual(snapshot_table["name"], "posting_snapshots")
         self.assertEqual(resume_versions_table["name"], "resume_versions")
-        self.assertEqual(version["value"], "15")
+        self.assertEqual(suggestion_dismissals_table["name"], "suggestion_dismissals")
+        self.assertEqual(version["value"], "16")
         self.assertIn("capture_method", snapshot_columns)
         self.assertIn("capture_model", snapshot_columns)
         self.assertIn("sources_json", snapshot_columns)
         self.assertEqual(chat_history.API_VERSION, 2)
+
+    def test_suggestion_dismissal_persists_in_app_state_and_can_be_restored(self):
+        dismissal = suggestions.dismiss("company-decision:CO0001")
+
+        self.assertTrue(dismissal["dismissed_at"])
+        self.assertEqual(
+            app_state.build_payload()["dismissed_suggestion_ids"],
+            ["company-decision:CO0001"],
+        )
+
+        restoration = suggestions.restore("company-decision:CO0001")
+
+        self.assertTrue(restoration["restored"])
+        self.assertEqual(app_state.build_payload()["dismissed_suggestion_ids"], [])
 
     def test_initialize_marks_existing_posting_snapshots_as_fetched(self):
         paths.DATA_DIR.mkdir(parents=True, exist_ok=True)

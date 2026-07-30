@@ -4,7 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import quote, unquote_plus
 
-from hunter import applications, app_state, browser_discovery, companies, discovery, paths, repository, sqlite_store
+from hunter import applications, app_state, browser_discovery, companies, discovery, paths, repository, schema, sqlite_store
 
 
 class HunterDiscoveryTest(unittest.TestCase):
@@ -140,6 +140,84 @@ class HunterDiscoveryTest(unittest.TestCase):
         self.assertIn("start=25", opened_urls[1][0])
         self.assertTrue(opened_urls[1][1])
 
+    def test_browser_results_exclude_builtin_aggregator_network(self):
+        results = discovery.normalize_browser_results(
+            [
+                {
+                    "url": "https://builtin.com/job/technical-program-manager/8018128",
+                    "title": "Technical Program Manager",
+                },
+                {
+                    "url": "https://www.builtinchicago.org/job/platform-program-manager/7776618",
+                    "title": "Platform Program Manager",
+                },
+                {
+                    "url": "https://jobs.example.com/job/technical-program-manager",
+                    "title": "Technical Program Manager",
+                },
+            ]
+        )
+
+        self.assertEqual(
+            [result["url"] for result in results],
+            ["https://jobs.example.com/job/technical-program-manager"],
+        )
+
+    def test_builtin_candidates_are_hidden_without_deleting_history(self):
+        rows = []
+        for candidate_id, url in [
+            ("DC0001", "https://builtinboston.com/job/technical-program-manager/123"),
+            ("DC0002", "https://jobs.example.com/job/technical-program-manager"),
+        ]:
+            row = {field: "" for field in schema.DISCOVERY_CANDIDATE_FIELDS}
+            row.update(
+                {
+                    "id": candidate_id,
+                    "title": "Technical Program Manager",
+                    "url": url,
+                    "canonical_url": url,
+                    "status": "new",
+                    "processing_status": "ready",
+                }
+            )
+            rows.append(row)
+        repository.write_discovery_candidates(rows)
+
+        self.assertEqual(
+            [candidate["id"] for candidate in discovery.list_candidates()],
+            ["DC0002"],
+        )
+        self.assertEqual(len(repository.read_discovery_candidates()), 2)
+
+    def test_expired_structured_posting_date_marks_candidate_unavailable(self):
+        candidate = {
+            "company": "Example",
+            "title": "Technical Program Manager",
+            "status": "new",
+            "source_platform": "employer",
+            "description_text": "Detailed posting content " * 30,
+            "warnings": "",
+        }
+
+        discovery.apply_browser_details(
+            candidate,
+            {
+                "availability_status": "open",
+                "valid_through": "2026-07-27",
+            },
+        )
+
+        self.assertEqual(candidate["freshness_status"], "closed")
+        self.assertEqual(candidate["status"], "unavailable")
+
+    def test_valid_through_today_is_not_expired(self):
+        self.assertFalse(
+            discovery.posting_valid_through_expired(
+                "2026-07-29",
+                reference=discovery.datetime(2026, 7, 29, 18, 0),
+            )
+        )
+
     def test_candidate_ranking_prefers_verified_details_before_provisional_fit(self):
         candidates = [
             {"title": "Lower", "fit_score": "45", "processing_status": "ready", "description_text": "complete"},
@@ -208,6 +286,40 @@ class HunterDiscoveryTest(unittest.TestCase):
         self.assertEqual(opened["lanes"][1]["work_modes"], ["remote"])
         self.assertTrue(opened["search"]["last_opened_at"])
         self.assertEqual(app_state.build_payload()["discovery_searches"][0]["name"], "Platform leadership")
+
+    def test_preference_suggestion_is_search_specific_and_resolves_when_saved(self):
+        search = self.save_search("TPM", "technical program manager")
+        other_search = self.save_search("Product", "product operations manager")
+        rows = []
+        for index, title in enumerate(
+            ["Technical Project Manager", "Senior Technical Project Manager"],
+            start=1,
+        ):
+            row = {field: "" for field in schema.DISCOVERY_CANDIDATE_FIELDS}
+            row.update(
+                {
+                    "id": f"DC000{index}",
+                    "search_id": search["id"],
+                    "title": title,
+                    "url": f"https://example.com/jobs/{index}",
+                    "status": "ignored",
+                    "processing_status": "ready",
+                }
+            )
+            rows.append(row)
+        repository.write_discovery_candidates(rows)
+
+        suggestions = discovery.preference_suggestions()
+
+        self.assertEqual(len(suggestions), 1)
+        self.assertEqual(suggestions[0]["search_id"], search["id"])
+        self.assertEqual(suggestions[0]["term"], "project")
+        self.assertNotEqual(suggestions[0]["search_id"], other_search["id"])
+
+        discovery.upsert_search(search["id"], {"excluded_terms": ["project"]})
+
+        self.assertEqual(discovery.preference_suggestions(), [])
+        self.assertEqual(app_state.build_payload()["discovery_preference_suggestions"], [])
 
     def test_search_now_runs_all_lanes_and_builtin_sources_without_source_configuration(self):
         search = self.save_search(
@@ -283,6 +395,13 @@ class HunterDiscoveryTest(unittest.TestCase):
         )
         self.assertTrue(any("Minnesota" in source["query"] for source in result["sources"]))
         self.assertTrue(any("United States" in source["query"] and "remote" in source["query"] for source in result["sources"]))
+        self.assertTrue(
+            all(
+                "-site:builtin.com" in source["query"]
+                for source in result["sources"]
+                if source["source"] == "employer-web"
+            )
+        )
         self.assertEqual(result["found_count"], 2)
         self.assertEqual(result["new_count"], 2)
         self.assertEqual({candidate["source_platform"] for candidate in result["captured"]}, {"ashby", "linkedin"})
@@ -472,6 +591,46 @@ class HunterDiscoveryTest(unittest.TestCase):
         self.assertTrue(result["search"]["last_run_at"])
         self.assertEqual(result["search"]["last_run_summary"]["enriched_count"], 1)
 
+    def test_search_skips_not_interested_company_before_enrichment_or_storage(self):
+        search = self.save_search("Technical platforms", "technical program manager")
+        company = companies.upsert_company(
+            "",
+            {"name": "Example Labs", "interest_status": "not-interested"},
+        )
+        detail_calls = []
+
+        result = discovery.run_search(
+            search["id"],
+            browser_searcher=lambda engine, value, page: (
+                [{
+                    "url": "https://www.linkedin.com/jobs/view/1234567890",
+                    "title": "Technical Program Manager",
+                    "company": "Example Labs",
+                    "location": "United States",
+                    "snippet": "Remote technical program role.",
+                }]
+                if engine == "linkedin"
+                else []
+            ),
+            browser_detailer=lambda url: detail_calls.append(url) or {},
+        )
+
+        self.assertEqual(result["found_count"], 0)
+        self.assertEqual(result["qualified_count"], 0)
+        self.assertGreaterEqual(result["skipped_count"], 1)
+        self.assertEqual(detail_calls, [])
+        self.assertEqual(repository.read_discovery_candidates(), [])
+        self.assertFalse(
+            discovery.enrichment_needed(
+                {
+                    "company_id": company["id"],
+                    "status": "new",
+                    "processing_status": "needs-details",
+                },
+                company,
+            )
+        )
+
     def test_search_researches_missing_company_information_and_links_company(self):
         search = self.save_search("Technical platforms", "technical program manager")
         linkedin_url = "https://www.linkedin.com/jobs/view/1234567890"
@@ -538,6 +697,22 @@ class HunterDiscoveryTest(unittest.TestCase):
         }
 
         self.assertEqual(discovery.processing_status(candidate), "partial")
+
+    def test_manual_details_clear_linkedin_warning_for_managed_company(self):
+        candidate = {
+            "company_id": "CO0001",
+            "title": "Technical Program Manager",
+            "location": "United States",
+            "work_mode": "Remote",
+            "source_platform": "linkedin",
+            "description_text": "Detailed posting content " * 30,
+            "warnings": discovery.LINKEDIN_DETAILS_WARNING,
+        }
+
+        discovery.apply_manual_details(candidate, {"notes": "Reviewed manually."})
+
+        self.assertEqual(candidate["warnings"], "")
+        self.assertEqual(discovery.processing_status(candidate), "ready")
 
     def test_requisition_identity_deduplicates_cross_domain_workday_role(self):
         direct = {
@@ -650,6 +825,149 @@ class HunterDiscoveryTest(unittest.TestCase):
                 "https://example.com/careers/senior-technical-program-manager-123",
                 "Senior Technical Program Manager",
             )
+        )
+
+    def test_search_rejects_ats_redirect_to_company_board(self):
+        search = self.save_search("Technical platforms", "technical program manager")
+        result_url = "https://job-boards.greenhouse.io/example/jobs/1234567"
+        board_url = "https://job-boards.greenhouse.io/example?error=true"
+        page = """
+        <html><head><script type="application/ld+json">
+          {
+            "@type": "JobPosting",
+            "title": "Senior Technical Program Manager",
+            "description": "Lead platform programs, planning, delivery, risk management, and launches.",
+            "hiringOrganization": {"name": "Example Labs"},
+            "jobLocationType": "TELECOMMUTE"
+          }
+        </script></head><body>Apply now</body></html>
+        """
+
+        result = discovery.run_search(
+            search["id"],
+            browser_searcher=lambda engine, value, page: (
+                [{
+                    "url": result_url,
+                    "title": "Senior Technical Program Manager at Example Labs",
+                    "snippet": "United States · Remote · Lead platform programs.",
+                }]
+                if engine == "google"
+                else []
+            ),
+            posting_fetcher=lambda url: {
+                "status": 200,
+                "final_url": board_url,
+                "html": page,
+                "error": "",
+            },
+        )
+
+        self.assertEqual(result["evaluated_count"], 1)
+        self.assertEqual(result["found_count"], 0)
+        self.assertGreaterEqual(result["skipped_count"], 1)
+        self.assertEqual(repository.read_discovery_candidates(), [])
+
+    def test_search_screens_aggregator_from_new_but_keeps_diagnostic_record(self):
+        search = self.save_search("Technical platforms", "technical program manager")
+        result_url = "https://jobright.ai/jobs/info/123"
+        description = (
+            "Lead technical platform programs across planning, execution, dependency management, risk reviews, "
+            "stakeholder communication, launch readiness, operating mechanisms, and continuous improvement. "
+            "Partner with product and engineering leaders to define milestones, resolve ambiguity, and deliver "
+            "measurable outcomes across distributed teams."
+        )
+        page = f"""
+        <html><head><script type="application/ld+json">
+          {{
+            "@type": "JobPosting",
+            "title": "Principal Technical Program Manager",
+            "description": "{description}",
+            "hiringOrganization": {{"name": "Providence Health & Services"}},
+            "jobLocationType": "TELECOMMUTE"
+          }}
+        </script></head><body>Apply now</body></html>
+        """
+
+        result = discovery.run_search(
+            search["id"],
+            browser_searcher=lambda engine, value, page: (
+                [{
+                    "url": result_url,
+                    "title": "Principal Technical Program Manager at Providence Health & Services | Jobright.ai",
+                    "snippet": "United States · Remote · Lead technical platform programs.",
+                }]
+                if engine == "google"
+                else []
+            ),
+            posting_fetcher=lambda url: {
+                "status": 200,
+                "final_url": result_url,
+                "html": page,
+                "error": "",
+            },
+        )
+
+        candidate = result["captured"][0]
+        self.assertEqual(result["qualified_count"], 0)
+        self.assertEqual(result["new_count"], 0)
+        self.assertEqual(result["screened_count"], 1)
+        self.assertEqual(candidate["status"], discovery.SCREENED_STATUS)
+        self.assertIn("aggregator", candidate["warnings"].lower())
+        extracted = discovery.extracted_candidate(
+            result_url,
+            fetcher=lambda url: {
+                "status": 200,
+                "final_url": result_url,
+                "html": page,
+                "error": "",
+            },
+        )
+        self.assertEqual(extracted["company"], "Providence Health & Services")
+
+    def test_source_trust_checks_low_trust_host_before_company_domain(self):
+        candidate = {
+            "canonical_url": "https://jobright.ai/jobs/info/123",
+            "source_platform": "employer",
+            "freshness_status": "",
+        }
+        company = {"website": "https://jobright.ai"}
+
+        trust = discovery.candidate_source_trust(candidate, company)
+
+        self.assertEqual(trust["id"], "aggregator")
+        self.assertFalse(trust["is_direct_employer_source"])
+
+    def test_source_trust_redetects_workday_from_canonical_url(self):
+        candidate = {
+            "canonical_url": (
+                "https://zillow.wd5.myworkdayjobs.com/en-US/"
+                "Zillow_Group_External/job/Remote-United-States/"
+                "Principal-Technical-Program-Manager_P750335-1"
+            ),
+            "source_platform": "employer",
+            "freshness_status": "",
+        }
+
+        trust = discovery.candidate_source_trust(candidate)
+
+        self.assertEqual(trust["id"], "employer")
+        self.assertTrue(trust["is_direct_employer_source"])
+
+    def test_work_mode_requires_role_level_remote_evidence(self):
+        self.assertEqual(
+            discovery.work_mode_from_text(
+                "",
+                "Collaborate with remote teams and support remote monitoring tools.",
+            ),
+            "",
+        )
+        self.assertEqual(
+            discovery.work_mode_from_text("", "This position is fully remote."),
+            "Remote",
+        )
+        self.assertEqual(
+            discovery.work_mode_from_text("", "United States · Remote · Own platform programs."),
+            "Remote",
         )
 
     def test_location_signal_rejects_salary_disclosures_but_keeps_job_locations(self):
@@ -796,6 +1114,41 @@ class HunterDiscoveryTest(unittest.TestCase):
         self.assertEqual(ingested["posting"]["source_url"], "https://jobs.new-company.example/roles/tpm-devex")
         self.assertEqual(discovery.get_candidate(candidate["id"])["status"], "ingested")
         self.assertEqual(len(repository.read_posting_snapshots(ingested["posting"]["id"])), 1)
+
+    def test_candidate_details_can_select_existing_or_create_new_company(self):
+        search = self.save_search("Flexible company", "technical program manager")
+        original = companies.upsert_company("", {"name": "Original Labs"})
+        existing = companies.upsert_company("", {"name": "Existing Systems"})
+        candidate = discovery.capture_candidates(
+            search["id"],
+            "https://www.linkedin.com/jobs/view/2468013579",
+            details={
+                "company_id": original["id"],
+                "company_name": original["name"],
+                "title": "Technical Program Manager",
+            },
+        )["captured"][0]
+
+        selected = discovery.update_candidate_details(
+            candidate["id"],
+            {
+                "company_id": existing["id"],
+                "company_name": existing["name"],
+            },
+        )
+        self.assertEqual(selected["company_id"], existing["id"])
+
+        created = discovery.update_candidate_details(
+            candidate["id"],
+            {
+                "company_id": "",
+                "company_name": "Newly Discovered Company",
+            },
+        )
+        created_company = companies.get_company(created["company_id"])
+        self.assertNotIn(created["company_id"], {original["id"], existing["id"]})
+        self.assertEqual(created_company["name"], "Newly Discovered Company")
+        self.assertEqual(created_company["tracking_status"], "discovered")
 
     def test_mark_duplicate_associates_existing_posting_and_preserves_decision(self):
         search = self.save_search("Platforms", "technical program manager")
@@ -945,6 +1298,160 @@ class HunterDiscoveryTest(unittest.TestCase):
         self.assertEqual(candidate["source_confidence"], "High")
         self.assertEqual(enriched_company["industry"], "Software Development")
         self.assertEqual(enriched_company["company_size"], "201–500 employees")
+
+    def test_source_trust_distinguishes_employer_network_and_aggregator(self):
+        base = {
+            "status": "new",
+            "processing_status": "ready",
+            "fit_score": "80",
+            "freshness_status": "confirmed-open",
+        }
+        employer = discovery.candidate_payload(
+            {
+                **base,
+                "canonical_url": "https://jobs.ashbyhq.com/example/role",
+                "source_platform": "ashby",
+            }
+        )
+        network = discovery.candidate_payload(
+            {
+                **base,
+                "canonical_url": "https://www.linkedin.com/jobs/view/123",
+                "source_platform": "linkedin",
+            }
+        )
+        aggregator = discovery.candidate_payload(
+            {
+                **base,
+                "canonical_url": "https://infosecjobboard.com/job/123",
+                "source_platform": "employer",
+            }
+        )
+
+        self.assertEqual(employer["source_trust"], "employer")
+        self.assertTrue(employer["recommendation_eligible"])
+        self.assertEqual(network["source_trust"], "network")
+        self.assertTrue(network["recommendation_eligible"])
+        self.assertEqual(aggregator["source_trust"], "aggregator")
+        self.assertFalse(aggregator["recommendation_eligible"])
+        self.assertNotIn("Direct employer posting available", aggregator["fit_strengths"])
+
+    def test_apply_and_undo_search_exclusions_only_changes_matching_new_roles(self):
+        search = {field: "" for field in schema.DISCOVERY_SEARCH_FIELDS}
+        search.update(
+            {
+                "id": "DS0001",
+                "name": "TPM",
+                "keywords": "technical program manager",
+                "lanes_json": '[{"id":"lane-1","label":"US","location":"United States","work_modes":["remote"]}]',
+                "excluded_terms_json": '["infrastructure"]',
+            }
+        )
+        repository.write_discovery_searches([search])
+        rows = []
+        for candidate_id, title, status in [
+            ("DC0001", "Technical Program Manager, Infrastructure", "new"),
+            ("DC0002", "Technical Program Manager, Product", "new"),
+            ("DC0003", "Infrastructure Program Manager", "ingested"),
+        ]:
+            row = {field: "" for field in schema.DISCOVERY_CANDIDATE_FIELDS}
+            row.update(
+                {
+                    "id": candidate_id,
+                    "search_id": "DS0001",
+                    "title": title,
+                    "status": status,
+                }
+            )
+            rows.append(row)
+        repository.write_discovery_candidates(rows)
+
+        applied = discovery.apply_search_exclusions("DS0001")
+        changed = {row["id"]: row for row in repository.read_discovery_candidates()}
+
+        self.assertEqual(applied["candidate_ids"], ["DC0001"])
+        self.assertEqual(changed["DC0001"]["status"], "ignored")
+        self.assertEqual(changed["DC0001"]["ignore_reason"], "search-exclusion")
+        self.assertEqual(changed["DC0002"]["status"], "new")
+        self.assertEqual(changed["DC0003"]["status"], "ingested")
+
+        restored = discovery.undo_search_exclusions(applied["candidate_ids"])
+        changed = {row["id"]: row for row in repository.read_discovery_candidates()}
+
+        self.assertEqual(restored["candidate_ids"], ["DC0001"])
+        self.assertEqual(changed["DC0001"]["status"], "new")
+        self.assertEqual(changed["DC0001"]["ignore_reason"], "")
+
+    def test_ignore_reasons_keep_source_quality_feedback_out_of_keyword_suggestions(self):
+        search = {field: "" for field in schema.DISCOVERY_SEARCH_FIELDS}
+        search.update(
+            {
+                "id": "DS0001",
+                "name": "TPM",
+                "keywords": "technical program manager",
+                "lanes_json": '[{"id":"lane-1","label":"US","location":"United States","work_modes":["remote"]}]',
+            }
+        )
+        repository.write_discovery_searches([search])
+        rows = []
+        for index in range(2):
+            row = {field: "" for field in schema.DISCOVERY_CANDIDATE_FIELDS}
+            row.update(
+                {
+                    "id": f"DC000{index + 1}",
+                    "search_id": "DS0001",
+                    "title": "Technical Program Manager, Infrastructure",
+                    "status": "ignored",
+                    "ignore_reason": "poor-source",
+                }
+            )
+            rows.append(row)
+        repository.write_discovery_candidates(rows)
+
+        self.assertEqual(discovery.preference_suggestions(), [])
+
+        discovery.update_candidate_status("DC0001", "ignored", "wrong-role")
+        discovery.update_candidate_status("DC0002", "ignored", "wrong-role")
+
+        self.assertEqual(discovery.preference_suggestions()[0]["term"], "infrastructure")
+
+    def test_company_research_queue_fills_missing_active_companies_beyond_posting_batch(self):
+        candidate_rows = []
+        for index in range(5):
+            company = companies.upsert_company(
+                "",
+                {"name": f"Example {index}", "tracking_status": "discovered"},
+            )
+            row = {field: "" for field in schema.DISCOVERY_CANDIDATE_FIELDS}
+            row.update(
+                {
+                    "id": f"DC000{index + 1}",
+                    "company_id": company["id"],
+                    "title": "Technical Program Manager",
+                    "url": f"https://jobs.example{index}.com/role",
+                    "canonical_url": f"https://jobs.example{index}.com/role",
+                    "status": "new",
+                    "processing_status": "ready",
+                    "freshness_status": "confirmed-open",
+                    "freshness_checked_at": discovery.now_iso(),
+                }
+            )
+            candidate_rows.append(row)
+        repository.write_discovery_candidates(candidate_rows)
+        researched = []
+
+        result = discovery.continue_enrichment(
+            limit=1,
+            browser_detailer=lambda _url: {},
+            company_researcher=lambda name, _profile: researched.append(name) or {
+                "company_industry": "Software Development",
+                "company_size": "51-200 employees",
+            },
+        )
+
+        self.assertEqual(result["company_researched_count"], discovery.COMPANY_RESEARCH_LIMIT)
+        self.assertEqual(len(researched), discovery.COMPANY_RESEARCH_LIMIT)
+        self.assertEqual(result["company_research_remaining_count"], 2)
 
     def test_legacy_location_fields_migrate_into_search_lanes(self):
         repository.write_discovery_searches(

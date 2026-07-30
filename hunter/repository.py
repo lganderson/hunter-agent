@@ -171,6 +171,18 @@ def write_discovery_candidates(rows):
         sqlite_store.write_discovery_candidates(rows)
 
 
+def read_suggestion_dismissals():
+    return sqlite_store.read_suggestion_dismissals()
+
+
+def dismiss_suggestion(suggestion_id, dismissed_at):
+    return sqlite_store.dismiss_suggestion(suggestion_id, dismissed_at)
+
+
+def restore_suggestion(suggestion_id):
+    return sqlite_store.restore_suggestion(suggestion_id)
+
+
 def read_posting_note(application_id):
     if using_sqlite():
         return sqlite_store.read_posting_note(application_id)

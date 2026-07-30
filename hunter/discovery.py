@@ -30,6 +30,10 @@ COMPANY_RESEARCH_LIMIT = 3
 CONTINUE_ENRICHMENT_LIMIT = 10
 FRESHNESS_RECHECK_DAYS = 7
 MIN_READY_DESCRIPTION_CHARS = 500
+MIN_REVIEW_FIT_SCORE = 45
+SCREENED_STATUS = "screened"
+SCREENING_WARNING_PREFIX = "Screened from New: "
+DISCOVERY_EXCLUDED_COMPANY_INTEREST_STATUSES = {"not-interested", "archived"}
 TPM_QUERY_FAMILIES = [
     {
         "id": "exact",
@@ -69,6 +73,41 @@ COLLECTION_HOSTS = {
     "simplyhired.com",
     "ziprecruiter.com",
 }
+DIRECT_ATS_PLATFORMS = {"ashby", "greenhouse", "lever", "smartrecruiters", "workday"}
+DIRECT_ATS_HOSTS = {
+    "eightfold.ai",
+    "icims.com",
+    "oraclecloud.com",
+}
+LOW_TRUST_SOURCE_HOSTS = {
+    *COLLECTION_HOSTS,
+    "anitab.org",
+    "bebee.com",
+    "infosecjobboard.com",
+    "jobright.ai",
+    "jobs.capitalfactory.com",
+    "lensa.com",
+    "swiftcruit.ai",
+    "tealhq.com",
+}
+IGNORE_REASONS = {
+    "wrong-role",
+    "company",
+    "level",
+    "industry",
+    "location",
+    "stale",
+    "poor-source",
+    "other",
+    "search-exclusion",
+}
+BUILT_IN_SEARCH_DOMAINS = {
+    "builtin.com",
+    "builtinaustin.com",
+    "builtinboston.com",
+    "builtinchicago.org",
+    "builtinsf.com",
+}
 BUILT_IN_SEARCH_STRATEGIES = [
     {
         "id": "job-boards",
@@ -84,7 +123,8 @@ BUILT_IN_SEARCH_STRATEGIES = [
         "label": "Direct posting pages",
         "query": (
             "job careers -indeed.com -glassdoor.com -ziprecruiter.com "
-            "-simplyhired.com -jooble.org"
+            "-simplyhired.com -jooble.org "
+            + " ".join(f"-site:{domain}" for domain in sorted(BUILT_IN_SEARCH_DOMAINS))
         ),
     },
     {
@@ -293,6 +333,62 @@ def upsert_search(search_id="", updates=None):
     return get_search(row["id"])
 
 
+def apply_search_exclusions(search_id, excluded_terms=None):
+    search = get_search(search_id)
+    if excluded_terms is not None:
+        search = {
+            **search,
+            "excluded_terms": [
+                storage.clean(term)
+                for term in excluded_terms
+                if storage.clean(term)
+            ],
+        }
+    rows = repository.read_discovery_candidates()
+    changed_ids = []
+    for candidate in rows:
+        if candidate.get("search_id", "").upper() != search["id"].upper():
+            continue
+        if candidate.get("status") != "new":
+            continue
+        matches = matching_excluded_terms(search, candidate)
+        if not matches:
+            continue
+        candidate["status"] = "ignored"
+        candidate["ignore_reason"] = "search-exclusion"
+        candidate["ignore_reason_detail"] = ", ".join(matches)
+        candidate["ingested_application_id"] = ""
+        changed_ids.append(candidate.get("id", ""))
+    if changed_ids:
+        repository.write_discovery_candidates(rows)
+    return {"candidate_ids": changed_ids, "count": len(changed_ids)}
+
+
+def undo_search_exclusions(candidate_ids):
+    wanted_ids = {
+        storage.clean(candidate_id).upper()
+        for candidate_id in candidate_ids or []
+        if storage.clean(candidate_id)
+    }
+    rows = repository.read_discovery_candidates()
+    restored_ids = []
+    for candidate in rows:
+        if candidate.get("id", "").upper() not in wanted_ids:
+            continue
+        if (
+            candidate.get("status") != "ignored"
+            or candidate.get("ignore_reason") != "search-exclusion"
+        ):
+            continue
+        candidate["status"] = "new"
+        candidate["ignore_reason"] = ""
+        candidate["ignore_reason_detail"] = ""
+        restored_ids.append(candidate.get("id", ""))
+    if restored_ids:
+        repository.write_discovery_candidates(rows)
+    return {"candidate_ids": restored_ids, "count": len(restored_ids)}
+
+
 def search_keyword_families(search):
     keywords = storage.clean(search.get("keywords", ""))
     match = re.match(r"^technical program manager\b(.*)$", keywords, re.I)
@@ -399,6 +495,17 @@ def candidate_is_excluded(search, candidate):
     )
 
 
+def matching_excluded_terms(search, candidate):
+    text = storage.clean(
+        f"{candidate.get('title', '')} {candidate.get('description_text', '')}"
+    ).lower()
+    return [
+        storage.clean(term)
+        for term in search.get("excluded_terms", [])
+        if storage.clean(term) and storage.clean(term).lower() in text
+    ]
+
+
 def search_request_url(query, engine="yahoo"):
     template = DUCKDUCKGO_SEARCH_URL if engine == "duckduckgo" else YAHOO_SEARCH_URL
     return template.format(query=quote_plus(query))
@@ -474,6 +581,33 @@ def likely_individual_posting(url, title=""):
         companies.JOB_URL_PATTERN.search(path_and_query)
         or re.search(r"\b(job|position|role|opening|career)\b", title or "", re.I)
     )
+
+
+def failed_posting_url(url):
+    parsed = urlparse(companies.normalize_url(url))
+    query = parse_qs(parsed.query)
+    return any(
+        storage.clean(value).lower() not in {"", "0", "false", "none"}
+        for key in {"error", "invalid", "notfound", "not_found"}
+        for value in query.get(key, [])
+    )
+
+
+def individual_ats_posting_url(url, platform=""):
+    normalized = companies.normalize_url(url)
+    effective_platform = platform or source_platform(normalized)
+    if effective_platform not in DIRECT_ATS_PLATFORMS:
+        return True
+    return bool(
+        normalized
+        and not failed_posting_url(normalized)
+        and likely_individual_posting(normalized)
+    )
+
+
+def ignored_discovery_source(url):
+    host = urlparse(companies.normalize_url(url)).netloc.lower().removeprefix("www.")
+    return bool(re.fullmatch(r"builtin[a-z]*\.(?:com|org)", host))
 
 
 def search_result_from_block(block, engine):
@@ -576,7 +710,12 @@ def normalize_browser_results(items, limit=SEARCH_RESULT_LIMIT):
     for item in items or []:
         url = normalize_search_result_url((item or {}).get("url", ""))
         title = storage.clean((item or {}).get("title", ""))
-        if not url or url in seen or not likely_individual_posting(url, title):
+        if (
+            not url
+            or url in seen
+            or ignored_discovery_source(url)
+            or not likely_individual_posting(url, title)
+        ):
             continue
         seen.add(url)
         results.append(
@@ -647,8 +786,23 @@ def company_from_posting_url(url, platform):
 
 def apply_search_result_details(candidate, result):
     platform = candidate.get("source_platform", "")
-    result_title, result_company = search_title_details(result.get("title", ""), platform)
-    result_company = storage.clean(result.get("company", "")) or result_company
+    source_url = candidate.get("canonical_url") or candidate.get("url", "")
+    result_title_text = result.get("title", "")
+    if source_url_is_low_trust(source_url):
+        host = normalized_source_host(source_url)
+        source_name = re.escape(host.split(".", 1)[0])
+        result_title_text = re.sub(
+            rf"\s*[|·-]\s*(?:www\.)?{source_name}(?:\.[a-z]+)?(?:\s+.*)?$",
+            "",
+            result_title_text,
+            flags=re.I,
+        )
+    result_title, result_company = search_title_details(result_title_text, platform)
+    explicit_company = storage.clean(result.get("company", ""))
+    if explicit_company and not company_name_matches_source(explicit_company, source_url):
+        result_company = explicit_company
+    if company_name_matches_source(result_company, source_url):
+        result_company = ""
     current_title = candidate.get("title", "")
     current_title_is_generic = (
         not current_title
@@ -786,6 +940,7 @@ def apply_browser_details(candidate, details):
         "title": storage.clean((details or {}).get("title", "")),
         "canonical_url": companies.normalize_url((details or {}).get("canonical_url", "")),
         "location": storage.clean((details or {}).get("location", "")),
+        "work_mode": storage.clean((details or {}).get("work_mode", "")),
         "company_industry": companies.normalize_company_industry(
             (details or {}).get("company_industry", "")
         ),
@@ -804,8 +959,13 @@ def apply_browser_details(candidate, details):
         if field == "description_text":
             if not meaningful_description(candidate.get(field, "")) or len(value) > len(candidate.get(field, "")):
                 candidate[field] = value
-        elif not candidate.get(field) or field in {"company", "title", "location"}:
+        elif not candidate.get(field) or field in {"company", "title", "location", "work_mode"}:
             candidate[field] = value
+    detected_platform = source_platform(
+        candidate.get("canonical_url") or candidate.get("url", "")
+    )
+    if detected_platform != "employer":
+        candidate["source_platform"] = detected_platform
     if not candidate.get("work_mode"):
         candidate["work_mode"] = work_mode_from_text(
             candidate.get("location", ""),
@@ -822,6 +982,11 @@ def apply_browser_details(candidate, details):
             if line != LINKEDIN_DETAILS_WARNING
         )
     availability = storage.clean((details or {}).get("availability_status", "")).lower()
+    if (
+        availability != "closed"
+        and posting_valid_through_expired((details or {}).get("valid_through", ""))
+    ):
+        availability = "closed"
     if availability == "closed":
         candidate["freshness_status"] = "closed"
         candidate["status"] = "unavailable"
@@ -832,6 +997,24 @@ def apply_browser_details(candidate, details):
     if availability:
         candidate["freshness_checked_at"] = now_iso()
     return candidate
+
+
+def posting_valid_through_expired(value, reference=None):
+    cleaned = storage.clean(value)
+    if not cleaned:
+        return False
+    current = reference or datetime.now()
+    try:
+        expires = datetime.fromisoformat(cleaned.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return False
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", cleaned):
+        return expires.date() < current.date()
+    if expires.tzinfo is not None and current.tzinfo is None:
+        current = current.astimezone()
+    elif expires.tzinfo is None and current.tzinfo is not None:
+        current = current.replace(tzinfo=None)
+    return expires < current
 
 
 def enrich_workday_candidate(candidate, fetcher=None):
@@ -864,12 +1047,16 @@ def enrich_workday_candidate(candidate, fetcher=None):
 
 def candidate_rank_key(candidate):
     processing_rank = {"ready": 2, "partial": 1, "needs-details": 0}
+    freshness_rank = {"confirmed-open": 3, "": 1, "needs-review": 0, "closed": -1}
+    trust_rank = {"employer": 3, "network": 2, "unverified": 1, "aggregator": 0}
     try:
         fit_score = int(candidate.get("fit_score", "") or 0)
     except (TypeError, ValueError):
         fit_score = 0
     return (
         candidate.get("freshness_status", "") != "closed",
+        freshness_rank.get(candidate.get("freshness_status", ""), 0),
+        trust_rank.get(candidate_source_trust(candidate)["id"], 0),
         processing_rank.get(candidate.get("processing_status", ""), 0),
         fit_score,
         len(candidate.get("description_text", "") or ""),
@@ -897,6 +1084,67 @@ def candidate_source_urls(candidate):
 def sync_candidate_source_urls(candidate):
     candidate["source_urls_json"] = json.dumps(candidate_source_urls(candidate), ensure_ascii=False)
     return candidate
+
+
+def discovery_excluded_company_identity(company_rows=None):
+    company_ids = set()
+    company_keys = set()
+    company_profiles = set()
+    company_domains = set()
+    for company in company_rows if company_rows is not None else repository.read_companies():
+        if company.get("interest_status", "").lower() not in DISCOVERY_EXCLUDED_COMPANY_INTEREST_STATUSES:
+            continue
+        company_id = storage.clean(company.get("id", "")).upper()
+        if company_id:
+            company_ids.add(company_id)
+        names = [company.get("name", ""), *companies.split_aliases(company.get("aliases", ""))]
+        for name in names:
+            normalized_name = companies.normalized_key(name)
+            merge_key = companies.company_merge_key(name)
+            if normalized_name:
+                company_keys.add(normalized_name)
+            if merge_key:
+                company_keys.add(merge_key)
+        profile = companies.normalize_company_profile_url(company.get("company_profile_url", ""))
+        domain = companies.company_domain(company.get("website", ""))
+        if profile:
+            company_profiles.add(profile)
+        if domain:
+            company_domains.add(domain)
+    return company_ids, company_keys, company_profiles, company_domains
+
+
+def candidate_company_is_excluded(candidate, excluded_identity=None):
+    company_ids, company_keys, company_profiles, company_domains = (
+        excluded_identity or discovery_excluded_company_identity()
+    )
+    company_id = storage.clean(candidate.get("company_id", "")).upper()
+    if company_id and company_id in company_ids:
+        return True
+    names = [candidate.get("company", ""), candidate.get("name", "")]
+    for name in names:
+        normalized_name = companies.normalized_key(name)
+        merge_key = companies.company_merge_key(name)
+        if normalized_name and normalized_name in company_keys:
+            return True
+        if merge_key and merge_key in company_keys:
+            return True
+    profile = companies.normalize_company_profile_url(candidate.get("company_profile_url", ""))
+    website_domain = companies.company_domain(candidate.get("website", ""))
+    return bool(
+        profile and profile in company_profiles
+        or website_domain and website_domain in company_domains
+    )
+
+
+def filter_discovery_excluded_companies(candidates, excluded_identity=None):
+    identity = excluded_identity or discovery_excluded_company_identity()
+    kept = [
+        candidate
+        for candidate in candidates
+        if not candidate_company_is_excluded(candidate, identity)
+    ]
+    return kept, len(candidates) - len(kept)
 
 
 def connect_candidate_company(candidate, seen_at=""):
@@ -930,7 +1178,14 @@ def connect_candidate_company(candidate, seen_at=""):
 
 def canonicalize_candidate_rows(rows):
     canonical = []
-    status_rank = {"ingested": 5, "duplicate": 4, "new": 3, "ignored": 2, "unavailable": 1}
+    status_rank = {
+        "ingested": 6,
+        "duplicate": 5,
+        "new": 4,
+        "ignored": 3,
+        "unavailable": 2,
+        SCREENED_STATUS: 1,
+    }
     for original in rows:
         candidate = dict(original)
         sync_candidate_source_urls(candidate)
@@ -1125,14 +1380,6 @@ def run_search(
         apply_search_result_details(candidate, result)
         enrich_workday_candidate(candidate, fetcher=posting_fetcher)
         posting_evidence = candidate.pop("_posting_evidence", "")
-        if posting_evidence != "individual" and candidate.get("source_platform") in {
-            "ashby",
-            "greenhouse",
-            "lever",
-            "smartrecruiters",
-            "workday",
-        }:
-            posting_evidence = "individual"
         if posting_evidence != "individual":
             skipped_count += 1
             continue
@@ -1160,6 +1407,7 @@ def run_search(
             }
         )
         score_candidate(candidate, timestamp)
+        apply_candidate_review_admission(candidate)
         candidate["_match_context"] = matched_context
         candidate["_search_result"] = result
         duplicate = matching_candidate(prepared, candidate)
@@ -1169,6 +1417,13 @@ def run_search(
                 prepared[prepared.index(duplicate)] = candidate
             continue
         prepared.append(candidate)
+
+    excluded_company_identity = discovery_excluded_company_identity()
+    prepared, excluded_company_count = filter_discovery_excluded_companies(
+        prepared,
+        excluded_company_identity,
+    )
+    skipped_count += excluded_company_count
 
     enriched_count = 0
     invalid_after_enrichment = set()
@@ -1188,6 +1443,7 @@ def run_search(
                 or not candidate.get("company_industry")
                 or not candidate.get("company_size")
             )
+            and candidate.get("status") == "new"
         ][:DETAIL_ENRICHMENT_LIMIT]
         for candidate in enrichment_candidates:
             try:
@@ -1208,6 +1464,7 @@ def run_search(
             )
             apply_browser_details(candidate, details)
             score_candidate(candidate, timestamp)
+            apply_candidate_review_admission(candidate)
             context = candidate.get("_match_context", {})
             result = candidate.get("_search_result", {})
             if context and not candidate_matches_lane(candidate, result, context.get("lane", {})):
@@ -1231,6 +1488,11 @@ def run_search(
         for candidate in prepared
         if id(candidate) not in invalid_after_enrichment
     ]
+    prepared, excluded_after_enrichment = filter_discovery_excluded_companies(
+        prepared,
+        excluded_company_identity,
+    )
+    skipped_count += excluded_after_enrichment
     deduped_prepared = []
     for candidate in prepared:
         duplicate = matching_candidate(deduped_prepared, candidate)
@@ -1245,14 +1507,40 @@ def run_search(
         candidate.pop("_match_context", None)
         candidate.pop("_search_result", None)
 
-    qualified_count = len(prepared)
-    selected = sorted(prepared, key=candidate_rank_key, reverse=True)[:DISCOVERY_RESULT_LIMIT]
-    limited_count = max(0, qualified_count - len(selected))
+    qualified_count = sum(candidate.get("status") == "new" for candidate in prepared)
+    screened_count = sum(candidate.get("status") == SCREENED_STATUS for candidate in prepared)
+    selected = sorted(
+        prepared,
+        key=lambda candidate: (
+            candidate.get("status") == "new",
+            candidate_rank_key(candidate),
+        ),
+        reverse=True,
+    )[:DISCOVERY_RESULT_LIMIT]
+    limited_count = max(0, len(prepared) - len(selected))
     company_by_id = {}
+    connected_selected = []
+    excluded_after_connection = 0
     for candidate in selected:
+        if candidate.get("status") == SCREENED_STATUS:
+            connected_selected.append(candidate)
+            continue
         company = connect_candidate_company(candidate, seen_at=timestamp)
+        if (
+            company
+            and company.get("interest_status", "").lower()
+            in DISCOVERY_EXCLUDED_COMPANY_INTEREST_STATUSES
+        ):
+            excluded_after_connection += 1
+            continue
+        connected_selected.append(candidate)
         if company:
             company_by_id[company.get("id", "")] = company
+        apply_candidate_review_admission(candidate, company)
+    selected = connected_selected
+    screened_count = sum(candidate.get("status") == SCREENED_STATUS for candidate in selected)
+    if excluded_after_connection:
+        skipped_count += excluded_after_connection
 
     company_researched_count = 0
     company_suggestion_count = 0
@@ -1307,7 +1595,8 @@ def run_search(
             rows.append(candidate)
             captured.append(candidate)
             captured_ids.add(candidate["id"])
-            new_count += 1
+            if candidate.get("status") == "new":
+                new_count += 1
 
     rows = canonicalize_candidate_rows(rows)
     captured = [
@@ -1328,6 +1617,7 @@ def run_search(
         "captured": captured,
         "evaluated_count": len(found),
         "qualified_count": qualified_count,
+        "screened_count": screened_count,
         "found_count": len(captured),
         "new_count": new_count,
         "updated_count": updated_count,
@@ -1351,6 +1641,7 @@ def run_search(
                 for field in [
                     "evaluated_count",
                     "qualified_count",
+                    "screened_count",
                     "found_count",
                     "new_count",
                     "updated_count",
@@ -1386,8 +1677,29 @@ def freshness_due(candidate, reference=None):
     return checked_at <= (reference or datetime.now()) - timedelta(days=FRESHNESS_RECHECK_DAYS)
 
 
+def company_research_needed(company, reference=None):
+    if not company:
+        return False
+    if company.get("interest_status", "").lower() in DISCOVERY_EXCLUDED_COMPANY_INTEREST_STATUSES:
+        return False
+    if company.get("industry") and company.get("company_size"):
+        return False
+    checked_at = parse_timestamp(company.get("company_metadata_checked_at", ""))
+    if checked_at is None:
+        return True
+    return checked_at <= (reference or datetime.now()) - timedelta(days=FRESHNESS_RECHECK_DAYS)
+
+
 def enrichment_needed(candidate, company=None, reference=None):
-    if candidate.get("status") in {"ignored", "ingested", "duplicate"}:
+    if candidate.get("status") in {"ignored", "ingested", "duplicate", SCREENED_STATUS}:
+        return False
+    if ignored_discovery_source(candidate.get("canonical_url") or candidate.get("url", "")):
+        return False
+    if (
+        company
+        and company.get("interest_status", "").lower()
+        in DISCOVERY_EXCLUDED_COMPANY_INTEREST_STATUSES
+    ):
         return False
     if candidate.get("processing_status") != "ready":
         return True
@@ -1502,12 +1814,10 @@ def continue_enrichment(
             continue
         company_id = company.get("id", "")
         companies_by_id[company_id] = company
-        missing_company_details = not company.get("industry") or not company.get("company_size")
-        research_completed = storage.clean(company.get("company_research_status", "")).startswith("ok:")
         if (
-            missing_company_details
-            and not research_completed
+            company_research_needed(company)
             and company_id not in researched_company_ids
+            and len(researched_company_ids) < COMPANY_RESEARCH_LIMIT
         ):
             researched_company_ids.add(company_id)
             try:
@@ -1522,6 +1832,42 @@ def continue_enrichment(
                     f"Company research for {company.get('name', 'company')}: "
                     f"{storage.clean(str(exc))}"
                 )
+
+    active_company_ids = {
+        candidate.get("company_id", "")
+        for candidate in rows
+        if candidate.get("status") == "new" and candidate.get("company_id")
+    }
+    company_queue = sorted(
+        [
+            company
+            for company in companies_by_id.values()
+            if company.get("id") in active_company_ids
+            and company.get("id") not in researched_company_ids
+            and company_research_needed(company)
+        ],
+        key=lambda company: (
+            company.get("discovered_at", ""),
+            company.get("last_seen_at", ""),
+            company.get("name", ""),
+        ),
+        reverse=True,
+    )
+    for company in company_queue[:max(0, COMPANY_RESEARCH_LIMIT - len(researched_company_ids))]:
+        company_id = company.get("id", "")
+        researched_company_ids.add(company_id)
+        try:
+            research = companies.research_company(
+                company_id,
+                researcher=company_researcher,
+            )
+            companies_by_id[company_id] = research.get("company", company)
+            company_researched_count += 1
+        except (browser_discovery.BrowserDiscoveryError, RuntimeError) as exc:
+            errors.append(
+                f"Company research for {company.get('name', 'company')}: "
+                f"{storage.clean(str(exc))}"
+            )
 
     rows = canonicalize_candidate_rows(rows)
     repository.write_discovery_candidates(rows)
@@ -1544,11 +1890,17 @@ def continue_enrichment(
         and candidate.get("processing_status") == "ready"
         and candidate.get("freshness_status") != "closed"
     )
+    company_research_remaining_count = sum(
+        1
+        for company in refreshed_companies.values()
+        if company.get("id") in active_company_ids and company_research_needed(company)
+    )
     return {
         "processed_count": len(selected),
         "posting_checked_count": posting_checked_count,
         "posting_enriched_count": posting_enriched_count,
         "company_researched_count": company_researched_count,
+        "company_research_remaining_count": company_research_remaining_count,
         "unavailable_count": unavailable_count,
         "remaining_count": remaining_count,
         "ready_count": ready_count,
@@ -1612,7 +1964,147 @@ def continue_discovery(search_id, enrichment_limit=CONTINUE_ENRICHMENT_LIMIT):
     return result
 
 
-def fit_strengths(candidate):
+def normalized_source_host(url):
+    return urlparse(storage.clean(url)).netloc.lower().removeprefix("www.").split(":", 1)[0]
+
+
+def host_matches(host, expected):
+    return bool(host and expected and (host == expected or host.endswith(f".{expected}")))
+
+
+def source_url_is_low_trust(url):
+    host = normalized_source_host(url)
+    return any(host_matches(host, expected) for expected in LOW_TRUST_SOURCE_HOSTS)
+
+
+def company_name_matches_source(company_name, source_url):
+    normalized_name = re.sub(r"[^a-z0-9]+", "", storage.clean(company_name).lower())
+    host_label = normalized_source_host(source_url).split(".", 1)[0]
+    normalized_host = re.sub(r"[^a-z0-9]+", "", host_label.lower())
+    return bool(
+        normalized_name
+        and normalized_host
+        and (
+            normalized_name == normalized_host
+            or normalized_name.startswith(normalized_host)
+            or normalized_host.startswith(normalized_name)
+        )
+    )
+
+
+def candidate_source_trust(candidate, company=None):
+    source_url = candidate.get("canonical_url") or candidate.get("url", "")
+    host = normalized_source_host(source_url)
+    detected_platform = source_platform(source_url)
+    platform = (
+        detected_platform
+        if detected_platform != "employer"
+        else candidate.get("source_platform") or detected_platform
+    )
+    if candidate.get("freshness_status") == "closed":
+        return {"id": "closed", "label": "Closed", "is_direct_employer_source": False}
+    if source_url_is_low_trust(source_url):
+        return {"id": "aggregator", "label": "Aggregator", "is_direct_employer_source": False}
+    if platform in DIRECT_ATS_PLATFORMS and individual_ats_posting_url(source_url, platform):
+        return {"id": "employer", "label": "Employer", "is_direct_employer_source": True}
+    if any(host_matches(host, expected) for expected in DIRECT_ATS_HOSTS):
+        return {"id": "employer", "label": "Employer", "is_direct_employer_source": True}
+    company_domain = companies.company_domain((company or {}).get("website", ""))
+    if company_domain and host_matches(host, company_domain):
+        return {"id": "employer", "label": "Employer", "is_direct_employer_source": True}
+    if host.startswith(("careers.", "jobs.")) and not any(
+        host_matches(host, expected) for expected in LOW_TRUST_SOURCE_HOSTS
+    ):
+        return {"id": "employer", "label": "Employer", "is_direct_employer_source": True}
+    if host_matches(host, "linkedin.com") or platform == "linkedin":
+        return {"id": "network", "label": "LinkedIn", "is_direct_employer_source": False}
+    return {"id": "unverified", "label": "Unverified", "is_direct_employer_source": False}
+
+
+def candidate_review_admission(candidate, company=None):
+    source_url = candidate.get("canonical_url") or candidate.get("url", "")
+    detected_platform = source_platform(source_url)
+    platform = (
+        detected_platform
+        if detected_platform != "employer"
+        else candidate.get("source_platform") or detected_platform
+    )
+    if platform in DIRECT_ATS_PLATFORMS and not individual_ats_posting_url(source_url, platform):
+        return False, "the ATS URL is a board, redirect, or error page"
+    try:
+        fit_score = int(candidate.get("fit_score", "") or 0)
+    except (TypeError, ValueError):
+        fit_score = 0
+    if fit_score < MIN_REVIEW_FIT_SCORE:
+        return False, f"the role match score is below {MIN_REVIEW_FIT_SCORE}"
+    trust = candidate_source_trust(candidate, company)
+    if trust["id"] == "aggregator":
+        return False, "the posting is from an aggregator without a verified employer source"
+    if candidate.get("freshness_status") == "closed":
+        return False, "the posting is closed"
+    return True, ""
+
+
+def apply_candidate_review_admission(candidate, company=None):
+    admitted, reason = candidate_review_admission(candidate, company)
+    warning_lines = [
+        line
+        for line in (candidate.get("warnings", "") or "").splitlines()
+        if line and not line.startswith(SCREENING_WARNING_PREFIX)
+    ]
+    if admitted:
+        if candidate.get("status") == SCREENED_STATUS:
+            candidate["status"] = "new"
+    else:
+        candidate["status"] = SCREENED_STATUS
+        warning_lines.append(f"{SCREENING_WARNING_PREFIX}{reason}.")
+    candidate["warnings"] = "\n".join(dict.fromkeys(warning_lines))
+    return admitted
+
+
+def reclassify_review_queue():
+    rows = canonicalize_candidate_rows(repository.read_discovery_candidates())
+    company_by_id = {
+        company.get("id", ""): company
+        for company in repository.read_companies()
+    }
+    screened_count = 0
+    restored_count = 0
+    for candidate in rows:
+        if candidate.get("status") not in {"new", SCREENED_STATUS}:
+            continue
+        previous_status = candidate.get("status", "")
+        apply_candidate_review_admission(
+            candidate,
+            company_by_id.get(candidate.get("company_id", "")),
+        )
+        if previous_status != SCREENED_STATUS and candidate.get("status") == SCREENED_STATUS:
+            screened_count += 1
+        elif previous_status == SCREENED_STATUS and candidate.get("status") == "new":
+            restored_count += 1
+    repository.write_discovery_candidates(rows)
+    return {
+        "screened_count": screened_count,
+        "restored_count": restored_count,
+    }
+
+
+def recommendation_eligible(candidate, company=None):
+    trust = candidate_source_trust(candidate, company)
+    try:
+        fit_score = int(candidate.get("fit_score", "") or 0)
+    except (TypeError, ValueError):
+        fit_score = 0
+    return bool(
+        candidate.get("status") == "new"
+        and candidate.get("processing_status") == "ready"
+        and candidate.get("freshness_status") == "confirmed-open"
+        and trust["id"] in {"employer", "network"}
+        and fit_score >= companies.FIT_RECOMMENDATION_THRESHOLD
+    )
+
+
+def fit_strengths(candidate, company=None):
     summary = storage.clean(candidate.get("fit_summary", ""))
     match = re.search(r"\bmatches\s+(.+?)\.?$", summary, re.I)
     strengths = []
@@ -1624,7 +2116,7 @@ def fit_strengths(candidate):
         )
     if candidate.get("processing_status") == "ready":
         strengths.append("Verified posting details")
-    if candidate.get("canonical_url") and source_platform(candidate.get("canonical_url", "")) != "linkedin":
+    if candidate_source_trust(candidate, company)["is_direct_employer_source"]:
         strengths.append("Direct employer posting available")
     return list(dict.fromkeys(strengths))
 
@@ -1645,6 +2137,11 @@ def fit_gaps(candidate, company=None):
         gaps.append("Company size has not been researched")
     if candidate.get("freshness_status") not in {"confirmed-open", "closed"}:
         gaps.append("Posting freshness has not been confirmed")
+    source_trust = candidate_source_trust(candidate, company)
+    if source_trust["id"] == "aggregator":
+        gaps.append("Posting comes from an aggregator; confirm it with the employer")
+    elif source_trust["id"] == "unverified":
+        gaps.append("Posting source has not been verified")
     if candidate.get("warnings"):
         gaps.extend(
             storage.clean(line)
@@ -1654,19 +2151,13 @@ def fit_gaps(candidate, company=None):
     return list(dict.fromkeys(gaps))
 
 
-def candidate_source_confidence(candidate):
-    if candidate.get("freshness_status") == "closed":
+def candidate_source_confidence(candidate, company=None):
+    trust = candidate_source_trust(candidate, company)
+    if trust["id"] == "closed":
         return "Closed"
-    direct_url = candidate.get("canonical_url", "")
-    direct_platform = source_platform(direct_url) if direct_url else ""
-    if (
-        candidate.get("processing_status") == "ready"
-        and direct_url
-        and direct_platform != "linkedin"
-        and candidate.get("freshness_status") == "confirmed-open"
-    ):
+    if trust["id"] == "employer" and candidate.get("processing_status") == "ready":
         return "High"
-    if candidate.get("processing_status") == "ready":
+    if trust["id"] == "network" and candidate.get("processing_status") == "ready":
         return "Medium"
     return "Low"
 
@@ -1687,10 +2178,15 @@ def candidate_lane_match(candidate):
 def candidate_payload(candidate, company_by_id=None):
     payload = dict(candidate)
     company = (company_by_id or {}).get(candidate.get("company_id", ""))
+    source_trust = candidate_source_trust(candidate, company)
     payload["source_urls"] = candidate_source_urls(candidate)
-    payload["fit_strengths"] = fit_strengths(candidate)
+    payload["fit_strengths"] = fit_strengths(candidate, company)
     payload["fit_gaps"] = fit_gaps(candidate, company)
-    payload["source_confidence"] = candidate_source_confidence(candidate)
+    payload["source_confidence"] = candidate_source_confidence(candidate, company)
+    payload["source_trust"] = source_trust["id"]
+    payload["source_trust_label"] = source_trust["label"]
+    payload["is_direct_employer_source"] = source_trust["is_direct_employer_source"]
+    payload["recommendation_eligible"] = recommendation_eligible(candidate, company)
     payload["lane_match"] = candidate_lane_match(candidate)
     return payload
 
@@ -1704,48 +2200,73 @@ def list_candidates():
     return [
         candidate_payload(candidate, company_by_id)
         for candidate in collapsed
+        if not ignored_discovery_source(
+            candidate.get("canonical_url") or candidate.get("url", "")
+        )
     ]
 
 
 def preference_suggestions():
-    ignored = [
-        candidate
-        for candidate in list_candidates()
-        if candidate.get("status") == "ignored"
-    ]
+    searches = list_searches()
+    searches_by_id = {
+        search.get("id", ""): search
+        for search in searches
+        if search.get("id", "")
+    }
+    fallback_search_id = searches[0].get("id", "") if len(searches) == 1 else ""
+    ignored_by_search = {}
+    for candidate in list_candidates():
+        if candidate.get("status") != "ignored":
+            continue
+        if candidate.get("ignore_reason") not in {"", "wrong-role", "level", "other"}:
+            continue
+        search_id = storage.clean(candidate.get("search_id", "")) or fallback_search_id
+        if search_id in searches_by_id:
+            ignored_by_search.setdefault(search_id, []).append(candidate)
     stop_words = {
         "and", "for", "the", "technical", "technology", "program", "programme",
         "manager", "management", "senior", "staff", "principal", "lead", "director",
         "remote", "hybrid", "onsite", "role", "jobs", "system", "systems",
         "product", "engineering", "software",
     }
-    terms = {}
-    for candidate in ignored:
-        title = storage.clean(candidate.get("title", ""))
-        candidate_terms = {
-            token
-            for token in re.findall(r"[a-z][a-z0-9+#.-]{2,}", title.lower())
-            if token not in stop_words
+    suggestions = []
+    for search_id, ignored in ignored_by_search.items():
+        search = searches_by_id[search_id]
+        excluded_terms = {
+            storage.clean(term).lower()
+            for term in search.get("excluded_terms", [])
+            if storage.clean(term)
         }
-        for term in candidate_terms:
-            item = terms.setdefault(term, {"candidate_ids": [], "samples": []})
-            item["candidate_ids"].append(candidate.get("id", ""))
-            if title and title not in item["samples"]:
-                item["samples"].append(title)
-    return [
-        {
-            "id": f"exclude:{term}",
-            "term": term,
-            "ignored_count": len(item["candidate_ids"]),
-            "sample_titles": item["samples"][:3],
-            "reason": f"{len(item['candidate_ids'])} ignored roles contain “{term}”.",
-        }
-        for term, item in sorted(
-            terms.items(),
-            key=lambda pair: (-len(pair[1]["candidate_ids"]), pair[0]),
+        terms = {}
+        for candidate in ignored:
+            title = storage.clean(candidate.get("title", ""))
+            candidate_terms = {
+                token
+                for token in re.findall(r"[a-z][a-z0-9+#.-]{2,}", title.lower())
+                if token not in stop_words and token not in excluded_terms
+            }
+            for term in candidate_terms:
+                item = terms.setdefault(term, {"candidate_ids": [], "samples": []})
+                item["candidate_ids"].append(candidate.get("id", ""))
+                if title and title not in item["samples"]:
+                    item["samples"].append(title)
+        suggestions.extend(
+            {
+                "id": f"exclude:{search_id}:{term}",
+                "search_id": search_id,
+                "search_name": search.get("name", ""),
+                "term": term,
+                "ignored_count": len(item["candidate_ids"]),
+                "sample_titles": item["samples"][:3],
+                "reason": f"{len(item['candidate_ids'])} ignored roles contain “{term}”.",
+            }
+            for term, item in terms.items()
+            if len(item["candidate_ids"]) >= 2
         )
-        if len(item["candidate_ids"]) >= 2
-    ][:5]
+    return sorted(
+        suggestions,
+        key=lambda item: (-item["ignored_count"], item["search_name"].lower(), item["term"]),
+    )[:10]
 
 
 def get_candidate(candidate_id):
@@ -1857,18 +2378,54 @@ def job_description(job):
 
 
 def work_mode_from_text(location, description):
-    text = f"{location} {description}".lower()
-    if "hybrid" in text:
+    location_text = storage.clean(location).lower()
+    if re.search(r"\bhybrid\b", location_text):
         return "Hybrid"
-    if "remote" in text or "telecommute" in text:
+    if re.search(r"\b(?:remote|telecommute|work from home)\b", location_text):
         return "Remote"
-    if "on-site" in text or "onsite" in text:
+    if re.search(r"\b(?:on-site|onsite|on site)\b", location_text):
+        return "On-site"
+    description_text = storage.clean(description).lower()
+    if re.search(
+        r"\b(?:this|the)?\s*(?:role|position|job|work arrangement|work location)\s+"
+        r"(?:is|will be|can be|may be|offers?)\s+(?:fully\s+)?hybrid\b"
+        r"|\bhybrid\s+(?:role|position|job|schedule|work arrangement)\b",
+        description_text,
+    ):
+        return "Hybrid"
+    if re.search(
+        r"\b(?:this|the)?\s*(?:role|position|job|work arrangement|work location)\s+"
+        r"(?:is|will be|can be|may be|offers?)\s+(?:fully\s+)?remote\b"
+        r"|\bremote\s+(?:role|position|job|work arrangement)\b"
+        r"|\bremote\s+(?:in|within|across)\s+(?:the\s+)?(?:united states|u\.?s\.?|usa)\b"
+        r"|\b(?:united states|u\.?s\.?|usa)\s*[·|,;-]\s*remote\b"
+        r"|\bwork(?:ing)?\s+(?:fully\s+)?remotely\b"
+        r"|\btelecommut(?:e|ing)\b",
+        description_text,
+    ):
+        return "Remote"
+    if re.search(
+        r"\b(?:this|the)?\s*(?:role|position|job|work arrangement|work location)\s+"
+        r"(?:is|will be|can be|may be|requires?)\s+(?:fully\s+)?(?:on-site|onsite|on site)\b"
+        r"|\b(?:on-site|onsite|on site)\s+(?:role|position|job|work arrangement)\b",
+        description_text,
+    ):
         return "On-site"
     return ""
 
 
-def individual_posting_evidence(page_html, job, title, description, fetch_error=""):
+def individual_posting_evidence(
+    page_html,
+    job,
+    title,
+    description,
+    fetch_error="",
+    url="",
+    platform="",
+):
     if fetch_error or not page_html:
+        return False
+    if platform in DIRECT_ATS_PLATFORMS and not individual_ats_posting_url(url, platform):
         return False
     text = storage.clean(f"{title} {description} {companies.clean_html_text(page_html)[:12000]}").lower()
     blocked_markers = [
@@ -1932,7 +2489,10 @@ def extracted_candidate(url, fetcher=None):
     meta = meta_values(page_html)
     job = structured_job(page_html)
     title = storage.clean(str(job.get("title", "") or "")) or meta.get("og:title", "") or page_title(page_html)
-    company = organization_name(job) or meta.get("og:site_name", "")
+    platform = source_platform(final_url or url)
+    company = organization_name(job)
+    if not company and not source_url_is_low_trust(final_url or url):
+        company = meta.get("og:site_name", "")
     company_metadata = companies.structured_company_metadata(page_html, job)
     description = job_description(job)
     if not description and page_html and parsed_host not in LINKEDIN_HOSTS:
@@ -1951,6 +2511,13 @@ def extracted_candidate(url, fetcher=None):
         title,
         description,
         fetched.get("error", ""),
+        canonical_url or final_url,
+        platform,
+    )
+    structured_work_mode = (
+        "Remote"
+        if storage.clean(str(job.get("jobLocationType", ""))).upper() == "TELECOMMUTE"
+        else ""
     )
 
     return {
@@ -1959,10 +2526,10 @@ def extracted_candidate(url, fetcher=None):
         "url": companies.normalize_url(url),
         "canonical_url": canonical_url,
         "location": location,
-        "work_mode": work_mode_from_text(location, description),
+        "work_mode": structured_work_mode or work_mode_from_text(location, description),
         **company_metadata,
         "company_metadata_source": final_url if any(company_metadata.values()) else "",
-        "source_platform": source_platform(final_url or url),
+        "source_platform": platform,
         "description_text": description,
         "warnings": "\n".join(dict.fromkeys(warnings)),
         "_posting_evidence": "individual" if posting_evidence else "",
@@ -1970,30 +2537,36 @@ def extracted_candidate(url, fetcher=None):
 
 
 def apply_manual_details(candidate, details):
+    details = details or {}
+    if "company_id" in details:
+        candidate["company_id"] = storage.clean(details.get("company_id", ""))
     for field in [
-        "company_id",
         "title",
         "canonical_url",
         "location",
         "work_mode",
         "notes",
     ]:
-        value = storage.clean((details or {}).get(field, ""))
+        value = storage.clean(details.get(field, ""))
         if value:
             if field == "canonical_url":
                 candidate[field] = companies.normalize_url(value)
             else:
                 candidate[field] = value
     company_name = storage.clean(
-        (details or {}).get("company_name", "")
-        or (details or {}).get("company", "")
+        details.get("company_name", "")
+        or details.get("company", "")
     )
     if company_name:
         candidate["company"] = company_name
-    description = str((details or {}).get("description_text", "") or "").strip()
+    description = str(details.get("description_text", "") or "").strip()
     if description:
         candidate["description_text"] = description[:MAX_DESCRIPTION_CHARS]
-    if candidate.get("company") and candidate.get("title") and candidate.get("description_text"):
+    if (
+        (candidate.get("company_id") or candidate.get("company"))
+        and candidate.get("title")
+        and meaningful_description(candidate.get("description_text", ""))
+    ):
         candidate["warnings"] = "\n".join(
             line
             for line in (candidate.get("warnings", "") or "").splitlines()
@@ -2160,8 +2733,8 @@ def merge_candidate(existing, incoming):
     if incoming.get("freshness_checked_at", "") > existing.get("freshness_checked_at", ""):
         existing["freshness_checked_at"] = incoming.get("freshness_checked_at", "")
         existing["freshness_status"] = incoming.get("freshness_status", "")
-    if existing.get("status") not in {"ingested", "duplicate"}:
-        existing["status"] = "new"
+    if existing.get("status") not in {"ingested", "duplicate", "ignored", "unavailable"}:
+        existing["status"] = incoming.get("status") or "new"
     return existing
 
 
@@ -2231,10 +2804,13 @@ def update_candidate_details(candidate_id, updates):
     return get_candidate(candidate_id)
 
 
-def update_candidate_status(candidate_id, status):
+def update_candidate_status(candidate_id, status, ignore_reason="", ignore_reason_detail=""):
     cleaned_status = storage.clean(status).lower()
     if cleaned_status not in schema.DISCOVERY_CANDIDATE_STATUSES:
         raise ValueError(f"Unsupported Discovery candidate status: {cleaned_status}")
+    cleaned_reason = storage.clean(ignore_reason).lower()
+    if cleaned_reason and cleaned_reason not in IGNORE_REASONS:
+        raise ValueError(f"Unsupported Discovery ignore reason: {cleaned_reason}")
     rows = repository.read_discovery_candidates()
     wanted = storage.clean(candidate_id).upper()
     row = next((item for item in rows if item.get("id", "").upper() == wanted), None)
@@ -2243,8 +2819,14 @@ def update_candidate_status(candidate_id, status):
     row["status"] = cleaned_status
     if cleaned_status in {"new", "ignored", "unavailable"}:
         row["ingested_application_id"] = ""
+    if cleaned_status == "ignored":
+        row["ignore_reason"] = cleaned_reason
+        row["ignore_reason_detail"] = storage.clean(ignore_reason_detail)
+    else:
+        row["ignore_reason"] = ""
+        row["ignore_reason_detail"] = ""
     repository.write_discovery_candidates(rows)
-    return row
+    return get_candidate(candidate_id)
 
 
 def mark_candidate_duplicate(candidate_id, application_id):

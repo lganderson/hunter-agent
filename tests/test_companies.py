@@ -308,6 +308,41 @@ class HunterCompaniesTest(unittest.TestCase):
         self.assertEqual(payload_company["recommended_discovery_role_count"], 2)
         self.assertIn("Hunter suggests tracking", payload_company["tracking_recommendation"])
 
+    def test_company_recommendation_learns_from_repeated_ignored_roles(self):
+        sqlite_store.initialize()
+        company = companies.upsert_company(
+            "",
+            {"name": "Example Labs", "interest_status": "neutral"},
+        )
+        rows = []
+        for index, function in enumerate(["Finance", "Operations"]):
+            row = {field: "" for field in schema.DISCOVERY_CANDIDATE_FIELDS}
+            row.update(
+                {
+                    "id": f"DC000{index + 1}",
+                    "company_id": company["id"],
+                    "title": f"Project Manager, {function}",
+                    "url": f"https://jobs.example.com/{index + 1}",
+                    "status": "ignored",
+                    "processing_status": "ready",
+                }
+            )
+            rows.append(row)
+        repository.write_discovery_candidates(rows)
+
+        payload_company = app_state.build_payload()["companies"][0]
+
+        self.assertEqual(payload_company["ignored_role_count"], 2)
+        self.assertEqual(payload_company["ingested_role_count"], 0)
+        self.assertIn("mark it Not interested", payload_company["decision_recommendation"])
+
+        companies.upsert_company(company["id"], {"interest_status": "not-interested"})
+
+        self.assertEqual(
+            app_state.build_payload()["companies"][0]["decision_recommendation"],
+            "",
+        )
+
     def test_link_and_unlink_company_contact(self):
         sqlite_store.initialize()
         repository.write_contacts([contact_row({"id": "C0001", "name": "Ada"})])
@@ -335,6 +370,18 @@ class HunterCompaniesTest(unittest.TestCase):
         self.assertEqual(restored["interest_status"], "neutral")
         self.assertEqual(repository.read_applications()[0]["company_id"], company["id"])
         self.assertEqual(repository.read_company_contacts()[0]["company_id"], company["id"])
+
+    def test_company_can_be_marked_not_interested_without_archiving(self):
+        sqlite_store.initialize()
+        company = companies.upsert_company("", {"name": "Apple"})
+
+        updated = companies.upsert_company(
+            company["id"],
+            {"interest_status": "not-interested"},
+        )
+
+        self.assertEqual(updated["interest_status"], "not-interested")
+        self.assertEqual(updated["tracking_status"], "tracked")
 
     def test_restore_company_rejects_archived_status(self):
         sqlite_store.initialize()
@@ -2503,6 +2550,46 @@ class HunterCompaniesTest(unittest.TestCase):
 
         self.assertGreater(int(scored_with_description["fit_score"]), int(scored_without_description["fit_score"]))
 
+    def test_candidate_fit_weights_title_signals_above_description_keyword_density(self):
+        settings.save_settings(
+            "openai",
+            "gpt-5.5",
+            "",
+            "",
+            search_goals="Technical program manager with AI platform infrastructure and SaaS experience.",
+            fit_signals={
+                "role_terms": "technical program manager | 42",
+                "domain_terms": "ai | 16\nplatform | 14\ninfrastructure | 12\nsaas | 10",
+                "seniority_terms": "principal | 12",
+                "search_terms": "technical program manager",
+                "low_match_terms": "sales",
+                "exclusion_terms": "",
+            },
+        )
+        resume = settings.fit_context()
+
+        title_specific = companies.score_candidate_fit(
+            {
+                "title": "Principal Technical Program Manager, AI Platform",
+                "url": "https://example.com/jobs/role",
+                "description": "Lead a cross-functional program.",
+            },
+            resume,
+            "2026-07-29T10:00:00",
+        )
+        description_dense = companies.score_candidate_fit(
+            {
+                "title": "Technical Program Manager",
+                "url": "https://example.com/jobs/role-2",
+                "description": "AI platform infrastructure SaaS AI platform infrastructure SaaS.",
+            },
+            resume,
+            "2026-07-29T10:00:00",
+        )
+
+        self.assertGreater(int(title_specific["fit_score"]), int(description_dense["fit_score"]))
+        self.assertLess(int(description_dense["fit_score"]), 100)
+
     def test_candidate_fit_can_use_search_goals_context(self):
         settings.save_settings(
             "openai",
@@ -2713,6 +2800,7 @@ class HunterCompaniesTest(unittest.TestCase):
         apple = companies.upsert_company("", {"name": "Apple", "careers_url": "https://jobs.apple.com"})
         companies.upsert_company("", {"name": "No Careers"})
         companies.upsert_company("", {"name": "Archived", "interest_status": "archived", "careers_url": "https://archived.example/jobs"})
+        companies.upsert_company("", {"name": "Not Interested", "interest_status": "not-interested", "careers_url": "https://not-interested.example/jobs"})
         netflix = companies.upsert_company("", {"name": "Netflix", "careers_url": "https://jobs.netflix.com"})
 
         def fake_check(company_id, fetcher=None):
@@ -2731,14 +2819,18 @@ class HunterCompaniesTest(unittest.TestCase):
             result = companies.check_all_company_postings()
 
         self.assertEqual(result["checked_count"], 1)
-        self.assertEqual(result["skipped_count"], 2)
+        self.assertEqual(result["skipped_count"], 3)
         self.assertEqual(result["error_count"], 1)
         self.assertEqual(result["new_count"], 1)
         self.assertEqual(result["recommended_count"], 1)
         self.assertEqual(result["checked"][0]["company"]["id"], apple["id"])
         self.assertEqual(
             {(row["company"]["name"], row["reason"]) for row in result["skipped"]},
-            {("No Careers", "missing careers URL"), ("Archived", "archived")},
+            {
+                ("No Careers", "missing careers URL"),
+                ("Archived", "archived"),
+                ("Not Interested", "not interested"),
+            },
         )
         self.assertEqual(result["errors"][0]["company"]["id"], netflix["id"])
 

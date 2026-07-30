@@ -2,7 +2,7 @@ import { useMemo, useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { BriefcaseIcon, ClockIcon, PulseIcon, XIcon } from "../components/Icons";
 import { ActionDue, Priority } from "../components/Primitives";
-import { updateAction } from "../core/api";
+import { dismissSuggestion, restoreSuggestion, updateAction } from "../core/api";
 import { routes } from "../core/routes";
 import type { AppState } from "../core/types";
 import { buildDashboardModel } from "./dashboardModel";
@@ -17,6 +17,9 @@ type DashboardPageProps = {
 export function DashboardPage({ data, refresh }: DashboardPageProps) {
   const model = useMemo(() => buildDashboardModel(data), [data]);
   const [pendingActionId, setPendingActionId] = useState("");
+  const [pendingSuggestionId, setPendingSuggestionId] = useState("");
+  const [lastDismissedSuggestionId, setLastDismissedSuggestionId] = useState("");
+  const [suggestionStatus, setSuggestionStatus] = useState("");
   const [operationStatus, setOperationStatus] = useState("");
   const stageOrder = data.workflow.stages.map(stage => stage.id).concat("blank");
   const orderedStages = [
@@ -38,6 +41,38 @@ export function DashboardPage({ data, refresh }: DashboardPageProps) {
       setOperationStatus(`Could not complete action. ${error instanceof Error ? error.message : String(error)}`);
     } finally {
       setPendingActionId("");
+    }
+  }
+
+  async function dismissHunterSuggestion(suggestionId: string) {
+    setPendingSuggestionId(suggestionId);
+    setSuggestionStatus("Dismissing suggestion...");
+    try {
+      await dismissSuggestion(suggestionId);
+      await refresh();
+      setLastDismissedSuggestionId(suggestionId);
+      setSuggestionStatus("Suggestion dismissed.");
+    } catch (error) {
+      setSuggestionStatus(`Could not dismiss suggestion. ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setPendingSuggestionId("");
+    }
+  }
+
+  async function undoSuggestionDismissal() {
+    if (!lastDismissedSuggestionId || pendingSuggestionId) return;
+    const suggestionId = lastDismissedSuggestionId;
+    setPendingSuggestionId(suggestionId);
+    setSuggestionStatus("Restoring suggestion...");
+    try {
+      await restoreSuggestion(suggestionId);
+      await refresh();
+      setLastDismissedSuggestionId("");
+      setSuggestionStatus("Suggestion restored.");
+    } catch (error) {
+      setSuggestionStatus(`Could not restore suggestion. ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setPendingSuggestionId("");
     }
   }
 
@@ -78,6 +113,55 @@ export function DashboardPage({ data, refresh }: DashboardPageProps) {
           value={model.recentApplicationCount}
         />
       </section>
+
+      {model.hunterSuggestions.length ? (
+        <section className="panel hunter-learning-panel" aria-labelledby="hunter-learning-title">
+          <div className="hunter-learning-heading">
+            <div>
+              <span className="eyebrow">Learn from your decisions</span>
+              <h2 id="hunter-learning-title">Hunter noticed</h2>
+              <p>Reviewable suggestions based on your role decisions and Hunter’s research. Nothing changes automatically.</p>
+            </div>
+            <span>{model.hunterSuggestions.length} to review</span>
+          </div>
+          <div className="hunter-learning-list">
+            {model.hunterSuggestions.map(suggestion => (
+              <article key={suggestion.id}>
+                <div>
+                  <strong>{suggestion.title}</strong>
+                  <p>{suggestion.detail}</p>
+                </div>
+                <div className="hunter-learning-actions">
+                  <Link className="button compact" to={suggestion.to}>{suggestion.actionLabel}</Link>
+                  <button
+                    className="button compact"
+                    type="button"
+                    disabled={Boolean(pendingSuggestionId)}
+                    onClick={() => void dismissHunterSuggestion(suggestion.id)}
+                  >
+                    {pendingSuggestionId === suggestion.id ? "Dismissing…" : "Dismiss"}
+                  </button>
+                </div>
+              </article>
+            ))}
+          </div>
+          {suggestionStatus ? (
+            <div className="hunter-learning-feedback" aria-live="polite">
+              <span>{suggestionStatus}</span>
+              {lastDismissedSuggestionId ? (
+                <button
+                  className="button compact"
+                  type="button"
+                  disabled={Boolean(pendingSuggestionId)}
+                  onClick={() => void undoSuggestionDismissal()}
+                >
+                  Undo
+                </button>
+              ) : null}
+            </div>
+          ) : null}
+        </section>
+      ) : null}
 
       <section className="dashboard-primary-grid" aria-label="Today's work">
         <article className="panel dashboard-work-panel">

@@ -404,6 +404,7 @@ DETAIL_RESULTS_SCRIPT = r"""
       ? location.href
       : "",
     description_text: description.slice(0, 80000),
+    valid_through: text(job.validThrough || ""),
     availability_status: availabilityStatus
   };
   return JSON.stringify({blocked: false, reason: "", items: [item]});

@@ -528,8 +528,14 @@ def merge_companies(keep_company_id, merge_company_id):
         if "tracked" in {keep.get("tracking_status"), duplicate.get("tracking_status")}
         else "discovered"
     )
-    if "interested" in {keep.get("interest_status"), duplicate.get("interest_status")}:
+    merged_interest_statuses = {
+        keep.get("interest_status"),
+        duplicate.get("interest_status"),
+    }
+    if "interested" in merged_interest_statuses:
         keep["interest_status"] = "interested"
+    elif "not-interested" in merged_interest_statuses:
+        keep["interest_status"] = "not-interested"
     keep["discovered_at"] = min(
         [value for value in [keep.get("discovered_at", ""), duplicate.get("discovered_at", "")] if value],
         default="",
@@ -586,13 +592,15 @@ def track_company(company_id):
     return upsert_company(company_id, {"tracking_status": "tracked"})
 
 
-def set_company_research_status(company_id, status):
+def set_company_research_status(company_id, status, checked_at=""):
     rows = repository.read_companies()
     wanted = storage.clean(company_id).upper()
     row = next((item for item in rows if item.get("id", "").upper() == wanted), None)
     if row is None:
         raise ValueError(f"No company found with id {company_id}.")
     row["company_research_status"] = storage.clean(status)
+    if storage.clean(checked_at):
+        row["company_metadata_checked_at"] = storage.clean(checked_at)
     repository.write_companies(rows)
     return get_company(row.get("id", ""))
 
@@ -648,7 +656,7 @@ def research_company(company_id, researcher=None):
         )
     else:
         status = "ok: no new company information"
-    updated = set_company_research_status(company_id, status)
+    updated = set_company_research_status(company_id, status, checked_at=now_iso())
     return {
         "company": updated,
         "applied_fields": applied_fields,
@@ -1386,18 +1394,30 @@ def score_candidate_fit(candidate, resume_text, checked_at):
         role_matches.append(phrase)
         strong_role_match = weight >= 34
 
+    domain_scores = []
     for phrase, weight in settings_store.domain_fit_terms():
-        if resume_supports_phrase(resume, phrase) and text_contains_phrase(candidate_text, phrase):
-            score += weight
-            domain_matches.append(phrase)
+        if not resume_supports_phrase(resume, phrase):
+            continue
+        if text_contains_phrase(role_text, phrase):
+            domain_scores.append((phrase, weight))
+        elif text_contains_phrase(candidate_text, phrase):
+            domain_scores.append((phrase, max(1, round(weight * 0.45))))
+    domain_scores = sorted(domain_scores, key=lambda item: item[1], reverse=True)[:3]
+    score += min(30, sum(weight for _phrase, weight in domain_scores))
+    domain_matches.extend(phrase for phrase, _weight in domain_scores)
 
-    for phrase, weight in settings_store.seniority_fit_terms():
-        if resume_supports_phrase(resume, phrase) and text_contains_phrase(candidate_text, phrase):
-            score += weight
-            seniority_matches.append(phrase)
+    matched_seniority_terms = [
+        (phrase, weight)
+        for phrase, weight in settings_store.seniority_fit_terms()
+        if resume_supports_phrase(resume, phrase) and text_contains_phrase(role_text, phrase)
+    ]
+    if matched_seniority_terms:
+        phrase, weight = max(matched_seniority_terms, key=lambda item: item[1])
+        score += weight
+        seniority_matches.append(phrase)
 
     if role_matches and domain_matches:
-        score += 10
+        score += 6
     if strong_role_match:
         score = max(score, FIT_RECOMMENDATION_THRESHOLD)
     if any(text_contains_phrase(exclusion_text, phrase) for phrase in settings_store.role_exclusion_terms()):
@@ -5260,8 +5280,14 @@ def check_all_company_postings(fetcher=None):
         if company.get("tracking_status", "").lower() != "tracked":
             skipped.append({"company": company, "reason": "not tracked"})
             continue
-        if company.get("interest_status", "").lower() == "archived":
-            skipped.append({"company": company, "reason": "archived"})
+        interest_status = company.get("interest_status", "").lower()
+        if interest_status in {"archived", "not-interested"}:
+            skipped.append(
+                {
+                    "company": company,
+                    "reason": "not interested" if interest_status == "not-interested" else "archived",
+                }
+            )
             continue
         if not storage.clean(company.get("careers_url", "")):
             skipped.append({"company": company, "reason": "missing careers URL"})

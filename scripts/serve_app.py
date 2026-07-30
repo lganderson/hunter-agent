@@ -25,6 +25,7 @@ from hunter import companies as company_store
 from hunter import contacts as contact_store
 from hunter import discovery as discovery_store
 from hunter import settings as settings_store
+from hunter import suggestions as suggestion_store
 from hunter import workflow as workflow_store
 
 import action_engine
@@ -314,6 +315,26 @@ class AppHandler(SimpleHTTPRequestHandler):
 
         if path == "/api/agent/history/clear":
             self.send_json(chat_history.clear_messages())
+            return
+
+        if path == "/api/suggestions/dismiss":
+            payload = self.read_json()
+            try:
+                dismissal = suggestion_store.dismiss(payload.get("id", ""))
+            except ValueError as exc:
+                self.send_json({"error": str(exc)}, status=400)
+                return
+            self.send_json({"dismissal": dismissal})
+            return
+
+        if path == "/api/suggestions/restore":
+            payload = self.read_json()
+            try:
+                restoration = suggestion_store.restore(payload.get("id", ""))
+            except ValueError as exc:
+                self.send_json({"error": str(exc)}, status=400)
+                return
+            self.send_json({"restoration": restoration})
             return
 
         if path == "/api/actions/update":
@@ -634,6 +655,27 @@ class AppHandler(SimpleHTTPRequestHandler):
             self.send_json({"search": search})
             return
 
+        if path == "/api/discovery/searches/apply-exclusions":
+            payload = self.read_json()
+            try:
+                result = discovery_store.apply_search_exclusions(
+                    search_id=payload.get("id", ""),
+                    excluded_terms=payload.get("excluded_terms"),
+                )
+            except ValueError as exc:
+                self.send_json({"error": str(exc)}, status=400)
+                return
+            self.send_json(result)
+            return
+
+        if path == "/api/discovery/searches/undo-exclusions":
+            payload = self.read_json()
+            result = discovery_store.undo_search_exclusions(
+                payload.get("candidate_ids", []),
+            )
+            self.send_json(result)
+            return
+
         if path == "/api/discovery/searches/open-linkedin":
             payload = self.read_json()
             try:
@@ -706,6 +748,8 @@ class AppHandler(SimpleHTTPRequestHandler):
                 candidate = discovery_store.update_candidate_status(
                     candidate_id=payload.get("id", ""),
                     status=payload.get("status", ""),
+                    ignore_reason=payload.get("ignore_reason", ""),
+                    ignore_reason_detail=payload.get("ignore_reason_detail", ""),
                 )
             except ValueError as exc:
                 self.send_json({"error": str(exc)}, status=400)

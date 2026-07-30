@@ -105,7 +105,16 @@ Discovery persists saved definitions in `discovery_searches` and one reviewable
 result per saved search and source URL in `discovery_candidates`. Search
 coverage is stored as a `lanes` array on the definition; every lane owns a
 label, location, and selected workplace types. No location or lane combination
-is product-hardcoded. A local run expands every lane into predefined web-search
+is product-hardcoded. Companies marked `not-interested` retain their stored
+history but are excluded from the Discovery inbox, enrichment queue, and new
+result persistence. Decision-learning suggestions are scoped to the saved
+search or company that produced them and disappear after the user resolves the
+underlying preference. The Dashboard aggregates unresolved suggestions, but
+all preference changes remain review-first and occur on their owning surface.
+Dismissed suggestion IDs are stored locally in `suggestion_dismissals`; this
+review state suppresses the matching suggestion without mutating the search,
+company, candidate, or posting that produced it.
+A local run expands every lane into predefined web-search
 strategies for known ATS domains, direct posting pages across the web, and
 LinkedIn job URLs. It does not invoke watched-company career sources or the
 Companies-mode adapters. Retrieval uses the dedicated Hunter Chrome window:

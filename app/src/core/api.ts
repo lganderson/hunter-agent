@@ -89,6 +89,14 @@ export async function getAppState(): Promise<AppState> {
   return readJson<AppState>(await fetch("/api/app-state", { cache: "no-store" }));
 }
 
+export async function dismissSuggestion(id: string): Promise<void> {
+  await postJson("/api/suggestions/dismiss", { id });
+}
+
+export async function restoreSuggestion(id: string): Promise<void> {
+  await postJson("/api/suggestions/restore", { id });
+}
+
 export async function getPostingSnapshots(applicationId: string): Promise<PostingSnapshot[]> {
   const query = new URLSearchParams({ id: applicationId });
   const result = await readJson<{ snapshots: PostingSnapshot[] }>(
@@ -294,6 +302,25 @@ export function upsertDiscoverySearch(id: string, updates: DiscoverySearchUpdate
   return postJson<{ search: DiscoverySearch }>("/api/discovery/searches/upsert", { id, updates });
 }
 
+export function applyDiscoverySearchExclusions(
+  id: string,
+  excludedTerms: string[]
+): Promise<{ candidate_ids: string[]; count: number }> {
+  return postJson<{ candidate_ids: string[]; count: number }>(
+    "/api/discovery/searches/apply-exclusions",
+    { id, excluded_terms: excludedTerms }
+  );
+}
+
+export function undoDiscoverySearchExclusions(
+  candidateIds: string[]
+): Promise<{ candidate_ids: string[]; count: number }> {
+  return postJson<{ candidate_ids: string[]; count: number }>(
+    "/api/discovery/searches/undo-exclusions",
+    { candidate_ids: candidateIds }
+  );
+}
+
 export function openLinkedInDiscoverySearch(
   id: string
 ): Promise<{ search: DiscoverySearch; url: string; lanes: DiscoverySearchLane[] }> {
@@ -333,8 +360,18 @@ export function updateDiscoveryCandidateDetails(
   return postJson<{ candidate: DiscoveryCandidate }>("/api/discovery/candidates/details", { id, updates });
 }
 
-export function updateDiscoveryCandidate(id: string, status: string): Promise<{ candidate: DiscoveryCandidate }> {
-  return postJson<{ candidate: DiscoveryCandidate }>("/api/discovery/candidates/update", { id, status });
+export function updateDiscoveryCandidate(
+  id: string,
+  status: string,
+  ignoreReason = "",
+  ignoreReasonDetail = ""
+): Promise<{ candidate: DiscoveryCandidate }> {
+  return postJson<{ candidate: DiscoveryCandidate }>("/api/discovery/candidates/update", {
+    id,
+    status,
+    ignore_reason: ignoreReason,
+    ignore_reason_detail: ignoreReasonDetail
+  });
 }
 
 export function markDiscoveryCandidateDuplicate(

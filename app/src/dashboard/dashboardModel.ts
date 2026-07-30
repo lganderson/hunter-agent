@@ -1,5 +1,6 @@
 import { daysBetween, isWithinPastDays } from "../core/date";
 import { DATA_QUALITY_TAGS, isClosed, normalize, tagList } from "../core/format";
+import { routes } from "../core/routes";
 import type { Action, AppState, Application } from "../core/types";
 
 export type AttentionItem = {
@@ -21,6 +22,15 @@ export type DashboardModel = {
   recentApplicationCount: number;
   tagEntries: Array<[string, number]>;
   upcomingCount: number;
+  hunterSuggestions: HunterSuggestion[];
+};
+
+export type HunterSuggestion = {
+  id: string;
+  title: string;
+  detail: string;
+  actionLabel: string;
+  to: string;
 };
 
 const priorityRank: Record<string, number> = { high: 0, medium: 1, low: 2 };
@@ -52,6 +62,76 @@ function attentionFor(application: Application, referenceDate: string): Attentio
   }
 
   return reasons.length ? { application, reasons, score } : null;
+}
+
+function metadataSuggestionCount(value: string): number {
+  try {
+    const parsed = JSON.parse(value || "[]");
+    return Array.isArray(parsed) ? parsed.length : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function buildHunterSuggestions(data: AppState): HunterSuggestion[] {
+  const suggestions: HunterSuggestion[] = [];
+  const dismissedIds = new Set(data.dismissed_suggestion_ids || []);
+
+  data.discovery_preference_suggestions.forEach(suggestion => {
+    suggestions.push({
+      id: suggestion.id,
+      title: `Refine ${suggestion.search_name || "Discovery"}`,
+      detail: suggestion.reason,
+      actionLabel: "Review search",
+      to: routes.candidatesFiltered({ mode: "discovery", search_id: suggestion.search_id })
+    });
+  });
+
+  data.companies.forEach(company => {
+    if (company.decision_recommendation) {
+      suggestions.push({
+        id: `company-decision:${company.id}`,
+        title: `Review ${company.name}`,
+        detail: company.decision_recommendation,
+        actionLabel: "Review company",
+        to: routes.companyDetail(company.id)
+      });
+      return;
+    }
+    if (company.tracking_recommendation.startsWith("Hunter suggests tracking")) {
+      suggestions.push({
+        id: `company-tracking:${company.id}`,
+        title: `Consider tracking ${company.name}`,
+        detail: company.tracking_recommendation,
+        actionLabel: "Review company",
+        to: routes.companyDetail(company.id)
+      });
+    }
+  });
+
+  data.companies.forEach(company => {
+    const count = metadataSuggestionCount(company.company_metadata_suggestions_json);
+    if (!count) return;
+    suggestions.push({
+      id: `company-research:${company.id}`,
+      title: `Review research for ${company.name}`,
+      detail: `${count} source-backed company detail${count === 1 ? "" : "s"} waiting for your decision.`,
+      actionLabel: "Review research",
+      to: routes.companyDetail(company.id)
+    });
+  });
+
+  data.company_merge_suggestions.forEach(suggestion => {
+    suggestions.push({
+      id: `company-merge:${suggestion.id}`,
+      title: "Possible duplicate companies",
+      detail: `${suggestion.keep_company_name} and ${suggestion.merge_company_name} may be the same company.`,
+      actionLabel: "Review match",
+      to: routes.companyDetail(suggestion.keep_company_id)
+    });
+  });
+
+  return suggestions.filter(suggestion => !dismissedIds.has(suggestion.id)).slice(0, 5);
 }
 
 export function buildDashboardModel(data: AppState): DashboardModel {
@@ -117,6 +197,7 @@ export function buildDashboardModel(data: AppState): DashboardModel {
     overdueCount: openActions.filter(action => action.is_overdue).length,
     recentApplicationCount,
     tagEntries: Object.entries(tagCounts).sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0])).slice(0, 5),
-    upcomingCount: openActions.filter(action => action.is_due_soon && !action.is_overdue).length
+    upcomingCount: openActions.filter(action => action.is_due_soon && !action.is_overdue).length,
+    hunterSuggestions: buildHunterSuggestions(data)
   };
 }

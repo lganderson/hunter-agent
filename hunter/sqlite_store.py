@@ -236,6 +236,8 @@ def discovery_candidates_table_sql(table="discovery_candidates", if_not_exists=T
         "freshness_status TEXT NOT NULL DEFAULT '', "
         "freshness_checked_at TEXT NOT NULL DEFAULT '', "
         "ingested_application_id TEXT NOT NULL DEFAULT '', "
+        "ignore_reason TEXT NOT NULL DEFAULT '', "
+        "ignore_reason_detail TEXT NOT NULL DEFAULT '', "
         "notes TEXT NOT NULL DEFAULT ''"
         ")"
     )
@@ -440,6 +442,12 @@ def initialize():
             ")"
         )
         connection.execute(
+            "CREATE TABLE IF NOT EXISTS suggestion_dismissals ("
+            "suggestion_id TEXT PRIMARY KEY, "
+            "dismissed_at TEXT NOT NULL"
+            ")"
+        )
+        connection.execute(
             "CREATE TABLE IF NOT EXISTS resume_versions ("
             "id TEXT PRIMARY KEY, "
             "application_id TEXT NOT NULL, "
@@ -570,7 +578,7 @@ def initialize():
         ensure_text_columns(connection, "discovery_candidates", schema.DISCOVERY_CANDIDATE_FIELDS)
         migrate_discovery_candidates_schema(connection)
         connection.execute(
-            "INSERT INTO meta(key, value) VALUES('schema_version', '15') "
+            "INSERT INTO meta(key, value) VALUES('schema_version', '16') "
             "ON CONFLICT(key) DO UPDATE SET value=excluded.value"
         )
 
@@ -586,6 +594,47 @@ def is_initialized():
             return result is not None
     except sqlite3.DatabaseError:
         return False
+
+
+def read_suggestion_dismissals():
+    initialize()
+    with connect() as connection:
+        rows = connection.execute(
+            "SELECT suggestion_id, dismissed_at "
+            "FROM suggestion_dismissals ORDER BY dismissed_at DESC, suggestion_id"
+        ).fetchall()
+    return [
+        {
+            "suggestion_id": storage.clean(row["suggestion_id"]),
+            "dismissed_at": storage.clean(row["dismissed_at"]),
+        }
+        for row in rows
+    ]
+
+
+def dismiss_suggestion(suggestion_id, dismissed_at):
+    initialize()
+    with connect() as connection:
+        connection.execute(
+            "INSERT INTO suggestion_dismissals(suggestion_id, dismissed_at) VALUES (?, ?) "
+            "ON CONFLICT(suggestion_id) DO UPDATE SET dismissed_at=excluded.dismissed_at",
+            (storage.clean(suggestion_id), storage.clean(dismissed_at)),
+        )
+    return {
+        "suggestion_id": storage.clean(suggestion_id),
+        "dismissed_at": storage.clean(dismissed_at),
+    }
+
+
+def restore_suggestion(suggestion_id):
+    initialize()
+    cleaned_id = storage.clean(suggestion_id)
+    with connect() as connection:
+        cursor = connection.execute(
+            "DELETE FROM suggestion_dismissals WHERE suggestion_id = ?",
+            (cleaned_id,),
+        )
+    return {"suggestion_id": cleaned_id, "restored": cursor.rowcount > 0}
 
 
 def count_rows(table):

@@ -219,6 +219,16 @@ python3 hunter.py companies ingest-candidate CP0001
 
 Companies are local SQLite records for interest tracking, careers URLs, notes,
 contacts, associated postings, and manually reviewed posting candidates.
+Marking a company **Not interested** is reversible: Hunter retains its history
+but hides its existing roles from Discovery and suppresses future Discovery
+matches for that company before enrichment or storage.
+Hunter also turns repeated review decisions into reversible suggestions. Saved
+Discovery exclusions stop generating the same suggestion, company-level ignore
+patterns can prompt an interest review, and unresolved suggestions are gathered
+on the Dashboard with links back to the relevant review surface. Hunter never
+applies these learned preferences automatically. Suggestions can be dismissed
+without changing their source records; dismissals persist locally and the
+Dashboard provides an immediate Undo action.
 Career checks normalize and deduplicate extracted jobs before saving them. Each
 candidate retains its source platform, source job ID, matched search queries,
 work mode, category, description and scoring hashes, normalization warnings,
