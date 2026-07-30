@@ -215,6 +215,8 @@ export type DiscoveryLastRunSummary = {
   evaluated_count?: number;
   qualified_count?: number;
   screened_count?: number;
+  skip_reasons?: Record<string, number>;
+  screened_reasons?: Record<string, number>;
   found_count?: number;
   new_count?: number;
   updated_count?: number;
@@ -298,6 +300,8 @@ export type DiscoveryRunResult = {
   evaluated_count: number;
   qualified_count: number;
   screened_count: number;
+  skip_reasons: Record<string, number>;
+  screened_reasons: Record<string, number>;
   found_count: number;
   new_count: number;
   updated_count: number;

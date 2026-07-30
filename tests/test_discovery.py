@@ -140,6 +140,38 @@ class HunterDiscoveryTest(unittest.TestCase):
         self.assertIn("start=25", opened_urls[1][0])
         self.assertTrue(opened_urls[1][1])
 
+    def test_linkedin_result_scrolls_until_cards_stabilize_at_end(self):
+        browser = browser_discovery.HunterChrome(sleeper=lambda _seconds: None)
+        browser.window_id = "123"
+        browser._open_tab = lambda _url: "456"
+        browser._wait_until_ready = lambda _tab_id, expected_url="": {"ready": "complete"}
+        browser._close_tab = lambda _tab_id: None
+        scroll_states = iter(
+            [
+                '{"count":7,"atEnd":false}',
+                '{"count":15,"atEnd":false}',
+                '{"count":15,"atEnd":true}',
+                '{"count":15,"atEnd":true}',
+            ]
+        )
+        scroll_calls = []
+
+        def execute(_tab_id, script):
+            if script == browser_discovery.LINKEDIN_RESULTS_SCROLL_SCRIPT:
+                scroll_calls.append(script)
+                return next(scroll_states)
+            return '{"blocked":false,"items":[]}'
+
+        browser._execute = execute
+
+        browser._search_tab(
+            "https://www.linkedin.com/jobs/search/?keywords=technical+program+manager",
+            browser_discovery.LINKEDIN_RESULTS_SCRIPT,
+            scroll="linkedin-results",
+        )
+
+        self.assertEqual(len(scroll_calls), 4)
+
     def test_browser_results_exclude_builtin_aggregator_network(self):
         results = discovery.normalize_browser_results(
             [
@@ -276,13 +308,19 @@ class HunterDiscoveryTest(unittest.TestCase):
         self.assertIn('"technical program manager"', decoded_url)
         self.assertIn("developer tools", decoded_url)
         families = discovery.search_keyword_families(search)
-        self.assertEqual([family["id"] for family in families], ["exact", "senior", "adjacent"])
+        self.assertEqual(
+            [family["id"] for family in families],
+            ["exact", "senior", "adjacent", "variants"],
+        )
         self.assertIn('"staff technical program manager"', families[1]["query"])
         self.assertIn('"technical project manager"', families[2]["query"])
+        self.assertIn('"technical delivery manager"', families[3]["query"])
         self.assertIn("location=Minnesota", opened["url"])
         self.assertEqual(len(opened["lanes"]), 2)
         self.assertIn("location=United+States", opened["lanes"][1]["url"])
         self.assertIn("f_WT=2", opened["lanes"][1]["url"])
+        self.assertIn("f_TPR=r2592000", opened["lanes"][1]["url"])
+        self.assertIn("sortBy=DD", opened["lanes"][1]["url"])
         self.assertEqual(opened["lanes"][1]["work_modes"], ["remote"])
         self.assertTrue(opened["search"]["last_opened_at"])
         self.assertEqual(app_state.build_payload()["discovery_searches"][0]["name"], "Platform leadership")
@@ -320,6 +358,27 @@ class HunterDiscoveryTest(unittest.TestCase):
 
         self.assertEqual(discovery.preference_suggestions(), [])
         self.assertEqual(app_state.build_payload()["discovery_preference_suggestions"], [])
+
+    def test_exclusions_filter_titles_without_narrowing_search_or_descriptions(self):
+        saved = self.save_search("TPM", "technical program manager")
+        search = discovery.upsert_search(saved["id"], {"excluded_terms": ["project"]})
+        candidate = {
+            "title": "Senior Technical Program Manager",
+            "description_text": "Lead complex projects across the platform organization.",
+        }
+        excluded_candidate = {
+            "title": "Senior Technical Project Manager",
+            "description_text": "Lead platform delivery.",
+        }
+        query = discovery.discovery_query(
+            search,
+            search["lanes"][0],
+            discovery.BUILT_IN_SEARCH_STRATEGIES[0],
+        )
+
+        self.assertFalse(discovery.candidate_is_excluded(search, candidate))
+        self.assertTrue(discovery.candidate_is_excluded(search, excluded_candidate))
+        self.assertNotIn("-project", query)
 
     def test_search_now_runs_all_lanes_and_builtin_sources_without_source_configuration(self):
         search = self.save_search(
@@ -395,6 +454,9 @@ class HunterDiscoveryTest(unittest.TestCase):
         )
         self.assertTrue(any("Minnesota" in source["query"] for source in result["sources"]))
         self.assertTrue(any("United States" in source["query"] and "remote" in source["query"] for source in result["sources"]))
+        self.assertTrue(any("Minneapolis" in source["query"] for source in result["sources"]))
+        self.assertTrue(any("after:" in source["query"] for source in result["sources"] if source["source"] != "linkedin"))
+        self.assertTrue(all("after:" not in source["query"] for source in result["sources"] if source["source"] == "linkedin"))
         self.assertTrue(
             all(
                 "-site:builtin.com" in source["query"]
@@ -486,16 +548,30 @@ class HunterDiscoveryTest(unittest.TestCase):
             len(discovery.search_keyword_families(search))
             * len(discovery.BUILT_IN_SEARCH_STRATEGIES)
         )
-        self.assertEqual(len(browser_requests), len(search["lanes"]) * expected_requests_per_lane)
+        expected_linkedin_followups = (
+            len(search["lanes"])
+            * len(discovery.search_keyword_families(search))
+        )
+        self.assertEqual(
+            len(browser_requests),
+            len(search["lanes"]) * expected_requests_per_lane + expected_linkedin_followups,
+        )
         self.assertEqual({request[0] for request in browser_requests}, {"google", "linkedin"})
-        self.assertEqual({request[2] for request in browser_requests}, {0})
+        self.assertEqual(
+            {page for engine, _value, page in browser_requests if engine == "google"},
+            {0},
+        )
+        self.assertEqual(
+            {page for engine, _value, page in browser_requests if engine == "linkedin"},
+            {0, 1},
+        )
         self.assertTrue(any("google.com" not in value and "Minnesota" in value for engine, value, _page in browser_requests if engine == "google"))
         self.assertTrue(any("linkedin.com/jobs/search" in value for engine, value, _page in browser_requests if engine == "linkedin"))
         self.assertEqual({source["engine"] for source in result["sources"]}, {"hunter-chrome-google", "hunter-chrome-linkedin"})
-        self.assertEqual({source["page_count"] for source in result["sources"]}, {1})
+        self.assertEqual({source["page_count"] for source in result["sources"]}, {1, 2})
         self.assertEqual(
             {source["query_family"] for source in result["sources"]},
-            {"exact", "senior", "adjacent"},
+            {"exact", "senior", "adjacent", "variants"},
         )
         self.assertEqual(result["found_count"], 2)
         self.assertEqual(result["qualified_count"], 2)
@@ -865,6 +941,7 @@ class HunterDiscoveryTest(unittest.TestCase):
         self.assertEqual(result["evaluated_count"], 1)
         self.assertEqual(result["found_count"], 0)
         self.assertGreaterEqual(result["skipped_count"], 1)
+        self.assertEqual(result["skip_reasons"]["invalid-posting-page"], 1)
         self.assertEqual(repository.read_discovery_candidates(), [])
 
     def test_search_screens_aggregator_from_new_but_keeps_diagnostic_record(self):
@@ -911,6 +988,12 @@ class HunterDiscoveryTest(unittest.TestCase):
         self.assertEqual(result["qualified_count"], 0)
         self.assertEqual(result["new_count"], 0)
         self.assertEqual(result["screened_count"], 1)
+        self.assertEqual(
+            result["screened_reasons"][
+                "the posting is from an aggregator without a verified employer source"
+            ],
+            1,
+        )
         self.assertEqual(candidate["status"], discovery.SCREENED_STATUS)
         self.assertIn("aggregator", candidate["warnings"].lower())
         extracted = discovery.extracted_candidate(

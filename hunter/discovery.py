@@ -22,7 +22,9 @@ SEARCH_RESULT_LIMIT = 10
 GOOGLE_PAGE_COUNT = 3
 LINKEDIN_PAGE_COUNT = 3
 GOOGLE_CONTINUE_YIELD = 4
-LINKEDIN_CONTINUE_YIELD = 8
+LINKEDIN_CONTINUE_YIELD = 3
+MIN_LINKEDIN_PAGES_WITH_RESULTS = 2
+SEARCH_LOOKBACK_DAYS = 45
 RAW_DISCOVERY_RESULT_LIMIT = 200
 DISCOVERY_RESULT_LIMIT = 50
 DETAIL_ENRICHMENT_LIMIT = 12
@@ -54,6 +56,17 @@ TPM_QUERY_FAMILIES = [
         "id": "adjacent",
         "label": "Adjacent technical program roles",
         "terms": ["technical project manager", "engineering program manager"],
+    },
+    {
+        "id": "variants",
+        "label": "Technical program leadership variants",
+        "terms": [
+            "technical program lead",
+            "technical delivery manager",
+            "program manager engineering",
+            "AI program manager",
+            "platform program manager",
+        ],
     },
 ]
 SEARCH_ENGINE_HOSTS = {
@@ -115,8 +128,13 @@ BUILT_IN_SEARCH_STRATEGIES = [
         "query": (
             "(site:jobs.ashbyhq.com OR site:jobs.lever.co OR "
             "site:boards.greenhouse.io OR site:job-boards.greenhouse.io OR "
-            "site:myworkdayjobs.com OR site:careers.smartrecruiters.com)"
+            "site:myworkdayjobs.com OR site:careers.smartrecruiters.com OR "
+            "site:oraclecloud.com OR site:eightfold.ai OR site:icims.com OR "
+            "site:jobs.jobvite.com OR site:apply.workable.com OR "
+            "site:myjobs.adp.com OR site:jobs.dayforcehcm.com OR "
+            "site:careers-page.com)"
         ),
+        "recent_days": SEARCH_LOOKBACK_DAYS,
     },
     {
         "id": "employer-web",
@@ -126,6 +144,7 @@ BUILT_IN_SEARCH_STRATEGIES = [
             "-simplyhired.com -jooble.org "
             + " ".join(f"-site:{domain}" for domain in sorted(BUILT_IN_SEARCH_DOMAINS))
         ),
+        "recent_days": SEARCH_LOOKBACK_DAYS,
     },
     {
         "id": "linkedin",
@@ -430,6 +449,7 @@ def linkedin_search_url(search, lane, keywords=""):
     ]
     if set(work_mode_codes) != set(WORK_MODE_CODES.values()):
         parts.append(f"f_WT={quote_plus(','.join(work_mode_codes))}")
+    parts.extend(["f_TPR=r2592000", "sortBy=DD"])
     return "https://www.linkedin.com/jobs/search/?" + "&".join(parts)
 
 
@@ -466,28 +486,60 @@ def work_mode_query(lane):
     return f"({' OR '.join(selected)})" if selected else ""
 
 
+def location_query(lane):
+    location = storage.clean(lane.get("location", ""))
+    normalized = normalized_location_text(location)
+    aliases = {
+        "minnesota": [
+            "Minnesota",
+            "Minneapolis",
+            "Saint Paul",
+            "St. Paul",
+            "Twin Cities",
+            "MN",
+        ],
+        "united states": [
+            "United States",
+            "U.S.",
+            "USA",
+            "US Remote",
+            "Remote USA",
+        ],
+    }
+    terms = aliases.get(normalized, [location] if location else [])
+    if not terms:
+        return ""
+    if len(terms) == 1:
+        return f'"{terms[0]}"'
+    return "(" + " OR ".join(f'"{term}"' for term in terms) + ")"
+
+
+def recent_query(days):
+    if not storage.clean(days):
+        return ""
+    try:
+        lookback_days = max(1, int(days))
+    except (TypeError, ValueError):
+        return ""
+    return f"after:{(datetime.now() - timedelta(days=lookback_days)).date().isoformat()}"
+
+
 def discovery_query(search, lane, strategy, keywords=""):
-    exclusions = " ".join(
-        f'-"{term}"' if " " in term else f"-{term}"
-        for term in search.get("excluded_terms", [])
-    )
     return " ".join(
         part
         for part in [
             storage.clean(keywords) or expanded_search_keywords(search),
-            f'"{storage.clean(lane.get("location", ""))}"' if storage.clean(lane.get("location", "")) else "",
+            location_query(lane),
             work_mode_query(lane),
             strategy.get("query", ""),
-            exclusions,
+            recent_query(strategy.get("recent_days", "")),
         ]
         if part
     )
 
 
 def candidate_is_excluded(search, candidate):
-    text = storage.clean(
-        f"{candidate.get('title', '')} {candidate.get('description_text', '')}"
-    ).lower()
+    text = storage.clean(candidate.get("title", "")).lower()
     return any(
         storage.clean(term).lower() in text
         for term in search.get("excluded_terms", [])
@@ -496,9 +548,7 @@ def candidate_is_excluded(search, candidate):
 
 
 def matching_excluded_terms(search, candidate):
-    text = storage.clean(
-        f"{candidate.get('title', '')} {candidate.get('description_text', '')}"
-    ).lower()
+    text = storage.clean(candidate.get("title", "")).lower()
     return [
         storage.clean(term)
         for term in search.get("excluded_terms", [])
@@ -1262,6 +1312,13 @@ def run_search(
     errors = []
     found_by_url = {}
     duplicate_count = 0
+    skip_reasons = {}
+    screened_reasons = {}
+
+    def record_reason(counter, reason, count=1):
+        if count and reason:
+            counter[reason] = counter.get(reason, 0) + count
+
     chrome_browser = None
     if search_fetcher is None and browser_searcher is None:
         chrome_browser = browser_discovery.HunterChrome()
@@ -1333,6 +1390,12 @@ def run_search(
                         if strategy["id"] == "linkedin"
                         else GOOGLE_CONTINUE_YIELD
                     )
+                    if (
+                        strategy["id"] == "linkedin"
+                        and page + 1 < MIN_LINKEDIN_PAGES_WITH_RESULTS
+                        and page_new_count > 0
+                    ):
+                        continue
                     if page_new_count < continue_yield:
                         break
 
@@ -1382,9 +1445,11 @@ def run_search(
         posting_evidence = candidate.pop("_posting_evidence", "")
         if posting_evidence != "individual":
             skipped_count += 1
+            record_reason(skip_reasons, "invalid-posting-page")
             continue
         if candidate_is_excluded(search, candidate):
             skipped_count += 1
+            record_reason(skip_reasons, "title-exclusion")
             continue
         matched_context = next(
             (
@@ -1396,6 +1461,7 @@ def run_search(
         )
         if matched_context is None:
             skipped_count += 1
+            record_reason(skip_reasons, "lane-mismatch")
             continue
         candidate.update(
             {
@@ -1424,6 +1490,7 @@ def run_search(
         excluded_company_identity,
     )
     skipped_count += excluded_company_count
+    record_reason(skip_reasons, "not-interested-company", excluded_company_count)
 
     enriched_count = 0
     invalid_after_enrichment = set()
@@ -1470,6 +1537,7 @@ def run_search(
             if context and not candidate_matches_lane(candidate, result, context.get("lane", {})):
                 invalid_after_enrichment.add(id(candidate))
                 skipped_count += 1
+                record_reason(skip_reasons, "lane-mismatch-after-enrichment")
                 continue
             if (
                 candidate.get("processing_status") != previous_status
@@ -1493,6 +1561,7 @@ def run_search(
         excluded_company_identity,
     )
     skipped_count += excluded_after_enrichment
+    record_reason(skip_reasons, "not-interested-company", excluded_after_enrichment)
     deduped_prepared = []
     for candidate in prepared:
         duplicate = matching_candidate(deduped_prepared, candidate)
@@ -1539,8 +1608,17 @@ def run_search(
         apply_candidate_review_admission(candidate, company)
     selected = connected_selected
     screened_count = sum(candidate.get("status") == SCREENED_STATUS for candidate in selected)
+    for candidate in selected:
+        if candidate.get("status") != SCREENED_STATUS:
+            continue
+        _admitted, reason = candidate_review_admission(
+            candidate,
+            company_by_id.get(candidate.get("company_id", "")),
+        )
+        record_reason(screened_reasons, reason or "automatic-quality-screen")
     if excluded_after_connection:
         skipped_count += excluded_after_connection
+        record_reason(skip_reasons, "not-interested-company", excluded_after_connection)
 
     company_researched_count = 0
     company_suggestion_count = 0
@@ -1618,6 +1696,8 @@ def run_search(
         "evaluated_count": len(found),
         "qualified_count": qualified_count,
         "screened_count": screened_count,
+        "skip_reasons": skip_reasons,
+        "screened_reasons": screened_reasons,
         "found_count": len(captured),
         "new_count": new_count,
         "updated_count": updated_count,
@@ -1656,6 +1736,8 @@ def run_search(
             | {
                 "sources": result["sources"],
                 "errors": result["errors"],
+                "skip_reasons": result["skip_reasons"],
+                "screened_reasons": result["screened_reasons"],
             }
         )
         repository.write_discovery_searches(stored_rows)

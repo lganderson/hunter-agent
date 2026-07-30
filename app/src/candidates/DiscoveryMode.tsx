@@ -298,6 +298,8 @@ export function DiscoveryMode({ data, refresh }: DiscoveryModeProps) {
       const enrichmentSuffix = result.enrichment
         ? ` Hunter continued through ${result.enrichment.processed_count} queued role${result.enrichment.processed_count === 1 ? "" : "s"}; ${result.enrichment.ready_count} are ready for review, ${result.enrichment.remaining_count} roles still need work, and ${result.enrichment.company_research_remaining_count || 0} companies remain in the information queue.`
         : "";
+      const skipReasonSuffix = discoveryReasonSummary(result.skip_reasons);
+      const screenedReasonSuffix = discoveryReasonSummary(result.screened_reasons);
       setOperationStatus(
         `Discovery reviewed ${result.evaluated_count} unique links with adaptive paging. `
         + `${result.qualified_count} qualified after validation and lane matching; `
@@ -307,6 +309,8 @@ export function DiscoveryMode({ data, refresh }: DiscoveryModeProps) {
         + `Hunter researched ${result.company_researched_count} compan${result.company_researched_count === 1 ? "y" : "ies"}`
         + `${result.company_suggestion_count ? ` and queued ${result.company_suggestion_count} company information suggestion${result.company_suggestion_count === 1 ? "" : "s"}` : ""}. `
         + `${result.duplicate_count} duplicate${result.duplicate_count === 1 ? "" : "s"} collapsed.`
+        + `${skipReasonSuffix ? ` Filtered: ${skipReasonSuffix}.` : ""}`
+        + `${screenedReasonSuffix ? ` Screened: ${screenedReasonSuffix}.` : ""}`
         + `${enrichmentSuffix}${limitSuffix}${errorSuffix}`
       );
     } catch (error) {
@@ -534,7 +538,7 @@ export function DiscoveryMode({ data, refresh }: DiscoveryModeProps) {
             />
           </label>
           <label className="form-field full">
-            Exclude titles or keywords
+            Exclude role titles containing
             <input
               value={searchDraft.excluded_terms.join(", ")}
               onChange={event => setSearchDraft({
@@ -543,7 +547,7 @@ export function DiscoveryMode({ data, refresh }: DiscoveryModeProps) {
               })}
               placeholder="sales, implementation, scrum"
             />
-            <small>Optional comma-separated terms. Hunter applies them across every lane in this search.</small>
+            <small>Optional comma-separated terms. Hunter filters matching role titles after searching every lane.</small>
           </label>
           <div className="form-field full discovery-lanes-editor">
             <div className="discovery-lanes-heading">
@@ -1455,7 +1459,7 @@ function discoveryCandidateComparator(left: DiscoveryCandidate, right: Discovery
 }
 
 function candidateMatchesExclusionTerms(candidate: DiscoveryCandidate, terms: string[]) {
-  const text = `${candidate.title} ${candidate.description_text}`.toLowerCase();
+  const text = candidate.title.toLowerCase();
   return terms.some(term => term.trim() && text.includes(term.trim().toLowerCase()));
 }
 
@@ -1485,6 +1489,27 @@ function discoveryCandidateIncludes(candidate: DiscoveryCandidate, company: Comp
 function candidateLocationLabel(candidate: DiscoveryCandidate) {
   const location = candidate.location || "Location unknown";
   return candidate.work_mode ? `${location} · ${candidate.work_mode}` : location;
+}
+
+function discoveryReasonSummary(reasons: Record<string, number> | undefined) {
+  const labels: Record<string, string> = {
+    "invalid-posting-page": "invalid posting pages",
+    "title-exclusion": "title exclusions",
+    "lane-mismatch": "location or work-mode mismatches",
+    "lane-mismatch-after-enrichment": "location mismatches after enrichment",
+    "not-interested-company": "not-interested companies",
+    "the ATS URL is a board, redirect, or error page": "invalid ATS pages",
+    "the role match score is below 45": "low-match roles",
+    "the posting is from an aggregator without a verified employer source": "unverified aggregator roles",
+    "the posting is closed": "closed postings",
+    "automatic-quality-screen": "other quality screens"
+  };
+  return Object.entries(reasons || {})
+    .filter(([, count]) => count > 0)
+    .sort((left, right) => right[1] - left[1])
+    .slice(0, 4)
+    .map(([reason, count]) => `${count} ${labels[reason] || reason}`)
+    .join(", ");
 }
 
 function freshnessLabel(candidate: DiscoveryCandidate) {

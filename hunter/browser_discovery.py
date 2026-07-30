@@ -112,9 +112,29 @@ GOOGLE_RESULTS_SCRIPT = r"""
 })()
 """
 
-LINKEDIN_SCROLL_SCRIPT = """
+PAGE_SCROLL_SCRIPT = """
 window.scrollTo(0, Math.min(document.body.scrollHeight, window.scrollY + 1800));
 "ok";
+"""
+
+LINKEDIN_RESULTS_SCROLL_SCRIPT = r"""
+(() => {
+  const selector = 'a[href*="/jobs/view/"]';
+  const container = document.querySelector(".jobs-search-results-list")
+    || document.querySelector(".scaffold-layout__list")
+    || document.querySelector("[data-results-list-top-scroll-sentinel]")?.parentElement;
+  if (container) {
+    container.scrollTop = Math.min(container.scrollHeight, container.scrollTop + 1800);
+  } else {
+    window.scrollTo(0, Math.min(document.body.scrollHeight, window.scrollY + 1800));
+  }
+  return JSON.stringify({
+    count: document.querySelectorAll(selector).length,
+    atEnd: container
+      ? container.scrollTop + container.clientHeight >= container.scrollHeight - 10
+      : window.scrollY + window.innerHeight >= document.body.scrollHeight - 10
+  });
+})()
 """
 
 LINKEDIN_RESULTS_SCRIPT = r"""
@@ -619,9 +639,24 @@ class HunterChrome:
         tab_id = self._open_tab(url)
         try:
             self._wait_until_ready(tab_id, expected_url=url)
-            if scroll:
+            if scroll == "linkedin-results":
+                previous_count = -1
+                stable_count = 0
+                for _index in range(8):
+                    raw_scroll_state = self._execute(tab_id, LINKEDIN_RESULTS_SCROLL_SCRIPT)
+                    try:
+                        scroll_state = json.loads(raw_scroll_state or "{}")
+                    except json.JSONDecodeError:
+                        scroll_state = {}
+                    result_count = int(scroll_state.get("count", 0) or 0)
+                    stable_count = stable_count + 1 if result_count <= previous_count else 0
+                    previous_count = max(previous_count, result_count)
+                    if stable_count >= 2 and scroll_state.get("atEnd"):
+                        break
+                    self.sleeper(0.6)
+            elif scroll:
                 for _index in range(2):
-                    self._execute(tab_id, LINKEDIN_SCROLL_SCRIPT)
+                    self._execute(tab_id, PAGE_SCROLL_SCRIPT)
                     self.sleeper(0.8)
             raw = self._execute(tab_id, extraction_script)
             try:
@@ -647,7 +682,11 @@ class HunterChrome:
         query = dict(parse_qsl(parsed.query, keep_blank_values=True))
         query["start"] = str(max(0, int(page)) * LINKEDIN_PAGE_SIZE)
         paged_url = urlunparse(parsed._replace(query=urlencode(query)))
-        return self._search_tab(paged_url, LINKEDIN_RESULTS_SCRIPT, scroll=True)
+        return self._search_tab(
+            paged_url,
+            LINKEDIN_RESULTS_SCRIPT,
+            scroll="linkedin-results",
+        )
 
     def details(self, url):
         items = self._search_tab(url, DETAIL_RESULTS_SCRIPT, scroll=True)
