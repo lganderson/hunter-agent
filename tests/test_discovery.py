@@ -194,6 +194,31 @@ class HunterDiscoveryTest(unittest.TestCase):
 
         self.assertEqual(closed_tabs, [])
 
+    def test_hunter_chrome_rechecks_transient_verification_before_pausing(self):
+        delays = []
+        browser = browser_discovery.HunterChrome(sleeper=delays.append)
+        browser.window_id = "123"
+        browser._open_tab = lambda _url: "456"
+        browser._wait_until_ready = lambda _tab_id, expected_url="": {"ready": "complete"}
+        closed_tabs = []
+        browser._close_tab = closed_tabs.append
+        payloads = iter(
+            [
+                '{"blocked":true,"reason":"Google needs verification in the Hunter Chrome profile.","items":[]}',
+                '{"blocked":false,"reason":"","items":[{"url":"https://example.com/job/1"}]}',
+            ]
+        )
+        browser._execute = lambda _tab_id, _script: next(payloads)
+
+        results = browser._search_tab(
+            "https://www.google.com/search?q=test",
+            browser_discovery.GOOGLE_RESULTS_SCRIPT,
+        )
+
+        self.assertEqual(results, [{"url": "https://example.com/job/1"}])
+        self.assertEqual(delays, [browser_discovery.VERIFICATION_RECHECK_SECONDS])
+        self.assertEqual(closed_tabs, ["456"])
+
     def test_browser_results_exclude_builtin_aggregator_network(self):
         results = discovery.normalize_browser_results(
             [

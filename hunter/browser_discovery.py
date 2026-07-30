@@ -14,6 +14,7 @@ LINKEDIN_PAGE_SIZE = 25
 GOOGLE_SEARCH_URL = "https://www.google.com/search?q={query}&num={page_size}&start={start}"
 LINKEDIN_COMPANY_SEARCH_URL = "https://www.linkedin.com/search/results/companies/?keywords={query}"
 DEFAULT_TIMEOUT_SECONDS = 15
+VERIFICATION_RECHECK_SECONDS = 3.0
 
 FIND_WINDOW_SCRIPT = """
 on run argv
@@ -665,8 +666,14 @@ class HunterChrome:
             except json.JSONDecodeError as exc:
                 raise BrowserDiscoveryError("Hunter Chrome returned an unreadable search result.") from exc
             if payload.get("blocked"):
-                close_tab = False
-                raise BrowserDiscoveryError(payload.get("reason") or "The search site needs attention in Hunter Chrome.")
+                self.sleeper(VERIFICATION_RECHECK_SECONDS)
+                try:
+                    payload = json.loads(self._execute(tab_id, extraction_script) or "{}")
+                except json.JSONDecodeError as exc:
+                    raise BrowserDiscoveryError("Hunter Chrome returned an unreadable search result.") from exc
+                if payload.get("blocked"):
+                    close_tab = False
+                    raise BrowserDiscoveryError(payload.get("reason") or "The search site needs attention in Hunter Chrome.")
             return payload.get("items", [])
         finally:
             if close_tab:
