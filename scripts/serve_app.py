@@ -344,7 +344,14 @@ class AppHandler(SimpleHTTPRequestHandler):
                     action_id=payload.get("id", ""),
                     status=payload.get("status", ""),
                 )
-                posting = action_store.sync_next_action(action.get("application_id", ""))
+                application_id = action.get("application_id", "").upper()
+                posting = next(
+                    (row for row in repository.read_applications() if row.get("id", "").upper() == application_id),
+                    None,
+                )
+                action = app_state.enrich_actions([action])[0]
+                if posting is not None:
+                    posting = app_state.enrich_rows([posting])[0]
             except ValueError as exc:
                 self.send_json({"error": str(exc)}, status=400)
                 return
@@ -632,6 +639,19 @@ class AppHandler(SimpleHTTPRequestHandler):
             self.send_json({"candidate": candidate})
             return
 
+        if path == "/api/companies/candidates/bulk-update":
+            payload = self.read_json()
+            try:
+                result = company_store.update_candidate_statuses(
+                    candidate_ids=payload.get("ids", []),
+                    status=payload.get("status", ""),
+                )
+            except ValueError as exc:
+                self.send_json({"error": str(exc)}, status=400)
+                return
+            self.send_json(result)
+            return
+
         if path == "/api/companies/candidates/ingest":
             payload = self.read_json()
             try:
@@ -755,6 +775,21 @@ class AppHandler(SimpleHTTPRequestHandler):
                 self.send_json({"error": str(exc)}, status=400)
                 return
             self.send_json({"candidate": candidate})
+            return
+
+        if path == "/api/discovery/candidates/bulk-update":
+            payload = self.read_json()
+            try:
+                result = discovery_store.update_candidate_statuses(
+                    candidate_ids=payload.get("ids", []),
+                    status=payload.get("status", ""),
+                    ignore_reason=payload.get("ignore_reason", ""),
+                    ignore_reason_detail=payload.get("ignore_reason_detail", ""),
+                )
+            except ValueError as exc:
+                self.send_json({"error": str(exc)}, status=400)
+                return
+            self.send_json(result)
             return
 
         if path == "/api/discovery/candidates/duplicate":

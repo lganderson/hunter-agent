@@ -1619,6 +1619,37 @@ class HunterDiscoveryTest(unittest.TestCase):
         self.assertFalse(aggregator["recommendation_eligible"])
         self.assertNotIn("Direct employer posting available", aggregator["fit_strengths"])
 
+    def test_bulk_candidate_status_transition_updates_only_selected_results(self):
+        rows = []
+        for index in range(1, 4):
+            row = {field: "" for field in schema.DISCOVERY_CANDIDATE_FIELDS}
+            row.update({
+                "id": f"DC{index:04d}",
+                "title": f"Role {index}",
+                "url": f"https://example.com/jobs/{index}",
+                "status": "new",
+                "processing_status": "ready",
+            })
+            rows.append(row)
+        repository.write_discovery_candidates(rows)
+
+        result = discovery.update_candidate_statuses(
+            ["DC0001", "DC0003"],
+            "ignored",
+            ignore_reason="wrong-role",
+        )
+        stored = {
+            row["id"]: (row["status"], row["ignore_reason"])
+            for row in repository.read_discovery_candidates()
+        }
+
+        self.assertEqual(result["count"], 2)
+        self.assertEqual(stored, {
+            "DC0001": ("ignored", "wrong-role"),
+            "DC0002": ("new", ""),
+            "DC0003": ("ignored", "wrong-role"),
+        })
+
     def test_remote_reposting_sites_are_low_trust_aggregators(self):
         for url in [
             "https://remotezest.up.railway.app/job/remote-senior-technical-program-manager-25",

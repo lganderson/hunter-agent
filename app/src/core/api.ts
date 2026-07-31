@@ -374,6 +374,23 @@ export function updateDiscoveryCandidate(
   });
 }
 
+export function updateDiscoveryCandidates(
+  ids: string[],
+  status: string,
+  ignoreReason = "",
+  ignoreReasonDetail = ""
+): Promise<{ candidates: DiscoveryCandidate[]; count: number }> {
+  return postJson<{ candidates: DiscoveryCandidate[]; count: number }>(
+    "/api/discovery/candidates/bulk-update",
+    {
+      ids,
+      status,
+      ignore_reason: ignoreReason,
+      ignore_reason_detail: ignoreReasonDetail
+    }
+  );
+}
+
 export function markDiscoveryCandidateDuplicate(
   id: string,
   applicationId: string
@@ -419,6 +436,16 @@ export function unlinkCompanyContact(companyId: string, contactId: string): Prom
 
 export function updateCompanyCandidate(id: string, status: string): Promise<{ candidate: CompanyPostingCandidate }> {
   return postJson<{ candidate: CompanyPostingCandidate }>("/api/companies/candidates/update", { id, status });
+}
+
+export function updateCompanyCandidates(
+  ids: string[],
+  status: string
+): Promise<{ candidates: CompanyPostingCandidate[]; count: number }> {
+  return postJson<{ candidates: CompanyPostingCandidate[]; count: number }>(
+    "/api/companies/candidates/bulk-update",
+    { ids, status }
+  );
 }
 
 export function ingestCompanyCandidate(id: string): Promise<{ candidate: CompanyPostingCandidate; posting: Application | null; stdout: string }> {

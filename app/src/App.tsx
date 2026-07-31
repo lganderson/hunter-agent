@@ -14,10 +14,13 @@ import { DashboardPage } from "./dashboard/DashboardPage";
 import { PostingDetailPage } from "./postings/PostingDetailPage";
 import { PostingsPage } from "./postings/PostingsPage";
 import { SettingsPage } from "./settings/SettingsPage";
+import type { ActionUpdateResult } from "./core/useHunterData";
 
 type AppProps = {
   data: AppState;
   refresh: () => Promise<AppState>;
+  applyActionUpdate: (result: ActionUpdateResult) => void;
+  applyApplicationUpdate: (application: AppState["applications"][number]) => void;
 };
 
 const navItems = [
@@ -75,7 +78,7 @@ function AppNav({ collapsed = false, mobile = false }: { collapsed?: boolean; mo
   return <ul className={className}>{links.map((link, index) => <li key={navItems[index].to}>{link}</li>)}</ul>;
 }
 
-export function App({ data, refresh }: AppProps) {
+export function App({ data, refresh, applyActionUpdate, applyApplicationUpdate }: AppProps) {
   const closed = data.applications.filter(app => app.is_closed).length;
   const location = useLocation();
   const [agentOpen, setAgentOpen] = useState(false);
@@ -145,7 +148,7 @@ export function App({ data, refresh }: AppProps) {
           <Route path="/" element={<DashboardPage data={data} refresh={refresh} />} />
           <Route path="/postings" element={<PostingsPage data={data} />} />
           <Route path="/postings/new" element={<PostingDetailPage data={data} refresh={refresh} createNew />} />
-          <Route path="/postings/:id" element={<PostingDetailPage data={data} refresh={refresh} />} />
+          <Route path="/postings/:id" element={<PostingDetailPage data={data} refresh={refresh} applyActionUpdate={applyActionUpdate} applyApplicationUpdate={applyApplicationUpdate} />} />
           <Route path="/companies" element={<CompaniesPage data={data} refresh={refresh} />} />
           <Route path="/companies/new" element={<CompanyDetailPage data={data} refresh={refresh} createNew />} />
           <Route path="/companies/:id" element={<CompanyDetailPage data={data} refresh={refresh} />} />

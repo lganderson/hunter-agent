@@ -574,6 +574,7 @@ class HunterCompaniesTest(unittest.TestCase):
             result = companies.ingest_candidate("CP0001")
 
         command = run.call_args.args[0]
+        self.assertNotIn("cwd", run.call_args.kwargs)
         self.assertIn("--role", command)
         self.assertEqual(command[command.index("--role") + 1], "Product Manager, AI Platform")
         self.assertEqual(command[command.index("--location") + 1], "Remote; United States")
@@ -2772,6 +2773,35 @@ class HunterCompaniesTest(unittest.TestCase):
 
         self.assertEqual(ignored["status"], "ignored")
         self.assertEqual(ingested["status"], "ingested")
+
+    def test_bulk_candidate_status_transition_writes_selected_candidates_once(self):
+        sqlite_store.initialize()
+        company = companies.upsert_company("", {"name": "Example", "careers_url": "https://example.com/careers"})
+        candidates = []
+        for index in range(1, 4):
+            candidate = {field: "" for field in schema.COMPANY_POSTING_CANDIDATE_FIELDS}
+            candidate.update({
+                "id": f"CP{index:04d}",
+                "company_id": company["id"],
+                "title": f"Role {index}",
+                "url": f"https://example.com/jobs/{index}",
+                "status": "new",
+            })
+            candidates.append(candidate)
+        repository.write_company_posting_candidates(candidates)
+
+        result = companies.update_candidate_statuses(["CP0001", "CP0003"], "ignored")
+        stored = {
+            row["id"]: row["status"]
+            for row in repository.read_company_posting_candidates()
+        }
+
+        self.assertEqual(result["count"], 2)
+        self.assertEqual(stored, {
+            "CP0001": "ignored",
+            "CP0002": "new",
+            "CP0003": "ignored",
+        })
 
     def test_fetch_careers_page_uses_certifi_ssl_context(self):
         response = Mock()

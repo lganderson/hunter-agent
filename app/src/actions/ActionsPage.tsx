@@ -1,10 +1,13 @@
 import { useEffect, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { ActionCommand, ActionDue, Priority, StatusPill } from "../components/Primitives";
+import { ActionCommand, ActionDue, Priority, SortableHeader, StatusPill } from "../components/Primitives";
 import { FilterIcon, SearchIcon } from "../components/Icons";
 import { isActionComplete, titleCase } from "../core/format";
 import { updateAction } from "../core/api";
+import { compareNumber, compareText, nextSortState, type SortDirection, type SortState } from "../core/tableSort";
 import type { Action, AppState } from "../core/types";
+
+type ActionSortKey = "action" | "type" | "status" | "priority" | "due_date";
 
 type ActionsPageProps = {
   data: AppState;
@@ -24,6 +27,7 @@ export function ActionsPage({ data, refresh }: ActionsPageProps) {
   const [priority, setPriority] = useState("all");
   const [due, setDue] = useState(() => validDueFilter(searchParams.get("due")));
   const [operationStatus, setOperationStatus] = useState("");
+  const [sort, setSort] = useState<SortState<ActionSortKey>>({ key: "due_date", direction: "asc" });
   const queryKey = searchParams.toString();
 
   useEffect(() => {
@@ -58,11 +62,11 @@ export function ActionsPage({ data, refresh }: ActionsPageProps) {
       if (due === "upcoming" && (!action.is_due_soon || action.is_overdue)) return false;
       return true;
     })
-    .sort((a, b) => {
-      const completeDelta = Number(isActionComplete(a)) - Number(isActionComplete(b));
-      if (completeDelta) return completeDelta;
-      return a.sort_due.localeCompare(b.sort_due) || (a.company || "").localeCompare(b.company || "");
-    });
+    .sort((a, b) => compareActionRows(a, b, sort));
+
+  function changeSort(key: ActionSortKey, initialDirection: SortDirection) {
+    setSort(current => nextSortState(current, key, initialDirection));
+  }
 
   async function changeAction(actionId: string, nextStatus: string) {
     setOperationStatus(nextStatus === "open" ? "Reopening action..." : "Completing action...");
@@ -104,11 +108,11 @@ export function ActionsPage({ data, refresh }: ActionsPageProps) {
           <table className="simple-table">
             <thead>
               <tr>
-                <th>Action</th>
-                <th>Type</th>
-                <th>Status</th>
-                <th>Priority</th>
-                <th>Due date</th>
+                <SortableHeader activeKey={sort.key} direction={sort.direction} label="Action" onSort={changeSort} sortKey="action" />
+                <SortableHeader activeKey={sort.key} direction={sort.direction} label="Type" onSort={changeSort} sortKey="type" />
+                <SortableHeader activeKey={sort.key} direction={sort.direction} label="Status" onSort={changeSort} sortKey="status" />
+                <SortableHeader activeKey={sort.key} direction={sort.direction} initialDirection="desc" label="Priority" onSort={changeSort} sortKey="priority" />
+                <SortableHeader activeKey={sort.key} direction={sort.direction} label="Due date" onSort={changeSort} sortKey="due_date" />
                 <th>Update</th>
               </tr>
             </thead>
@@ -131,6 +135,26 @@ export function ActionsPage({ data, refresh }: ActionsPageProps) {
       </article>
     </section>
   );
+}
+
+function compareActionRows(left: Action, right: Action, sort: SortState<ActionSortKey>) {
+  let result = 0;
+  if (sort.key === "action") result = compareText(left.title, right.title, sort.direction);
+  if (sort.key === "type") result = compareText(left.type, right.type, sort.direction);
+  if (sort.key === "status") result = compareText(left.status, right.status, sort.direction);
+  if (sort.key === "priority") result = compareNumber(actionPriorityRank(left.priority), actionPriorityRank(right.priority), sort.direction);
+  if (sort.key === "due_date") {
+    result = Number(isActionComplete(left)) - Number(isActionComplete(right));
+    if (!result) result = compareText(left.due_date, right.due_date, sort.direction);
+  }
+  return result || compareText(left.company, right.company, "asc") || compareText(left.id, right.id, "asc");
+}
+
+function actionPriorityRank(priority: string) {
+  if (priority === "high") return 3;
+  if (priority === "medium") return 2;
+  if (priority === "low") return 1;
+  return Number.NaN;
 }
 
 function validDueFilter(value: string | null) {

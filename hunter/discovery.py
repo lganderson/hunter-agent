@@ -3115,28 +3115,57 @@ def update_candidate_details(candidate_id, updates):
 
 
 def update_candidate_status(candidate_id, status, ignore_reason="", ignore_reason_detail=""):
+    result = update_candidate_statuses(
+        [candidate_id],
+        status,
+        ignore_reason=ignore_reason,
+        ignore_reason_detail=ignore_reason_detail,
+    )
+    return result["candidates"][0]
+
+
+def update_candidate_statuses(candidate_ids, status, ignore_reason="", ignore_reason_detail=""):
     cleaned_status = storage.clean(status).lower()
     if cleaned_status not in schema.DISCOVERY_CANDIDATE_STATUSES:
         raise ValueError(f"Unsupported Discovery candidate status: {cleaned_status}")
     cleaned_reason = storage.clean(ignore_reason).lower()
     if cleaned_reason and cleaned_reason not in IGNORE_REASONS:
         raise ValueError(f"Unsupported Discovery ignore reason: {cleaned_reason}")
+    wanted_ids = {
+        storage.clean(candidate_id).upper()
+        for candidate_id in candidate_ids or []
+        if storage.clean(candidate_id)
+    }
+    if not wanted_ids:
+        raise ValueError("Select at least one Discovery candidate.")
     rows = repository.read_discovery_candidates()
-    wanted = storage.clean(candidate_id).upper()
-    row = next((item for item in rows if item.get("id", "").upper() == wanted), None)
-    if row is None:
-        raise ValueError(f"No Discovery candidate found with id {candidate_id}.")
-    row["status"] = cleaned_status
-    if cleaned_status in {"new", "ignored", "unavailable"}:
-        row["ingested_application_id"] = ""
-    if cleaned_status == "ignored":
-        row["ignore_reason"] = cleaned_reason
-        row["ignore_reason_detail"] = storage.clean(ignore_reason_detail)
-    else:
-        row["ignore_reason"] = ""
-        row["ignore_reason_detail"] = ""
+    found_ids = {
+        row.get("id", "").upper()
+        for row in rows
+        if row.get("id", "").upper() in wanted_ids
+    }
+    missing_ids = wanted_ids - found_ids
+    if missing_ids:
+        raise ValueError(
+            "No Discovery candidate found with "
+            + ", ".join(sorted(missing_ids))
+            + "."
+        )
+    for row in rows:
+        if row.get("id", "").upper() not in wanted_ids:
+            continue
+        row["status"] = cleaned_status
+        if cleaned_status in {"new", "ignored", "unavailable"}:
+            row["ingested_application_id"] = ""
+        if cleaned_status == "ignored":
+            row["ignore_reason"] = cleaned_reason
+            row["ignore_reason_detail"] = storage.clean(ignore_reason_detail)
+        else:
+            row["ignore_reason"] = ""
+            row["ignore_reason_detail"] = ""
     repository.write_discovery_candidates(rows)
-    return get_candidate(candidate_id)
+    updated = [get_candidate(candidate_id) for candidate_id in wanted_ids]
+    return {"candidates": updated, "count": len(updated)}
 
 
 def mark_candidate_duplicate(candidate_id, application_id):

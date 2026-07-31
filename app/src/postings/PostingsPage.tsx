@@ -1,10 +1,13 @@
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { FilterIcon, PlusIcon, SearchIcon } from "../components/Icons";
-import { Priority, TagList } from "../components/Primitives";
+import { Priority, SortableHeader, TagList } from "../components/Primitives";
 import { DATA_QUALITY_TAGS, dueLabel, normalize, tagList, titleCase } from "../core/format";
 import { isWithinPastDays } from "../core/date";
+import { compareNumber, compareText, nextSortState, type SortDirection, type SortState } from "../core/tableSort";
 import type { AppState, Application } from "../core/types";
+
+type PostingSortKey = "posting" | "stage" | "company" | "tags" | "priority" | "next_action";
 
 function unique(applications: Application[], field: keyof Application) {
   return [...new Set(applications.map(app => String(app[field] || "").trim()).filter(Boolean))].sort((a, b) => a.localeCompare(b));
@@ -30,6 +33,7 @@ export function PostingsPage({ data }: { data: AppState }) {
   const [dueOnly, setDueOnly] = useState(false);
   const [attention, setAttention] = useState(() => searchParams.get("attention") || "");
   const [applied, setApplied] = useState(() => searchParams.get("applied") || "");
+  const [sort, setSort] = useState<SortState<PostingSortKey>>({ key: "next_action", direction: "asc" });
 
   const queryKey = searchParams.toString();
 
@@ -80,7 +84,11 @@ export function PostingsPage({ data }: { data: AppState }) {
       if (applied === "last-7-days" && !isWithinPastDays(app.date_applied, data.generated_date, 7)) return false;
       return true;
     })
-    .sort((a, b) => a.sort_due.localeCompare(b.sort_due) || (a.company || "").localeCompare(b.company || ""));
+    .sort((a, b) => comparePostingRows(a, b, sort));
+
+  function changeSort(key: PostingSortKey, initialDirection: SortDirection) {
+    setSort(current => nextSortState(current, key, initialDirection));
+  }
 
   function clearFilters() {
     setSearch("");
@@ -124,12 +132,12 @@ export function PostingsPage({ data }: { data: AppState }) {
           <table>
             <thead>
               <tr>
-                <th>Posting</th>
-                <th>Stage</th>
-                <th>Company</th>
-                <th>Tags</th>
-                <th>Priority</th>
-                <th>Next action</th>
+                <SortableHeader activeKey={sort.key} direction={sort.direction} label="Posting" onSort={changeSort} sortKey="posting" />
+                <SortableHeader activeKey={sort.key} direction={sort.direction} label="Stage" onSort={changeSort} sortKey="stage" />
+                <SortableHeader activeKey={sort.key} direction={sort.direction} label="Company" onSort={changeSort} sortKey="company" />
+                <SortableHeader activeKey={sort.key} direction={sort.direction} label="Tags" onSort={changeSort} sortKey="tags" />
+                <SortableHeader activeKey={sort.key} direction={sort.direction} initialDirection="desc" label="Priority" onSort={changeSort} sortKey="priority" />
+                <SortableHeader activeKey={sort.key} direction={sort.direction} label="Next action" onSort={changeSort} sortKey="next_action" />
               </tr>
             </thead>
             <tbody>
@@ -168,6 +176,24 @@ export function PostingsPage({ data }: { data: AppState }) {
       </article>
     </section>
   );
+}
+
+function comparePostingRows(left: Application, right: Application, sort: SortState<PostingSortKey>) {
+  let result = 0;
+  if (sort.key === "posting") result = compareText(left.role, right.role, sort.direction);
+  if (sort.key === "stage") result = compareText(left.stage, right.stage, sort.direction);
+  if (sort.key === "company") result = compareText(left.company, right.company, sort.direction);
+  if (sort.key === "tags") result = compareText(tagList(left).join(" "), tagList(right).join(" "), sort.direction);
+  if (sort.key === "priority") result = compareNumber(priorityRank(left.priority), priorityRank(right.priority), sort.direction);
+  if (sort.key === "next_action") result = compareText(left.next_action_date, right.next_action_date, sort.direction);
+  return result || compareText(left.company, right.company, "asc") || compareText(left.id, right.id, "asc");
+}
+
+function priorityRank(priority: string) {
+  if (priority === "high") return 3;
+  if (priority === "medium") return 2;
+  if (priority === "low") return 1;
+  return Number.NaN;
 }
 
 function MultiFilter({

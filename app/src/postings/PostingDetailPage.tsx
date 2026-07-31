@@ -5,18 +5,22 @@ import { BriefcaseIcon, DownloadIcon, ExternalIcon, FilterIcon, PlusIcon } from 
 import { archivePosting, createAction, createApplication, createResumeVersion, getPostingSnapshots, getResumeTailoringStatus, linkContact, makeNextAction, planResumeChanges, resumeDownloadUrl, saveManualPostingArchive, unlinkContact, updateAction, updateActionFields, updateApplication } from "../core/api";
 import { actionDueLabel, archivedPostingMarkdown, dueLabel, isActionComplete, markdownToHtml, normalizeTag, tagColorClass, tagList, titleCase } from "../core/format";
 import type { Action, ActionUpdates, AppState, Application, PostingSnapshot, ResumePlan, ResumeTailoringStatus } from "../core/types";
+import type { ActionUpdateResult } from "../core/useHunterData";
 
 type DetailProps = {
   data: AppState;
   refresh: () => Promise<AppState>;
+  applyActionUpdate?: (result: ActionUpdateResult) => void;
+  applyApplicationUpdate?: (application: Application) => void;
   createNew?: boolean;
 };
 
-export function PostingDetailPage({ data, refresh, createNew = false }: DetailProps) {
+export function PostingDetailPage({ data, refresh, applyActionUpdate, applyApplicationUpdate, createNew = false }: DetailProps) {
   const { id = "" } = useParams();
   const navigate = useNavigate();
   const app = createNew ? blankApplication(data) : data.applications.find(item => item.id === id);
   const [operationStatus, setOperationStatus] = useState("");
+  const [pendingActionId, setPendingActionId] = useState("");
   const [archiving, setArchiving] = useState(false);
   const [savingManualArchive, setSavingManualArchive] = useState(false);
   const [archiveRefreshKey, setArchiveRefreshKey] = useState(0);
@@ -128,13 +132,17 @@ export function PostingDetailPage({ data, refresh, createNew = false }: DetailPr
   }
 
   async function changeAction(actionId: string, nextStatus: string) {
-    setOperationStatus(nextStatus === "open" ? "Reopening action..." : "Completing action...");
+    if (pendingActionId) return;
+    setPendingActionId(actionId);
+    setOperationStatus("");
     try {
-      await updateAction(actionId, nextStatus);
-      await refresh();
-      setOperationStatus("Action updated.");
+      const result = await updateAction(actionId, nextStatus);
+      if (applyActionUpdate) applyActionUpdate(result);
+      else await refresh();
     } catch (error) {
       setOperationStatus(`Could not update action. Run make serve-app. ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setPendingActionId("");
     }
   }
 
@@ -189,11 +197,11 @@ export function PostingDetailPage({ data, refresh, createNew = false }: DetailPr
     const previousTags = tagDraft;
     setTagDraft(nextTags);
     setTagSaving(true);
-    setOperationStatus("Saving tags...");
+    setOperationStatus("");
     try {
-      await updateApplication(app!.id, { tags: nextTags.join(",") });
-      await refresh();
-      setOperationStatus("Tags saved.");
+      const result = await updateApplication(app!.id, { tags: nextTags.join(",") });
+      if (applyApplicationUpdate) applyApplicationUpdate(result.application);
+      else await refresh();
     } catch (error) {
       setTagDraft(previousTags);
       setOperationStatus(`Could not save tags. ${error instanceof Error ? error.message : String(error)}`);
@@ -254,6 +262,8 @@ export function PostingDetailPage({ data, refresh, createNew = false }: DetailPr
                   onFieldsSave={saveActionFields}
                   onMakeNext={chooseNextAction}
                   onStatusUpdate={changeAction}
+                  pending={pendingActionId === action.id}
+                  statusUpdatesDisabled={Boolean(pendingActionId)}
                 />
               </div>
             )) : <div className="empty-state" style={{ display: "block" }}>No actions yet. Add the next concrete step for this posting.</div>}
@@ -265,7 +275,7 @@ export function PostingDetailPage({ data, refresh, createNew = false }: DetailPr
 
         {!createNew ? <aside className="posting-workspace-rail">
           <article className="panel posting-tags-panel">
-            <div className="posting-section-header compact"><div><h2>Tags</h2><p>Organize this posting for filtering and review.</p></div></div>
+            <div className="posting-section-header compact"><div><h2>Tags</h2><p aria-live="polite">{tagSaving ? "Saving…" : "Organize this posting for filtering and review."}</p></div></div>
             <div className="posting-tags-panel-body">
               <TagEditor
                 disabled={tagSaving}
@@ -725,7 +735,9 @@ function ActionControls({
   actionTypes,
   onFieldsSave,
   onMakeNext,
-  onStatusUpdate
+  onStatusUpdate,
+  pending,
+  statusUpdatesDisabled
 }: {
   action: Action;
   isNext: boolean;
@@ -733,6 +745,8 @@ function ActionControls({
   onFieldsSave: (actionId: string, updates: ActionUpdates) => void;
   onMakeNext: (actionId: string) => void;
   onStatusUpdate: (actionId: string, status: string) => void;
+  pending: boolean;
+  statusUpdatesDisabled: boolean;
 }) {
   const complete = isActionComplete(action);
 
@@ -740,7 +754,13 @@ function ActionControls({
     <>
       <div className="related-action-controls">
         {!complete && !isNext ? <button className="button compact" type="button" onClick={() => onMakeNext(action.id)}>Make next</button> : null}
-        <ActionCommand action={action} onUpdate={onStatusUpdate} />
+        <ActionCommand
+          action={action}
+          busy={pending}
+          busyLabel={complete ? "Reopening…" : "Completing…"}
+          disabled={statusUpdatesDisabled}
+          onUpdate={onStatusUpdate}
+        />
       </div>
       <details className="action-editor">
         <summary>Edit</summary>

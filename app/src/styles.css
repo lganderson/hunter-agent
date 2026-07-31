@@ -1496,31 +1496,36 @@
 
     #candidates-view th:nth-child(1),
     #candidates-view td:nth-child(1) {
-      width: 32%;
+      width: 42px;
     }
 
     #candidates-view th:nth-child(2),
     #candidates-view td:nth-child(2) {
-      width: 14%;
+      width: 29%;
     }
 
     #candidates-view th:nth-child(3),
     #candidates-view td:nth-child(3) {
-      width: 11%;
+      width: 14%;
     }
 
     #candidates-view th:nth-child(4),
     #candidates-view td:nth-child(4) {
-      width: 9%;
+      width: 11%;
     }
 
     #candidates-view th:nth-child(5),
     #candidates-view td:nth-child(5) {
-      width: 14%;
+      width: 9%;
     }
 
     #candidates-view th:nth-child(6),
     #candidates-view td:nth-child(6) {
+      width: 14%;
+    }
+
+    #candidates-view th:nth-child(7),
+    #candidates-view td:nth-child(7) {
       width: 20%;
     }
 
@@ -1546,6 +1551,50 @@
       text-transform: uppercase;
       letter-spacing: 0.02em;
       font-weight: 800;
+    }
+
+    th.sortable-th {
+      padding: 0;
+    }
+
+    .table-sort-button {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      width: 100%;
+      min-height: 38px;
+      border: 0;
+      background: transparent;
+      padding: 11px 12px;
+      color: inherit;
+      font: inherit;
+      letter-spacing: inherit;
+      text-align: left;
+      text-transform: inherit;
+      cursor: pointer;
+    }
+
+    .table-sort-button:hover {
+      background: var(--surface-soft);
+      color: var(--text);
+    }
+
+    .table-sort-button:focus-visible {
+      position: relative;
+      z-index: 2;
+      outline: 2px solid var(--accent);
+      outline-offset: -2px;
+    }
+
+    .table-sort-indicator {
+      flex: 0 0 auto;
+      color: color-mix(in srgb, var(--muted) 55%, transparent);
+      font-size: 12px;
+    }
+
+    .table-sort-indicator.active {
+      color: var(--accent);
     }
 
     tbody tr {
@@ -2082,41 +2131,46 @@
 
     #candidates-view .discovery-table th:nth-child(1),
     #candidates-view .discovery-table td:nth-child(1) {
-      width: 23%;
+      width: 42px;
     }
 
     #candidates-view .discovery-table th:nth-child(2),
     #candidates-view .discovery-table td:nth-child(2) {
-      width: 10%;
+      width: 20%;
     }
 
     #candidates-view .discovery-table th:nth-child(3),
     #candidates-view .discovery-table td:nth-child(3) {
-      width: 12%;
+      width: 10%;
     }
 
     #candidates-view .discovery-table th:nth-child(4),
     #candidates-view .discovery-table td:nth-child(4) {
-      width: 10%;
+      width: 12%;
     }
 
     #candidates-view .discovery-table th:nth-child(5),
     #candidates-view .discovery-table td:nth-child(5) {
-      width: 7%;
+      width: 10%;
     }
 
     #candidates-view .discovery-table th:nth-child(6),
     #candidates-view .discovery-table td:nth-child(6) {
-      width: 9%;
+      width: 7%;
     }
 
     #candidates-view .discovery-table th:nth-child(7),
     #candidates-view .discovery-table td:nth-child(7) {
-      width: 8%;
+      width: 9%;
     }
 
     #candidates-view .discovery-table th:nth-child(8),
     #candidates-view .discovery-table td:nth-child(8) {
+      width: 8%;
+    }
+
+    #candidates-view .discovery-table th:nth-child(9),
+    #candidates-view .discovery-table td:nth-child(9) {
       width: 21%;
     }
 
@@ -2611,6 +2665,64 @@
     .candidate-review-summary strong {
       color: var(--text);
       font-size: 14px;
+    }
+
+    .candidate-selection-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      min-height: 45px;
+      padding: 7px 12px;
+      border-top: 1px solid color-mix(in srgb, var(--accent) 26%, var(--border));
+      background: color-mix(in srgb, var(--accent-soft) 58%, var(--surface));
+    }
+
+    .candidate-selection-count {
+      display: flex;
+      align-items: baseline;
+      gap: 7px;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 700;
+      white-space: nowrap;
+    }
+
+    .candidate-selection-count strong {
+      color: var(--accent);
+      font-size: 15px;
+    }
+
+    .candidate-selection-actions {
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+
+    .candidate-select-column {
+      width: 42px !important;
+      padding-right: 5px;
+      padding-left: 12px;
+      text-align: center;
+    }
+
+    .candidate-selection-checkbox {
+      width: 16px;
+      height: 16px;
+      margin: 0;
+      accent-color: var(--accent);
+      cursor: pointer;
+    }
+
+    .candidate-selection-checkbox:disabled {
+      cursor: not-allowed;
+    }
+
+    #candidates-view tbody tr.candidate-row-selected,
+    #candidates-view tbody tr.candidate-row-selected:hover {
+      background: color-mix(in srgb, var(--accent-soft) 68%, var(--surface));
     }
 
     #candidates-view tbody tr {

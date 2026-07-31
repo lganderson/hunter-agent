@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { Link, Navigate, useNavigate, useParams } from "react-router-dom";
 import { DownloadIcon, ExternalIcon, FilterIcon, ListIcon, SearchIcon } from "../components/Icons";
+import { SortableHeader } from "../components/Primitives";
 import {
   archiveCompany,
   checkCompanyPostings,
@@ -21,6 +22,7 @@ import {
 } from "../core/api";
 import { routes } from "../core/routes";
 import { dateOnlyLabel, titleCase } from "../core/format";
+import { compareText, nextSortState, type SortDirection, type SortState } from "../core/tableSort";
 import type { AppState, Company, CompanyCareerSource, CompanyMergeSuggestion, CompanyPostingCandidate, DiscoveryCandidate } from "../core/types";
 import {
   CANDIDATE_FILTERS,
@@ -47,6 +49,7 @@ type CompanyDetailPageProps = CompaniesPageProps & {
 const INTEREST_STATUSES = ["interested", "neutral", "not-interested", "archived"];
 const DEFAULT_INTEREST_STATUSES = ["interested", "neutral"];
 const TRACKING_STATUSES = ["tracked", "discovered"];
+type CompanySortKey = "company" | "interest" | "tracking" | "careers_url" | "last_check";
 
 export function CompaniesPage({ data, refresh }: CompaniesPageProps) {
   const [search, setSearch] = useState("");
@@ -54,6 +57,7 @@ export function CompaniesPage({ data, refresh }: CompaniesPageProps) {
   const [trackingStatuses, setTrackingStatuses] = useState<string[]>(TRACKING_STATUSES);
   const [checkingCompanyId, setCheckingCompanyId] = useState("");
   const [operationStatus, setOperationStatus] = useState("");
+  const [sort, setSort] = useState<SortState<CompanySortKey>>({ key: "company", direction: "asc" });
 
   const rows = useMemo(() => {
     const query = search.toLowerCase();
@@ -76,8 +80,12 @@ export function CompaniesPage({ data, refresh }: CompaniesPageProps) {
           company.last_check_status
         ].join(" ").toLowerCase().includes(query);
       })
-      .sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
-  }, [data.companies, interestStatuses, search, trackingStatuses]);
+      .sort((a, b) => compareCompanyRows(a, b, sort));
+  }, [data.companies, interestStatuses, search, sort, trackingStatuses]);
+
+  function changeSort(key: CompanySortKey, initialDirection: SortDirection) {
+    setSort(current => nextSortState(current, key, initialDirection));
+  }
 
   function clearFilters() {
     setSearch("");
@@ -135,11 +143,11 @@ export function CompaniesPage({ data, refresh }: CompaniesPageProps) {
           <table className="simple-table">
             <thead>
               <tr>
-                <th>Company</th>
-                <th>Interest</th>
-                <th>Tracking</th>
-                <th>Careers URL</th>
-                <th>Last check</th>
+                <SortableHeader activeKey={sort.key} direction={sort.direction} label="Company" onSort={changeSort} sortKey="company" />
+                <SortableHeader activeKey={sort.key} direction={sort.direction} label="Interest" onSort={changeSort} sortKey="interest" />
+                <SortableHeader activeKey={sort.key} direction={sort.direction} label="Tracking" onSort={changeSort} sortKey="tracking" />
+                <SortableHeader activeKey={sort.key} direction={sort.direction} label="Careers URL" onSort={changeSort} sortKey="careers_url" />
+                <SortableHeader activeKey={sort.key} direction={sort.direction} initialDirection="desc" label="Last check" onSort={changeSort} sortKey="last_check" />
                 <th>Actions</th>
               </tr>
             </thead>
@@ -178,6 +186,16 @@ export function CompaniesPage({ data, refresh }: CompaniesPageProps) {
       </article>
     </section>
   );
+}
+
+function compareCompanyRows(left: Company, right: Company, sort: SortState<CompanySortKey>) {
+  let result = 0;
+  if (sort.key === "company") result = compareText(left.name, right.name, sort.direction);
+  if (sort.key === "interest") result = compareText(left.interest_status, right.interest_status, sort.direction);
+  if (sort.key === "tracking") result = compareText(left.tracking_status, right.tracking_status, sort.direction);
+  if (sort.key === "careers_url") result = compareText(left.careers_url, right.careers_url, sort.direction);
+  if (sort.key === "last_check") result = compareText(left.last_checked_at, right.last_checked_at, sort.direction);
+  return result || compareText(left.name, right.name, "asc") || compareText(left.id, right.id, "asc");
 }
 
 function LastCheckCell({ company }: { company: Company }) {

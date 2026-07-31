@@ -9,6 +9,7 @@ import {
   ingestDiscoveryCandidate,
   markDiscoveryCandidateDuplicate,
   updateDiscoveryCandidate,
+  updateDiscoveryCandidates,
   updateDiscoveryCandidateDetails,
   upsertCompany,
   upsertDiscoverySearch,
@@ -16,6 +17,7 @@ import {
 } from "../core/api";
 import { dateOnlyLabel, titleCase } from "../core/format";
 import { routes } from "../core/routes";
+import { compareNumber, compareText, nextSortState, type SortDirection, type SortState } from "../core/tableSort";
 import type {
   AppState,
   Application,
@@ -27,6 +29,8 @@ import type {
   DiscoverySearchUpdates
 } from "../core/types";
 import { BriefcaseIcon, ExternalIcon, FilterIcon, PlusIcon, SearchIcon, XIcon } from "../components/Icons";
+import { SortableHeader } from "../components/Primitives";
+import { CandidateBulkActions, CandidateSelectionCheckbox } from "./CandidateBulkActions";
 
 type DiscoveryModeProps = {
   data: AppState;
@@ -34,6 +38,7 @@ type DiscoveryModeProps = {
 };
 
 type DiscoveryFilter = "new" | "recommended" | "needs-details" | "all" | "ignored" | "ingested" | "duplicate" | "unavailable";
+type DiscoverySortKey = "candidate" | "company" | "industry" | "size" | "match" | "source" | "freshness";
 
 const DISCOVERY_FILTERS: Array<{ id: DiscoveryFilter; label: string }> = [
   { id: "new", label: "New" },
@@ -72,6 +77,7 @@ const EMPTY_DETAILS: DiscoveryCandidateDetails = {
   description_text: "",
   notes: ""
 };
+const MAX_BULK_INGEST = 25;
 
 export function DiscoveryMode({ data, refresh }: DiscoveryModeProps) {
   const [searchParams, setSearchParams] = useSearchParams();
@@ -97,6 +103,8 @@ export function DiscoveryMode({ data, refresh }: DiscoveryModeProps) {
   const [exclusionUndoIds, setExclusionUndoIds] = useState<string[]>([]);
   const [applyExistingExclusions, setApplyExistingExclusions] = useState(true);
   const [dismissingSuggestionId, setDismissingSuggestionId] = useState("");
+  const [selectedCandidateIds, setSelectedCandidateIds] = useState<Set<string>>(() => new Set());
+  const [sort, setSort] = useState<SortState<DiscoverySortKey>>({ key: "match", direction: "desc" });
   const companyById = useMemo(
     () => new Map(data.companies.map(company => [company.id, company])),
     [data.companies]
@@ -134,9 +142,42 @@ export function DiscoveryMode({ data, refresh }: DiscoveryModeProps) {
     () => selectedCandidates
       .filter(candidate => discoveryCandidateMatches(candidate, resultFilter))
       .filter(candidate => discoveryCandidateIncludes(candidate, companyById.get(candidate.company_id), resultSearch))
-      .sort(discoveryCandidateComparator),
-    [companyById, resultFilter, resultSearch, selectedCandidates]
+      .sort((left, right) => compareDiscoveryCandidateRows(left, right, sort, companyById)),
+    [companyById, resultFilter, resultSearch, selectedCandidates, sort]
   );
+
+  function changeSort(key: DiscoverySortKey, initialDirection: SortDirection) {
+    setSort(current => nextSortState(current, key, initialDirection));
+  }
+  const visibleCandidateIds = useMemo(
+    () => visibleCandidates.map(candidate => candidate.id),
+    [visibleCandidates]
+  );
+  const bulkSelectedCandidates = useMemo(
+    () => visibleCandidates.filter(candidate => selectedCandidateIds.has(candidate.id)),
+    [selectedCandidateIds, visibleCandidates]
+  );
+  const bulkIngestCandidates = bulkSelectedCandidates.filter(
+    candidate => candidate.status === "new"
+      && candidate.processing_status === "ready"
+      && candidate.freshness_status !== "closed"
+      && Boolean(candidate.company_id && candidate.title)
+  );
+  const bulkIgnoreCandidates = bulkSelectedCandidates.filter(candidate => candidate.status === "new");
+  const bulkRestoreCandidates = bulkSelectedCandidates.filter(
+    candidate => candidate.status === "ignored" || candidate.status === "duplicate"
+  );
+  const allVisibleSelected = visibleCandidateIds.length > 0
+    && visibleCandidateIds.every(id => selectedCandidateIds.has(id));
+  const someVisibleSelected = visibleCandidateIds.some(id => selectedCandidateIds.has(id));
+
+  useEffect(() => {
+    const visibleIds = new Set(visibleCandidateIds);
+    setSelectedCandidateIds(previous => {
+      const next = new Set([...previous].filter(id => visibleIds.has(id)));
+      return sameStringSet(previous, next) ? previous : next;
+    });
+  }, [visibleCandidateIds]);
 
   const counts = useMemo(
     () => Object.fromEntries(
@@ -415,6 +456,77 @@ export function DiscoveryMode({ data, refresh }: DiscoveryModeProps) {
     } finally {
       setPending(false);
     }
+  }
+
+  async function runBulkCandidateAction(action: "ingest" | "ignored" | "new") {
+    const candidates = action === "ingest"
+      ? bulkIngestCandidates
+      : action === "ignored"
+        ? bulkIgnoreCandidates
+        : bulkRestoreCandidates;
+    if (!candidates.length) return;
+    if (action === "ingest" && candidates.length > MAX_BULK_INGEST) return;
+
+    setPending(true);
+    setIngestedPostingId("");
+    try {
+      if (action === "ingest") {
+        let successCount = 0;
+        let failureCount = 0;
+        let postingId = "";
+        for (const [index, candidate] of candidates.entries()) {
+          setOperationStatus(`Ingesting ${index + 1} of ${candidates.length} selected Discovery results...`);
+          try {
+            const result = await ingestDiscoveryCandidate(candidate.id);
+            successCount += 1;
+            postingId = result.posting.id || postingId;
+          } catch {
+            failureCount += 1;
+          }
+        }
+        await refresh();
+        setIngestedPostingId(successCount === 1 ? postingId : "");
+        setOperationStatus(
+          `${successCount} Discovery result${successCount === 1 ? "" : "s"} ingested.`
+          + (failureCount ? ` ${failureCount} could not be ingested.` : "")
+        );
+      } else {
+        const status = action === "ignored" ? "ignored" : "new";
+        setOperationStatus(
+          action === "ignored"
+            ? `Ignoring ${candidates.length} selected Discovery results...`
+            : `Returning ${candidates.length} selected Discovery results to New...`
+        );
+        await updateDiscoveryCandidates(
+          candidates.map(candidate => candidate.id),
+          status
+        );
+        await refresh();
+        setOperationStatus(
+          action === "ignored"
+            ? `${candidates.length} Discovery results ignored.`
+            : `${candidates.length} Discovery results returned to New.`
+        );
+      }
+      setSelectedCandidateIds(new Set());
+    } catch (error) {
+      setOperationStatus(`Could not update selected Discovery results. ${errorMessage(error)}`);
+    } finally {
+      setPending(false);
+    }
+  }
+
+  function toggleCandidateSelection(candidateId: string, checked: boolean) {
+    setSelectedCandidateIds(previous => {
+      const next = new Set(previous);
+      if (checked) next.add(candidateId);
+      else next.delete(candidateId);
+      return next;
+    });
+  }
+
+  function toggleAllVisibleCandidates(checked: boolean) {
+    setSelectedCandidateIds(checked ? new Set(visibleCandidateIds) : new Set());
   }
 
   async function markCandidateDuplicate(candidate: DiscoveryCandidate, applicationId: string) {
@@ -774,22 +886,64 @@ export function DiscoveryMode({ data, refresh }: DiscoveryModeProps) {
         ))}
       </div>
 
-      <div className="candidate-review-summary">
-        <strong>{visibleCandidates.length}</strong>
-        <span>shown from {selectedCandidates.length} roles in the Discovery inbox</span>
-      </div>
+      {bulkSelectedCandidates.length ? (
+        <CandidateBulkActions
+          selectedCount={bulkSelectedCandidates.length}
+          shownCount={visibleCandidates.length}
+          pending={pending}
+          clear={() => setSelectedCandidateIds(new Set())}
+          actions={[
+            {
+              id: "ingest",
+              label: `Ingest ready ${bulkIngestCandidates.length}`,
+              primary: true,
+              disabled: !bulkIngestCandidates.length || bulkIngestCandidates.length > MAX_BULK_INGEST,
+              title: bulkIngestCandidates.length > MAX_BULK_INGEST
+                ? `Select ${MAX_BULK_INGEST} or fewer ready roles to ingest at once`
+                : "Only verified roles with a company and title can be bulk ingested",
+              run: () => void runBulkCandidateAction("ingest")
+            },
+            {
+              id: "ignore",
+              label: `Ignore ${bulkIgnoreCandidates.length}`,
+              disabled: !bulkIgnoreCandidates.length,
+              run: () => void runBulkCandidateAction("ignored")
+            },
+            {
+              id: "restore",
+              label: `Mark New ${bulkRestoreCandidates.length}`,
+              disabled: !bulkRestoreCandidates.length,
+              run: () => void runBulkCandidateAction("new")
+            }
+          ]}
+        />
+      ) : (
+        <div className="candidate-review-summary">
+          <strong>{visibleCandidates.length}</strong>
+          <span>shown from {selectedCandidates.length} roles in the Discovery inbox</span>
+        </div>
+      )}
 
       <div className="table-scroll">
         <table className="simple-table candidates-table discovery-table">
           <thead>
             <tr>
-              <th>Candidate</th>
-              <th>Company</th>
-              <th>Industry</th>
-              <th>Size</th>
-              <th>Match</th>
-              <th>Source</th>
-              <th>Freshness</th>
+              <th className="candidate-select-column">
+                <CandidateSelectionCheckbox
+                  checked={allVisibleSelected}
+                  indeterminate={someVisibleSelected && !allVisibleSelected}
+                  disabled={!visibleCandidateIds.length || pending}
+                  label={allVisibleSelected ? "Clear all shown Discovery candidates" : "Select all shown Discovery candidates"}
+                  onChange={toggleAllVisibleCandidates}
+                />
+              </th>
+              <SortableHeader activeKey={sort.key} direction={sort.direction} label="Candidate" onSort={changeSort} sortKey="candidate" />
+              <SortableHeader activeKey={sort.key} direction={sort.direction} label="Company" onSort={changeSort} sortKey="company" />
+              <SortableHeader activeKey={sort.key} direction={sort.direction} label="Industry" onSort={changeSort} sortKey="industry" />
+              <SortableHeader activeKey={sort.key} direction={sort.direction} label="Size" onSort={changeSort} sortKey="size" />
+              <SortableHeader activeKey={sort.key} direction={sort.direction} initialDirection="desc" label="Match" onSort={changeSort} sortKey="match" />
+              <SortableHeader activeKey={sort.key} direction={sort.direction} label="Source" onSort={changeSort} sortKey="source" />
+              <SortableHeader activeKey={sort.key} direction={sort.direction} initialDirection="desc" label="Freshness" onSort={changeSort} sortKey="freshness" />
               <th>Actions</th>
             </tr>
           </thead>
@@ -797,7 +951,15 @@ export function DiscoveryMode({ data, refresh }: DiscoveryModeProps) {
             {visibleCandidates.map(candidate => {
               const company = companyById.get(candidate.company_id);
               return (
-              <tr key={candidate.id}>
+              <tr className={selectedCandidateIds.has(candidate.id) ? "candidate-row-selected" : ""} key={candidate.id}>
+                <td className="candidate-select-column">
+                  <CandidateSelectionCheckbox
+                    checked={selectedCandidateIds.has(candidate.id)}
+                    disabled={pending}
+                    label={`Select ${candidate.title || "Discovery candidate"}${company?.name ? ` at ${company.name}` : ""}`}
+                    onChange={checked => toggleCandidateSelection(candidate.id, checked)}
+                  />
+                </td>
                 <td className="role-cell candidate-title-cell">
                   <strong>{candidate.title || "Role details needed"}</strong>
                   <span className="cell-subtle">{candidateLocationLabel(candidate)}</span>
@@ -844,14 +1006,14 @@ export function DiscoveryMode({ data, refresh }: DiscoveryModeProps) {
                   <div className="table-actions">
                     <a className="button compact" href={candidate.canonical_url || candidate.url} target="_blank" rel="noreferrer"><ExternalIcon size={15} /> Open</a>
                     {candidate.status === "new" ? (
-                      <button className="button compact primary" type="button" onClick={() => setReviewCandidateId(candidate.id)}>Review</button>
+                      <button className="button compact primary" type="button" disabled={pending} onClick={() => setReviewCandidateId(candidate.id)}>Review</button>
                     ) : null}
                     {candidate.ingested_application_id ? (
                       <Link className="button compact" to={routes.postingDetail(candidate.ingested_application_id)}><BriefcaseIcon size={15} /> Posting</Link>
                     ) : null}
                     {candidate.status === "ignored" || candidate.status === "duplicate"
                       ? <button className="button compact" type="button" disabled={pending} onClick={() => setCandidateStatus(candidate, "new")}>Mark New</button>
-                      : <button className="button compact" type="button" onClick={() => setEditingCandidate(candidate)}>Details</button>}
+                      : <button className="button compact" type="button" disabled={pending} onClick={() => setEditingCandidate(candidate)}>Details</button>}
                   </div>
                 </td>
               </tr>
@@ -1468,6 +1630,33 @@ function discoveryCandidateComparator(left: DiscoveryCandidate, right: Discovery
     || (right.last_seen_at || "").localeCompare(left.last_seen_at || "");
 }
 
+function compareDiscoveryCandidateRows(
+  left: DiscoveryCandidate,
+  right: DiscoveryCandidate,
+  sort: SortState<DiscoverySortKey>,
+  companyById: Map<string, Company>
+) {
+  const leftCompany = companyById.get(left.company_id);
+  const rightCompany = companyById.get(right.company_id);
+  let result = 0;
+  if (sort.key === "candidate") result = compareText(left.title, right.title, sort.direction);
+  if (sort.key === "company") result = compareText(leftCompany?.name, rightCompany?.name, sort.direction);
+  if (sort.key === "industry") result = compareText(leftCompany?.industry, rightCompany?.industry, sort.direction);
+  if (sort.key === "size") result = compareText(leftCompany?.company_size, rightCompany?.company_size, sort.direction);
+  if (sort.key === "match") {
+    result = discoveryCandidateComparator(left, right);
+    if (sort.direction === "asc") result = -result;
+  }
+  if (sort.key === "source") result = compareText(left.source_trust_label, right.source_trust_label, sort.direction);
+  if (sort.key === "freshness") {
+    result = compareText(left.freshness_status, right.freshness_status, sort.direction)
+      || compareText(left.freshness_checked_at, right.freshness_checked_at, sort.direction);
+  }
+  return result
+    || compareNumber(left.fit_score, right.fit_score, "desc")
+    || compareText(left.id, right.id, "asc");
+}
+
 function candidateMatchesExclusionTerms(candidate: DiscoveryCandidate, terms: string[]) {
   const text = candidate.title.toLowerCase();
   return terms.some(term => term.trim() && text.includes(term.trim().toLowerCase()));
@@ -1557,4 +1746,9 @@ function fitClass(score: string) {
 
 function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : String(error);
+}
+
+function sameStringSet(left: Set<string>, right: Set<string>) {
+  if (left.size !== right.size) return false;
+  return [...left].every(value => right.has(value));
 }

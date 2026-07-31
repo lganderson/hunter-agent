@@ -5344,15 +5344,42 @@ def candidates_for_company(company_id):
 
 
 def update_candidate_status(candidate_id, status):
+    result = update_candidate_statuses([candidate_id], status)
+    return result["candidates"][0]
+
+
+def update_candidate_statuses(candidate_ids, status):
     status = validate_candidate_status(status)
-    wanted = storage.clean(candidate_id).upper()
+    wanted_ids = {
+        storage.clean(candidate_id).upper()
+        for candidate_id in candidate_ids or []
+        if storage.clean(candidate_id)
+    }
+    if not wanted_ids:
+        raise ValueError("Select at least one company posting candidate.")
     candidates = repository.read_company_posting_candidates()
+    found_ids = {
+        row.get("id", "").upper()
+        for row in candidates
+        if row.get("id", "").upper() in wanted_ids
+    }
+    missing_ids = wanted_ids - found_ids
+    if missing_ids:
+        raise ValueError(
+            "No company posting candidate found with "
+            + ", ".join(sorted(missing_ids))
+            + "."
+        )
     for row in candidates:
-        if row.get("id", "").upper() == wanted:
+        if row.get("id", "").upper() in wanted_ids:
             row["status"] = status
-            repository.write_company_posting_candidates(candidates)
-            return row
-    raise ValueError(f"No company posting candidate found with id {candidate_id}.")
+    repository.write_company_posting_candidates(candidates)
+    updated = [
+        row
+        for row in repository.read_company_posting_candidates()
+        if row.get("id", "").upper() in wanted_ids
+    ]
+    return {"candidates": updated, "count": len(updated)}
 
 
 def ingest_candidate(candidate_id):
@@ -5374,7 +5401,9 @@ def ingest_candidate(candidate_id):
     if candidate.get("location"):
         command.extend(["--location", candidate.get("location", "")])
     command.append(candidate.get("url", ""))
-    result = subprocess.run(command, cwd=paths.ROOT, capture_output=True, text=True, check=False)
+    # Keep cwd unset so the threaded macOS app server can use posix_spawn
+    # instead of an unsafe fork before exec. The script path is absolute.
+    result = subprocess.run(command, capture_output=True, text=True, check=False)
     if result.returncode:
         raise ValueError((result.stderr or result.stdout or "candidate ingest failed").strip())
 

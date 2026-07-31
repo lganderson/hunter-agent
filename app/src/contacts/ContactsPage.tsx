@@ -1,9 +1,13 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { useSearchParams } from "react-router-dom";
 import { FilterIcon, ListIcon, PeopleIcon, SearchIcon, XIcon } from "../components/Icons";
+import { SortableHeader } from "../components/Primitives";
 import { linkCompanyContact, linkContact, unlinkCompanyContact, unlinkContact, upsertContact } from "../core/api";
 import { titleCase } from "../core/format";
+import { compareText, nextSortState, type SortDirection, type SortState } from "../core/tableSort";
 import type { AppState, Contact } from "../core/types";
+
+type ContactSortKey = "contact" | "status" | "relationship" | "next_follow_up";
 
 type ContactsPageProps = {
   data: AppState;
@@ -15,6 +19,7 @@ export function ContactsPage({ data, refresh }: ContactsPageProps) {
   const [search, setSearch] = useState("");
   const [selectedContactId, setSelectedContactId] = useState("");
   const [operationStatus, setOperationStatus] = useState("");
+  const [sort, setSort] = useState<SortState<ContactSortKey>>({ key: "contact", direction: "asc" });
   const selectedContact = data.contacts.find(contact => contact.id === selectedContactId) || null;
   const companyId = searchParams.get("company_id") || "";
   const filteredCompany = data.companies.find(company => company.id === companyId) || null;
@@ -39,7 +44,11 @@ export function ContactsPage({ data, refresh }: ContactsPageProps) {
         contact.notes
       ].join(" ").toLowerCase().includes(query);
     })
-    .sort((a, b) => (a.company || "").localeCompare(b.company || "") || (a.name || "").localeCompare(b.name || ""));
+    .sort((a, b) => compareContactRows(a, b, sort));
+
+  function changeSort(key: ContactSortKey, initialDirection: SortDirection) {
+    setSort(current => nextSortState(current, key, initialDirection));
+  }
 
   function closeModal() {
     setSelectedContactId("");
@@ -64,10 +73,10 @@ export function ContactsPage({ data, refresh }: ContactsPageProps) {
             <table className="simple-table">
               <thead>
                 <tr>
-                  <th>Contact</th>
-                  <th>Status</th>
-                  <th>Relationship</th>
-                  <th>Next follow-up</th>
+                  <SortableHeader activeKey={sort.key} direction={sort.direction} label="Contact" onSort={changeSort} sortKey="contact" />
+                  <SortableHeader activeKey={sort.key} direction={sort.direction} label="Status" onSort={changeSort} sortKey="status" />
+                  <SortableHeader activeKey={sort.key} direction={sort.direction} label="Relationship" onSort={changeSort} sortKey="relationship" />
+                  <SortableHeader activeKey={sort.key} direction={sort.direction} label="Next follow-up" onSort={changeSort} sortKey="next_follow_up" />
                 </tr>
               </thead>
               <tbody>
@@ -99,6 +108,18 @@ export function ContactsPage({ data, refresh }: ContactsPageProps) {
       )}
     </section>
   );
+}
+
+function compareContactRows(left: Contact, right: Contact, sort: SortState<ContactSortKey>) {
+  let result = 0;
+  if (sort.key === "contact") {
+    result = compareText(left.company, right.company, sort.direction)
+      || compareText(left.name, right.name, sort.direction);
+  }
+  if (sort.key === "status") result = compareText(left.status, right.status, sort.direction);
+  if (sort.key === "relationship") result = compareText(left.relationship, right.relationship, sort.direction);
+  if (sort.key === "next_follow_up") result = compareText(left.next_follow_up, right.next_follow_up, sort.direction);
+  return result || compareText(left.id, right.id, "asc");
 }
 
 function ContactModal({
