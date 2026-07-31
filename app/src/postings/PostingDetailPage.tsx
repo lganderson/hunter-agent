@@ -4,6 +4,7 @@ import { ActionCommand, Priority, StatusPill, TagList } from "../components/Prim
 import { BriefcaseIcon, DownloadIcon, ExternalIcon, FilterIcon, PlusIcon } from "../components/Icons";
 import { archivePosting, createAction, createApplication, createResumeVersion, getPostingSnapshots, getResumeTailoringStatus, linkContact, makeNextAction, planResumeChanges, resumeDownloadUrl, saveManualPostingArchive, unlinkContact, updateAction, updateActionFields, updateApplication } from "../core/api";
 import { actionDueLabel, archivedPostingMarkdown, dueLabel, isActionComplete, markdownToHtml, normalizeTag, tagColorClass, tagList, titleCase } from "../core/format";
+import { routes } from "../core/routes";
 import type { Action, ActionUpdates, AppState, Application, PostingSnapshot, ResumePlan, ResumeTailoringStatus } from "../core/types";
 import type { ActionUpdateResult } from "../core/useHunterData";
 
@@ -219,7 +220,12 @@ export function PostingDetailPage({ data, refresh, applyActionUpdate, applyAppli
             <div className="posting-identity-icon" aria-hidden="true"><BriefcaseIcon size={22} /></div>
           <div>
             <h1>{createNew ? "Add posting" : app.role || "Untitled posting"}</h1>
-            <p>{app.company || "Unknown company"}{app.location ? ` · ${app.location}` : ""}{app.work_mode ? ` · ${titleCase(app.work_mode)}` : ""}</p>
+            <p>
+              {app.company_id
+                ? <Link className="posting-company-link" to={routes.companyDetail(app.company_id)}>{app.company || "Unknown company"}</Link>
+                : app.company || "Unknown company"}
+              {app.location ? ` · ${app.location}` : ""}{app.work_mode ? ` · ${titleCase(app.work_mode)}` : ""}
+            </p>
             {!createNew ? <div className="posting-hero-meta"><StatusPill value={app.outcome || app.stage} /><Priority value={app.priority} /><TagList app={app} /></div> : null}
           </div>
           </div>

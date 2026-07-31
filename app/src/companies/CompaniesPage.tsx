@@ -25,16 +25,10 @@ import { dateOnlyLabel, titleCase } from "../core/format";
 import { compareText, nextSortState, type SortDirection, type SortState } from "../core/tableSort";
 import type { AppState, Company, CompanyCareerSource, CompanyMergeSuggestion, CompanyPostingCandidate, DiscoveryCandidate } from "../core/types";
 import {
-  CANDIDATE_FILTERS,
   RECOMMENDED_CANDIDATE_LIMIT,
-  candidateEmptyMessage,
   candidateFitScore,
-  candidateMatchesFilter,
   candidateRank,
-  fitBand,
-  isCurrentNewCandidate,
-  isRecommendedCandidate,
-  type CandidateFilter
+  isRecommendedCandidate
 } from "./candidateUtils";
 
 type CompaniesPageProps = {
@@ -46,9 +40,14 @@ type CompanyDetailPageProps = CompaniesPageProps & {
   createNew?: boolean;
 };
 
+type CompanyCandidateRow =
+  | { source: "discovery"; candidate: DiscoveryCandidate }
+  | { source: "career"; candidate: CompanyPostingCandidate };
+
 const INTEREST_STATUSES = ["interested", "neutral", "not-interested", "archived"];
 const DEFAULT_INTEREST_STATUSES = ["interested", "neutral"];
 const TRACKING_STATUSES = ["tracked", "discovered"];
+const COMPANY_CANDIDATE_PREVIEW_LIMIT = 50;
 type CompanySortKey = "company" | "interest" | "tracking" | "careers_url" | "last_check";
 
 export function CompaniesPage({ data, refresh }: CompaniesPageProps) {
@@ -270,7 +269,11 @@ export function CompanyDetailPage({ data, refresh, createNew = false }: CompanyD
     [data.contacts, linkedContactIds]
   );
   const linkedPostings = useMemo(
-    () => data.applications.filter(app => app.company_id === company?.id),
+    () => data.applications
+      .filter(app => app.company_id === company?.id)
+      .sort((left, right) => Number(right.is_active) - Number(left.is_active)
+        || (left.sort_due || "").localeCompare(right.sort_due || "")
+        || (left.role || "").localeCompare(right.role || "")),
     [company?.id, data.applications]
   );
   const careerSource = useMemo(
@@ -303,29 +306,23 @@ export function CompanyDetailPage({ data, refresh, createNew = false }: CompanyD
     ),
     [company?.id, data.company_merge_suggestions, data.dismissed_suggestion_ids]
   );
-  const [candidateFilter, setCandidateFilter] = useState<CandidateFilter>("recommended");
+  const [candidateSearch, setCandidateSearch] = useState("");
   const recommendedCount = useMemo(
     () => Math.min(candidates.filter(candidate => isRecommendedCandidate(candidate, company?.last_checked_at || "")).length, RECOMMENDED_CANDIDATE_LIMIT),
     [candidates, company?.last_checked_at]
   );
-  const candidateCounts = useMemo(
-    () => ({
-      recommended: recommendedCount,
-      new: candidates.filter(candidate => isCurrentNewCandidate(candidate, company?.last_checked_at || "")).length,
-      all: candidates.length,
-      ignored: candidates.filter(candidate => candidate.status === "ignored").length,
-      ingested: candidates.filter(candidate => candidate.status === "ingested").length,
-      unavailable: candidates.filter(candidate => candidate.status === "unavailable").length
-    }),
-    [candidates, company?.last_checked_at, recommendedCount]
+  const candidateRows = useMemo<CompanyCandidateRow[]>(
+    () => [
+      ...discoveryRoles.map(candidate => ({ source: "discovery" as const, candidate })),
+      ...candidates.map(candidate => ({ source: "career" as const, candidate }))
+    ].sort(compareCompanyCandidateRows),
+    [candidates, discoveryRoles]
   );
-  const visibleCandidates = useMemo(
-    () => {
-      const rows = candidates.filter(candidate => candidateMatchesFilter(candidate, candidateFilter, company?.last_checked_at || ""));
-      return candidateFilter === "recommended" ? rows.slice(0, RECOMMENDED_CANDIDATE_LIMIT) : rows;
-    },
-    [candidateFilter, candidates, company?.last_checked_at]
+  const matchingCandidateRows = useMemo(
+    () => candidateRows.filter(row => candidateIncludes(row.candidate, candidateSearch)),
+    [candidateRows, candidateSearch]
   );
+  const visibleCandidateRows = matchingCandidateRows.slice(0, COMPANY_CANDIDATE_PREVIEW_LIMIT);
   const availableContacts = useMemo(
     () => data.contacts.filter(contact => !linkedContactIds.has(contact.id)),
     [data.contacts, linkedContactIds]
@@ -381,7 +378,6 @@ export function CompanyDetailPage({ data, refresh, createNew = false }: CompanyD
     try {
       const result = await checkCompanyPostings(company.id);
       await refresh();
-      setCandidateFilter("recommended");
       const detailChecked = result.verification_count ? `; ${result.verification_count} detail checked` : "";
       const detailSkipped = result.verification_skipped_count ? `; ${result.verification_skipped_count} detail skipped` : "";
       setOperationStatus(`Check complete. ${result.new.length} new candidate${result.new.length === 1 ? "" : "s"}; ${result.recommended.length} recommended; ${result.unavailable_count} unavailable${detailChecked}${detailSkipped}.`);
@@ -536,7 +532,6 @@ export function CompanyDetailPage({ data, refresh, createNew = false }: CompanyD
     try {
       await updateCompanyCandidate(candidateId, "ignored");
       await refresh();
-      setCandidateFilter("ignored");
       setOperationStatus("Candidate ignored.");
     } catch (error) {
       setOperationStatus(`Could not ignore candidate. ${error instanceof Error ? error.message : String(error)}`);
@@ -552,7 +547,6 @@ export function CompanyDetailPage({ data, refresh, createNew = false }: CompanyD
     try {
       await ingestCompanyCandidate(candidateId);
       await refresh();
-      setCandidateFilter("ingested");
       setOperationStatus("Candidate ingested.");
     } catch (error) {
       setOperationStatus(`Could not ingest candidate. ${error instanceof Error ? error.message : String(error)}`);
@@ -664,8 +658,8 @@ export function CompanyDetailPage({ data, refresh, createNew = false }: CompanyD
       </header>
 
       <div className="company-overview-grid" aria-label="Company overview">
-        <div className="company-stat" aria-label={`${candidates.length + discoveryRoles.length} roles linked to ${company.name}`}>
-          <span>Roles</span><strong>{candidates.length + discoveryRoles.length}</strong><small>{discoveryRoles.length} Discovery · {candidates.length} career scan</small>
+        <div className="company-stat" aria-label={`${candidates.length + discoveryRoles.length} candidates linked to ${company.name}`}>
+          <span>Candidates</span><strong>{candidates.length + discoveryRoles.length}</strong><small>{discoveryRoles.length} Discovery · {candidates.length} career scan</small>
         </div>
         <Link className="company-stat" to={routes.postingsFiltered({ companies: company.name })} aria-label={`View tracked postings for ${company.name}`}>
           <span>Tracked postings</span><strong>{linkedPostings.length}</strong><small>{linkedPostings.filter(app => app.is_active).length} active</small>
@@ -682,97 +676,108 @@ export function CompanyDetailPage({ data, refresh, createNew = false }: CompanyD
 
       <div className="company-workspace">
         <div className="company-workspace-main">
-          <article className="panel company-candidates-panel">
+          <article className="panel company-postings-panel">
             <div className="company-section-header">
-              <div>
-                <h2>Roles</h2>
-                <p>Discovery and company career scans in one place.</p>
-              </div>
-              <span>{candidates.length + discoveryRoles.length} total</span>
+              <div><h2>Postings</h2><p>Tracked opportunities connected to this company.</p></div>
+              <Link className="text-link" to={routes.postingsFiltered({ companies: company.name })}>View all</Link>
             </div>
-            {discoveryRoles.length ? (
-              <div className="company-role-source-group">
-                <div className="company-role-source-heading"><strong>Discovery</strong><span>{discoveryRoles.length} role{discoveryRoles.length === 1 ? "" : "s"}</span></div>
-                <div className="company-candidate-list">
-                  {discoveryRoles.map(candidate => (
-                    <article className="company-candidate" key={`discovery-${candidate.id}`}>
-                      <div className="company-candidate-copy">
-                        <a className="company-candidate-title" href={candidate.canonical_url || candidate.url} target="_blank" rel="noreferrer">{candidate.title || candidate.url}</a>
-                        <div className="candidate-meta">
-                          <span className="pill">Discovery</span>
-                          <span>{candidateLocationLabel(candidate)}</span>
-                          <span>{titleCase(candidate.status)} · Seen {candidateDateLabel(candidate)}</span>
-                          {candidate.fit_score ? <span className={`pill fit-${fitBandForScore(candidate.fit_score)}`}>Fit {candidate.fit_score}</span> : null}
-                        </div>
-                        {candidate.fit_summary ? <span className="candidate-fit-summary">{candidate.fit_summary}</span> : null}
-                      </div>
-                      <div className="company-candidate-actions">
-                        <a className="button compact" href={candidate.canonical_url || candidate.url} target="_blank" rel="noreferrer">View role</a>
-                        <button className="button compact primary" type="button" disabled={candidate.status === "ingested" || candidate.processing_status !== "ready" || Boolean(activeCandidateActionId)} onClick={() => updateDiscoveryRole(candidate.id, "ingested")}>
-                          {activeCandidateActionId === candidate.id ? "Updating..." : "Ingest"}
-                        </button>
-                        <button className="button compact" type="button" disabled={candidate.status !== "new" || Boolean(activeCandidateActionId)} onClick={() => updateDiscoveryRole(candidate.id, "ignored")}>Ignore</button>
-                      </div>
-                    </article>
-                  ))}
-                </div>
-              </div>
-            ) : null}
-            <div className="company-role-source-heading"><strong>Career scan</strong><span>{candidates.length} role{candidates.length === 1 ? "" : "s"}</span></div>
-            <div className="candidate-filter-bar" aria-label="Candidate filters">
-              {CANDIDATE_FILTERS.map(filter => (
-                <button
-                  className={candidateFilter === filter.id ? "candidate-filter active" : "candidate-filter"}
-                  key={filter.id}
-                  type="button"
-                  onClick={() => setCandidateFilter(filter.id)}
-                  aria-pressed={candidateFilter === filter.id}
-                >
-                  {filter.label}
-                  <span>{candidateCounts[filter.id]}</span>
-                </button>
-              ))}
-            </div>
-            <div className="company-candidate-list">
-          {visibleCandidates.length
-            ? visibleCandidates.map(candidate => (
-              <article className="company-candidate" key={candidate.id}>
-                <div className="company-candidate-copy">
-                  <a className="company-candidate-title" href={candidate.url} target="_blank" rel="noreferrer">{candidate.title || candidate.url}</a>
-                  <div className="candidate-meta">
-                    <span>{candidateLocationLabel(candidate)}</span>
-                    <span>{titleCase(candidate.status)} · Seen {candidateDateLabel(candidate)}</span>
-                    {candidate.fit_score ? <span className={`pill fit-${fitBand(candidate)}`}>Fit {candidate.fit_score}</span> : null}
+            <div className="company-posting-list">
+              {linkedPostings.length ? linkedPostings.map(app => (
+                <Link className="company-posting-row" key={app.id} to={routes.postingDetail(app.id)}>
+                  <div className="company-posting-copy">
+                    <strong>{app.role || app.id}</strong>
+                    <span>{titleCase(app.stage)}{app.outcome ? ` · ${titleCase(app.outcome)}` : ""}</span>
                   </div>
-                  {candidate.fit_summary ? <span className="candidate-fit-summary">{candidate.fit_summary}</span> : null}
-                </div>
-                <div className="company-candidate-actions">
-                  <a className="button compact" href={candidate.url} target="_blank" rel="noreferrer">View role</a>
-                  <button
-                    className="button compact primary"
-                    type="button"
-                    disabled={candidate.status === "ingested" || Boolean(activeCandidateActionId)}
-                    onClick={() => ingestCandidate(candidate.id)}
-                  >
-                    {activeCandidateActionId === candidate.id ? "Ingesting..." : "Ingest"}
-                  </button>
-                  <button
-                    className="button compact"
-                    type="button"
-                    disabled={candidate.status === "ignored" || candidate.status === "ingested" || Boolean(activeCandidateActionId)}
-                    onClick={() => ignoreCandidate(candidate.id)}
-                  >
-                    {activeCandidateActionId === candidate.id ? "Updating..." : "Ignore"}
-                  </button>
-                </div>
-              </article>
-            ))
-            : <div className="company-section-empty">{candidateEmptyMessage(candidateFilter, candidates.length)}</div>}
+                  <div className="company-posting-next">
+                    <span>Next action</span>
+                    <strong>{app.next_action || "None"}</strong>
+                  </div>
+                  <span className="company-posting-open" aria-hidden="true">→</span>
+                </Link>
+              )) : <div className="company-section-empty">No tracked postings yet.</div>}
             </div>
           </article>
 
-          <div className="company-related-grid">
-            <article className="panel company-rail-panel">
+          <article className="panel company-candidates-panel">
+            <div className="company-section-header">
+              <div>
+                <h2>Candidates</h2>
+                <p>Compare potential roles in one list.</p>
+              </div>
+              <Link className="text-link" to={routes.candidatesFiltered({ companies: company.id })}>Open workspace</Link>
+            </div>
+            <div className="company-candidate-toolbar">
+              <label className="search">
+                <span className="sr-only">Search candidates for {company.name}</span>
+                <SearchIcon />
+                <input value={candidateSearch} onChange={event => setCandidateSearch(event.target.value)} type="search" placeholder="Search title, location, status, or fit…" />
+              </label>
+              <div className="company-candidate-summary" aria-live="polite">
+                <strong>{visibleCandidateRows.length}</strong>
+                <span>
+                  {candidateSearch && matchingCandidateRows.length > COMPANY_CANDIDATE_PREVIEW_LIMIT
+                    ? `of ${matchingCandidateRows.length} matches`
+                    : `shown from ${candidateRows.length}`}
+                </span>
+              </div>
+            </div>
+            <div className="company-candidate-list">
+              {visibleCandidateRows.length ? visibleCandidateRows.map(row => {
+                const { candidate } = row;
+                const isDiscovery = row.source === "discovery";
+                const sourceUrl = row.source === "discovery" ? row.candidate.canonical_url || row.candidate.url : row.candidate.url;
+                const isActiveAction = activeCandidateActionId === candidate.id;
+                const canIngest = row.source === "discovery"
+                  ? row.candidate.status !== "ingested" && row.candidate.processing_status === "ready"
+                  : row.candidate.status !== "ingested";
+                const canIgnore = row.source === "discovery"
+                  ? row.candidate.status === "new"
+                  : row.candidate.status !== "ignored" && row.candidate.status !== "ingested";
+                return (
+                  <article className="company-candidate" key={`${row.source}-${candidate.id}`}>
+                    <div className="company-candidate-copy">
+                      <a className="company-candidate-title" href={sourceUrl} target="_blank" rel="noreferrer">{candidate.title || sourceUrl}</a>
+                      <span className="company-candidate-location">{candidateLocationLabel(candidate)}</span>
+                      <span className={candidate.fit_summary ? "candidate-fit-summary" : "candidate-fit-summary empty"}>
+                        {candidate.fit_summary || "No fit summary yet."}
+                      </span>
+                    </div>
+                    <dl className="company-candidate-facts">
+                      <div><dt>Source</dt><dd>{candidateSourceLabel(row)}</dd></div>
+                      <div><dt>Status</dt><dd>{titleCase(candidate.status)}</dd></div>
+                      <div><dt>Fit</dt><dd>{candidate.fit_score ? `${candidate.fit_score} · ${fitLabel(candidate.fit_score)}` : "Not scored"}</dd></div>
+                      <div><dt>Seen</dt><dd>{candidateDateLabel(candidate)}</dd></div>
+                    </dl>
+                    <div className="company-candidate-actions">
+                      <a className="button compact" href={sourceUrl} target="_blank" rel="noreferrer">Open source</a>
+                      <button
+                        className="button compact primary"
+                        type="button"
+                        disabled={!canIngest || Boolean(activeCandidateActionId)}
+                        onClick={() => isDiscovery ? updateDiscoveryRole(candidate.id, "ingested") : ingestCandidate(candidate.id)}
+                      >
+                        {isActiveAction ? "Ingesting..." : candidate.status === "ingested" ? "Ingested" : "Ingest"}
+                      </button>
+                      <button
+                        className="button compact"
+                        type="button"
+                        disabled={!canIgnore || Boolean(activeCandidateActionId)}
+                        onClick={() => isDiscovery ? updateDiscoveryRole(candidate.id, "ignored") : ignoreCandidate(candidate.id)}
+                      >
+                        {isActiveAction ? "Updating..." : candidate.status === "ignored" ? "Ignored" : "Ignore"}
+                      </button>
+                    </div>
+                  </article>
+                );
+              }) : <div className="company-section-empty">
+                {candidateSearch
+                  ? "No candidates match this search."
+                  : "No candidates have been recorded for this company yet."}
+              </div>}
+            </div>
+          </article>
+
+          <article className="panel company-rail-panel">
               <div className="company-section-header compact"><div><h2>Contacts</h2><p>{linkedContacts.length} linked relationship{linkedContacts.length === 1 ? "" : "s"}.</p></div></div>
               <div className="company-link-control">
                 <select aria-label="Contact to link" value={contactId} onChange={event => setContactId(event.target.value)} disabled={!availableContacts.length}>
@@ -788,20 +793,7 @@ export function CompanyDetailPage({ data, refresh, createNew = false }: CompanyD
                   </div>
                 )) : <div className="company-section-empty compact">No contacts linked yet.</div>}
               </div>
-            </article>
-
-            <article className="panel company-rail-panel">
-              <div className="company-section-header compact"><div><h2>Tracked postings</h2><p>{linkedPostings.length} posting{linkedPostings.length === 1 ? "" : "s"} tied to this company.</p></div></div>
-              <div className="company-relationship-list">
-                {linkedPostings.length ? linkedPostings.map(app => (
-                  <Link className="company-relationship linked" key={app.id} to={routes.postingDetail(app.id)}>
-                    <div><strong>{app.role || app.id}</strong><span>{titleCase(app.stage)}{app.outcome ? ` · ${titleCase(app.outcome)}` : ""}</span></div>
-                    <span>Open</span>
-                  </Link>
-                )) : <div className="company-section-empty compact">No tracked postings yet.</div>}
-              </div>
-            </article>
-          </div>
+          </article>
         </div>
 
         <aside className="company-workspace-rail">
@@ -982,8 +974,57 @@ function companyFieldLabel(field: CompanyMetadataSuggestion["field"]) {
 }
 
 function candidateLocationLabel(candidate: CompanyPostingCandidate | DiscoveryCandidate) {
-  const location = candidate.location || "Location not listed";
+  const location = conciseCandidateLocation(candidate.location);
   return candidate.work_mode ? `${location} · ${candidate.work_mode}` : location;
+}
+
+function conciseCandidateLocation(value: string) {
+  const location = value.trim();
+  if (!location) return "Location not listed";
+  if (!location.includes("{")) return location;
+  const plainPrefix = location.split(/,\s*\{/)[0].trim();
+  if (!plainPrefix) return "Location details available at source";
+  const parts = plainPrefix.split(",").map(part => part.trim()).filter(Boolean);
+  return parts.slice(-3).join(", ") || "Location details available at source";
+}
+
+function candidateIncludes(candidate: CompanyPostingCandidate | DiscoveryCandidate, search: string) {
+  const query = search.trim().toLowerCase();
+  if (!query) return true;
+  return [
+    candidate.title,
+    candidate.location,
+    candidate.work_mode,
+    candidate.status,
+    candidate.fit_score,
+    candidate.fit_summary,
+    candidate.source_platform,
+    "category" in candidate ? candidate.category : "",
+    "scan_state" in candidate ? candidate.scan_state : "",
+    "source_trust_label" in candidate ? candidate.source_trust_label : ""
+  ].join(" ").toLowerCase().includes(query);
+}
+
+function compareCompanyCandidateRows(left: CompanyCandidateRow, right: CompanyCandidateRow) {
+  return candidateRank(left.candidate.status) - candidateRank(right.candidate.status)
+    || Number(right.candidate.fit_score || 0) - Number(left.candidate.fit_score || 0)
+    || (right.candidate.last_seen_at || "").localeCompare(left.candidate.last_seen_at || "")
+    || (left.candidate.title || "").localeCompare(right.candidate.title || "");
+}
+
+function candidateSourceLabel(row: CompanyCandidateRow) {
+  const sourceType = row.source === "discovery" ? "Discovery" : "Career scan";
+  const platform = row.candidate.source_platform
+    ? titleCase(row.candidate.source_platform.replaceAll("_", " "))
+    : "";
+  return [sourceType, platform].filter(Boolean).join(" · ");
+}
+
+function fitLabel(score: string) {
+  const band = fitBandForScore(score);
+  if (band === "strong") return "Strong";
+  if (band === "consider") return "Consider";
+  return "Low";
 }
 
 function fitBandForScore(score: string) {
