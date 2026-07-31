@@ -3,7 +3,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
@@ -410,6 +410,21 @@ class HunterWorkflowTest(unittest.TestCase):
 
         self.assertIn('"next_action": ""', payload)
         self.assertIn('"next_action_date": ""', payload)
+
+    def test_mcp_ingest_posting_keeps_cwd_unset_for_safe_macos_spawn(self):
+        completed = Mock(returncode=0, stdout="Ingested A0001", stderr="")
+
+        with patch.object(mcp_server.subprocess, "run", return_value=completed) as run:
+            result = mcp_server.tool_ingest_posting(
+                {"url": "https://example.com/jobs/123", "use_ai_actions": True}
+            )
+
+        command = run.call_args.args[0]
+        self.assertEqual(command[0], sys.executable)
+        self.assertEqual(command[1], str(paths.ROOT / "scripts" / "ingest_postings.py"))
+        self.assertIn("--use-ai-actions", command)
+        self.assertNotIn("cwd", run.call_args.kwargs)
+        self.assertIn("Ingested A0001", result["content"][0]["text"])
 
 
 def application_row(overrides):

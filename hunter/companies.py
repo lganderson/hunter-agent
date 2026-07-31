@@ -131,10 +131,10 @@ def normalize_company_profile_url(value):
     normalized = normalize_url(str(value or ""))
     parsed = urlparse(normalized)
     if "linkedin.com" not in parsed.netloc.lower():
-        return normalized
+        return ""
     match = re.search(r"/company/([^/?#]+)", parsed.path, re.I)
     if not match:
-        return normalized
+        return ""
     return f"https://www.linkedin.com/company/{match.group(1)}"
 
 

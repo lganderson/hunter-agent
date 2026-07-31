@@ -213,6 +213,7 @@ export type DiscoveryPreferenceSuggestion = {
 
 export type DiscoveryLastRunSummary = {
   evaluated_count?: number;
+  known_count?: number;
   qualified_count?: number;
   screened_count?: number;
   skip_reasons?: Record<string, number>;
@@ -220,6 +221,8 @@ export type DiscoveryLastRunSummary = {
   found_count?: number;
   new_count?: number;
   updated_count?: number;
+  needs_details_count?: number;
+  lane_unmatched_count?: number;
   skipped_count?: number;
   duplicate_count?: number;
   limited_count?: number;
@@ -298,6 +301,7 @@ export type DiscoveryRunResult = {
   search: DiscoverySearch;
   captured: DiscoveryCandidate[];
   evaluated_count: number;
+  known_count: number;
   qualified_count: number;
   screened_count: number;
   skip_reasons: Record<string, number>;
@@ -305,6 +309,8 @@ export type DiscoveryRunResult = {
   found_count: number;
   new_count: number;
   updated_count: number;
+  needs_details_count: number;
+  lane_unmatched_count: number;
   skipped_count: number;
   duplicate_count: number;
   limited_count: number;

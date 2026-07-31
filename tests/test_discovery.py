@@ -95,7 +95,7 @@ class HunterDiscoveryTest(unittest.TestCase):
         self.assertEqual(state["href"], "https://www.linkedin.com/company/example/")
         self.assertEqual(delays, [0.25])
 
-    def test_company_research_uses_linkedin_company_search_before_google(self):
+    def test_company_research_uses_linkedin_only_and_ignores_website_profile(self):
         opened_urls = []
         browser = browser_discovery.HunterChrome()
 
@@ -114,7 +114,7 @@ class HunterDiscoveryTest(unittest.TestCase):
         browser._search_tab = search_tab
         browser.google = lambda query, page=0: self.fail("Google fallback should not run")
 
-        result = browser.company("2K Games")
+        result = browser.company("2K Games", "https://2k.com/about")
 
         self.assertEqual(result["company_industry"], "Computer Games")
         self.assertIn("keywords=2K+Games", opened_urls[0][0])
@@ -537,7 +537,8 @@ class HunterDiscoveryTest(unittest.TestCase):
             posting_fetcher=lambda url: {"status": 200, "final_url": url, "html": posting_page, "error": ""},
         )
         self.assertEqual(rerun["new_count"], 0)
-        self.assertEqual(rerun["updated_count"], 2)
+        self.assertEqual(rerun["updated_count"], 0)
+        self.assertEqual(rerun["known_count"], 2)
         self.assertEqual(len(repository.read_discovery_candidates()), 2)
 
     def test_search_now_uses_hunter_chrome_google_and_linkedin_sources(self):
@@ -717,6 +718,147 @@ class HunterDiscoveryTest(unittest.TestCase):
         self.assertNotIn(discovery.LINKEDIN_DETAILS_WARNING, candidate["warnings"])
         self.assertTrue(result["search"]["last_run_at"])
         self.assertEqual(result["search"]["last_run_summary"]["enriched_count"], 1)
+
+    def test_search_recognizes_existing_role_before_posting_lookup(self):
+        search = self.save_search("Technical platforms", "technical program manager")
+        linkedin_url = "https://www.linkedin.com/jobs/view/1234567890"
+        row = {field: "" for field in schema.DISCOVERY_CANDIDATE_FIELDS}
+        row.update(
+            {
+                "id": "DC0001",
+                "search_id": search["id"],
+                "company_id": companies.upsert_company(
+                    "",
+                    {"name": "Example Labs", "tracking_status": "discovered"},
+                )["id"],
+                "title": "Technical Program Manager",
+                "url": linkedin_url,
+                "status": "new",
+                "processing_status": "ready",
+            }
+        )
+        repository.write_discovery_candidates([row])
+        posting_calls = []
+        detail_calls = []
+
+        result = discovery.run_search(
+            search["id"],
+            posting_fetcher=lambda url: posting_calls.append(url) or self.fail(
+                "Known roles should not be fetched again"
+            ),
+            browser_searcher=lambda engine, value, page: (
+                [
+                    {
+                        "url": linkedin_url,
+                        "title": "Technical Program Manager",
+                        "company": "Example Labs",
+                        "location": "United States",
+                        "snippet": "Remote technical program role.",
+                    }
+                ]
+                if engine == "linkedin"
+                else []
+            ),
+            browser_detailer=lambda url: detail_calls.append(url) or {},
+        )
+
+        self.assertEqual(result["evaluated_count"], 1)
+        self.assertEqual(result["known_count"], 1)
+        self.assertEqual(result["found_count"], 0)
+        self.assertEqual(result["new_count"], 0)
+        self.assertEqual(posting_calls, [])
+        self.assertEqual(detail_calls, [])
+
+    def test_search_retains_browser_verifiable_posting_when_lightweight_fetch_fails(self):
+        search = self.save_search("Technical platforms", "technical program manager")
+        posting_url = "https://jobs.example.com/roles/technical-program-manager"
+        detail_calls = []
+
+        result = discovery.run_search(
+            search["id"],
+            posting_fetcher=lambda url: {
+                "status": 403,
+                "final_url": url,
+                "html": "",
+                "error": "Access denied",
+            },
+            browser_searcher=lambda engine, value, page: (
+                [
+                    {
+                        "url": posting_url,
+                        "title": "Technical Program Manager",
+                        "company": "Example Labs",
+                        "location": "Remote, United States",
+                        "snippet": "Remote technical program role.",
+                    }
+                ]
+                if engine == "google"
+                else []
+            ),
+            browser_detailer=lambda url: detail_calls.append(url) or {},
+        )
+
+        self.assertEqual(result["evaluated_count"], 1)
+        self.assertEqual(result["known_count"], 0)
+        self.assertEqual(result["found_count"], 1)
+        self.assertEqual(result["new_count"], 1)
+        self.assertEqual(result["needs_details_count"], 1)
+        self.assertEqual(detail_calls, [posting_url])
+        self.assertIn(
+            discovery.BROWSER_VALIDATION_WARNING,
+            result["captured"][0]["warnings"],
+        )
+
+    def test_search_uses_lane_match_for_ranking_without_discarding_role(self):
+        search = self.save_search(
+            "Technical platforms",
+            "technical program manager",
+            lanes=[
+                {
+                    "id": "minnesota",
+                    "label": "Minnesota",
+                    "location": "Minnesota",
+                    "work_modes": ["on-site", "hybrid", "remote"],
+                }
+            ],
+        )
+        matching_url = "https://www.linkedin.com/jobs/view/1234567890"
+        review_url = "https://www.linkedin.com/jobs/view/1234567891"
+
+        result = discovery.run_search(
+            search["id"],
+            browser_searcher=lambda engine, value, page: (
+                [
+                    {
+                        "url": review_url,
+                        "title": "Technical Program Manager",
+                        "company": "London Example",
+                        "location": "London, United Kingdom",
+                        "work_mode": "On-site",
+                        "snippet": "On-site technical program role in London.",
+                    },
+                    {
+                        "url": matching_url,
+                        "title": "Technical Program Manager",
+                        "company": "Minnesota Example",
+                        "location": "Minneapolis, Minnesota",
+                        "work_mode": "Hybrid",
+                        "snippet": "Hybrid technical program role in Minnesota.",
+                    },
+                ]
+                if engine == "linkedin"
+                else []
+            ),
+        )
+
+        self.assertEqual(result["found_count"], 2)
+        self.assertEqual(result["lane_unmatched_count"], 1)
+        self.assertNotIn("lane-mismatch", result["skip_reasons"])
+        self.assertEqual(result["captured"][0]["url"], matching_url)
+        self.assertIn(
+            discovery.LANE_REVIEW_WARNING,
+            result["captured"][1]["warnings"],
+        )
 
     def test_search_skips_not_interested_company_before_enrichment_or_storage(self):
         search = self.save_search("Technical platforms", "technical program manager")
@@ -1573,6 +1715,103 @@ class HunterDiscoveryTest(unittest.TestCase):
         discovery.update_candidate_status("DC0002", "ignored", "wrong-role")
 
         self.assertEqual(discovery.preference_suggestions()[0]["term"], "infrastructure")
+
+    def test_cleanup_candidates_reconciles_active_queue_without_changing_reviewed_history(self):
+        search = self.save_search("TPM", "technical program manager")
+        discovery.upsert_search(search["id"], {"excluded_terms": ["infrastructure"]})
+        excluded_company = companies.upsert_company(
+            "",
+            {"name": "No Thanks Inc", "interest_status": "not-interested"},
+        )
+        rows = []
+        for candidate_id, title, status, company_id, fit_score, url in [
+            (
+                "DC0001",
+                "Technical Program Manager",
+                "new",
+                excluded_company["id"],
+                "90",
+                "https://www.linkedin.com/jobs/view/1000000001",
+            ),
+            (
+                "DC0002",
+                "Technical Program Manager, Infrastructure",
+                "screened",
+                "",
+                "90",
+                "https://www.linkedin.com/jobs/view/1000000002",
+            ),
+            (
+                "DC0003",
+                "Technical Program Manager",
+                "new",
+                "",
+                "20",
+                "https://www.linkedin.com/jobs/view/1000000003",
+            ),
+            (
+                "DC0004",
+                "Technical Program Manager",
+                "ignored",
+                "",
+                "90",
+                "https://www.linkedin.com/jobs/view/1000000004",
+            ),
+            (
+                "DC0005",
+                "Partner Program Manager",
+                "new",
+                "",
+                "90",
+                "https://www.linkedin.com/jobs/view/1000000005",
+            ),
+            (
+                "DC0006",
+                "Engineering Program Manager",
+                "new",
+                "",
+                "90",
+                "https://www.linkedin.com/jobs/view/1000000006",
+            ),
+        ]:
+            row = {field: "" for field in schema.DISCOVERY_CANDIDATE_FIELDS}
+            row.update(
+                {
+                    "id": candidate_id,
+                    "search_id": search["id"],
+                    "title": title,
+                    "status": status,
+                    "company_id": company_id,
+                    "fit_score": fit_score,
+                    "url": url,
+                    "canonical_url": url,
+                }
+            )
+            rows.append(row)
+        repository.write_discovery_candidates(rows)
+
+        result = discovery.cleanup_candidates()
+        changed = {
+            candidate["id"]: candidate
+            for candidate in repository.read_discovery_candidates()
+        }
+
+        self.assertEqual(result["ignored_company_count"], 1)
+        self.assertEqual(result["ignored_exclusion_count"], 1)
+        self.assertEqual(result["screened_count"], 2)
+        self.assertEqual(changed["DC0001"]["status"], "ignored")
+        self.assertEqual(changed["DC0001"]["ignore_reason"], "company")
+        self.assertEqual(changed["DC0002"]["status"], "ignored")
+        self.assertEqual(changed["DC0002"]["ignore_reason"], "search-exclusion")
+        self.assertEqual(changed["DC0003"]["status"], discovery.SCREENED_STATUS)
+        self.assertEqual(changed["DC0004"]["status"], "ignored")
+        self.assertEqual(changed["DC0005"]["status"], discovery.SCREENED_STATUS)
+        self.assertEqual(changed["DC0006"]["status"], "new")
+
+        second_result = discovery.cleanup_candidates()
+        self.assertEqual(second_result["ignored_company_count"], 0)
+        self.assertEqual(second_result["ignored_exclusion_count"], 0)
+        self.assertEqual(second_result["screened_count"], 0)
 
     def test_company_research_queue_fills_missing_active_companies_beyond_posting_batch(self):
         candidate_rows = []

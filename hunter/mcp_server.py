@@ -287,7 +287,11 @@ def tool_ingest_posting(args):
     if args.get("use_ai_actions"):
         command.append("--use-ai-actions")
     command.append(url)
-    result = subprocess.run(command, cwd=paths.ROOT, capture_output=True, text=True, check=False)
+    # Keep cwd unset so Python can use posix_spawn on macOS. Launching this
+    # tool from the threaded app server with cwd set forces fork/exec, which
+    # can crash the child before exec when macOS frameworks have active
+    # threads. The script path is absolute and resolves Hunter's root itself.
+    result = subprocess.run(command, capture_output=True, text=True, check=False)
     if result.returncode:
         raise ValueError((result.stderr or result.stdout or "ingest failed").strip())
     return text_result({"stdout": result.stdout.strip(), "stderr": result.stderr.strip()})

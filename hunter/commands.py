@@ -16,6 +16,7 @@ def print_help():
         "Commands:\n"
         "  init, list, due, stats, add, update, make-note\n"
         "  actions, companies, ingest, serve, serve-status, serve-stop, serve-restart, serve-ready, mcp\n"
+        "  cleanup-discovery\n"
         "  migrate-to-sqlite, migrate-postings, export-csv, load-demo-data\n\n"
         "  repo-check, clean-caches\n\n"
         "Examples:\n"
@@ -23,6 +24,7 @@ def print_help():
         "  python3 hunter.py serve-restart 8010\n"
         "  python3 hunter.py serve-ready 8011\n"
         "  python3 hunter.py mcp\n"
+        "  python3 hunter.py cleanup-discovery\n"
         "  python3 hunter.py repo-check\n"
         "  python3 hunter.py clean-caches\n"
         "  python3 hunter.py companies list\n"
@@ -83,6 +85,26 @@ def main(argv=None):
         from . import mcp_server
 
         mcp_server.main()
+        raise SystemExit(0)
+    if command == "cleanup-discovery":
+        from . import discovery
+
+        result = discovery.cleanup_candidates()
+        print(
+            "Cleaned Discovery candidates: "
+            + ", ".join(
+                [
+                    f"before={result['before_count']}",
+                    f"after={result['after_count']}",
+                    f"duplicates merged={result['merged_count']}",
+                    f"companies linked={result['linked_count']}",
+                    f"company exclusions={result['ignored_company_count']}",
+                    f"search exclusions={result['ignored_exclusion_count']}",
+                    f"newly screened={result['screened_count']}",
+                    f"restored={result['restored_count']}",
+                ]
+            )
+        )
         raise SystemExit(0)
     if command in tracker_commands:
         raise SystemExit(run_script("tracker.py", [command, *passthrough]))

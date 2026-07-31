@@ -704,6 +704,12 @@ class HunterChrome:
 
     def company(self, name, profile_url=""):
         target_url = (profile_url or "").strip()
+        parsed_target = urlparse(target_url)
+        if (
+            "linkedin.com" not in parsed_target.netloc.lower()
+            or "/company/" not in parsed_target.path.lower()
+        ):
+            target_url = ""
         if not target_url:
             linkedin_url = LINKEDIN_COMPANY_SEARCH_URL.format(query=quote_plus(name))
             results = self._search_tab(
@@ -721,19 +727,8 @@ class HunterChrome:
                 "",
             )
         if not target_url:
-            results = self.google(f'site:linkedin.com/company "{name}"')
-            target_url = next(
-                (
-                    item.get("url", "")
-                    for item in results
-                    if "linkedin.com" in urlparse(item.get("url", "")).netloc.lower()
-                    and "/company/" in urlparse(item.get("url", "")).path.lower()
-                ),
-                "",
-            )
-        if not target_url:
             raise BrowserDiscoveryError(
-                f'Hunter could not find a public company profile for "{name}".'
+                f'Hunter could not find a LinkedIn company profile for "{name}".'
             )
         parsed = urlparse(target_url)
         if "linkedin.com" in parsed.netloc.lower() and "/company/" in parsed.path.lower():

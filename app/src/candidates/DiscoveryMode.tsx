@@ -300,8 +300,18 @@ export function DiscoveryMode({ data, refresh }: DiscoveryModeProps) {
         : "";
       const skipReasonSuffix = discoveryReasonSummary(result.skip_reasons);
       const screenedReasonSuffix = discoveryReasonSummary(result.screened_reasons);
+      const knownSuffix = result.known_count
+        ? `${result.known_count} already in the inbox ${result.known_count === 1 ? "was" : "were"} recognized before posting lookup. `
+        : "";
+      const needsDetailsSuffix = result.needs_details_count
+        ? ` ${result.needs_details_count} plausible posting${result.needs_details_count === 1 ? " was" : "s were"} retained in Needs details instead of being discarded.`
+        : "";
+      const laneReviewSuffix = result.lane_unmatched_count
+        ? ` ${result.lane_unmatched_count} role${result.lane_unmatched_count === 1 ? " is" : "s are"} ranked lower because the lane match needs your judgment, but ${result.lane_unmatched_count === 1 ? "it was" : "they were"} not discarded.`
+        : "";
       setOperationStatus(
         `Discovery reviewed ${result.evaluated_count} unique links with adaptive paging. `
+        + `${knownSuffix}`
         + `${result.qualified_count} qualified after validation and lane matching; `
         + `${result.screened_count} were kept out of the review queue; `
         + `${result.new_count} are new and ${result.updated_count} were refreshed. `
@@ -311,7 +321,7 @@ export function DiscoveryMode({ data, refresh }: DiscoveryModeProps) {
         + `${result.duplicate_count} duplicate${result.duplicate_count === 1 ? "" : "s"} collapsed.`
         + `${skipReasonSuffix ? ` Filtered: ${skipReasonSuffix}.` : ""}`
         + `${screenedReasonSuffix ? ` Screened: ${screenedReasonSuffix}.` : ""}`
-        + `${enrichmentSuffix}${limitSuffix}${errorSuffix}`
+        + `${needsDetailsSuffix}${laneReviewSuffix}${enrichmentSuffix}${limitSuffix}${errorSuffix}`
       );
     } catch (error) {
       setOperationStatus(`Discovery search failed. ${errorMessage(error)}`);
