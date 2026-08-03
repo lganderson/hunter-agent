@@ -820,6 +820,9 @@ def search_title_details(title, platform=""):
 
 
 def company_from_posting_url(url, platform):
+    known_company = companies.matching_company_record_from_url(url)
+    if known_company:
+        return known_company.get("name", "")
     parsed = urlparse(url)
     host = parsed.netloc.lower().removeprefix("www.")
     segments = [segment for segment in parsed.path.split("/") if segment]
@@ -1204,6 +1207,13 @@ def connect_candidate_company(candidate, seen_at=""):
             company = companies.get_company(candidate.get("company_id", ""))
         except ValueError:
             candidate["company_id"] = ""
+    if company is None:
+        source_company = companies.matching_company_record_from_url(
+            candidate.get("canonical_url") or candidate.get("url", "")
+        )
+        if source_company:
+            company = source_company
+            candidate["company"] = candidate.get("company") or company.get("name", "")
     if company is None:
         company = companies.record_discovered_company(candidate, seen_at=seen_at)
     if company is None:

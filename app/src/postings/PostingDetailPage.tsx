@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState, type FormEvent, type KeyboardEvent } from
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { ActionCommand, Priority, StatusPill, TagList } from "../components/Primitives";
 import { BriefcaseIcon, DownloadIcon, ExternalIcon, FilterIcon, PlusIcon } from "../components/Icons";
-import { archivePosting, createAction, createApplication, createResumeVersion, getPostingSnapshots, getResumeTailoringStatus, linkContact, makeNextAction, planResumeChanges, resumeDownloadUrl, saveManualPostingArchive, unlinkContact, updateAction, updateActionFields, updateApplication } from "../core/api";
+import { archivePosting, createAction, createApplication, createResumeVersion, getPostingSnapshots, getResumeTailoringStatus, linkContact, makeNextAction, planResumeChanges, resumeDownloadUrl, saveManualPostingArchive, unlinkContact, updateAction, updateActionFields, updateApplication, upsertCompany } from "../core/api";
 import { actionDueLabel, archivedPostingMarkdown, dueLabel, isActionComplete, markdownToHtml, normalizeTag, tagColorClass, tagList, titleCase } from "../core/format";
 import { routes } from "../core/routes";
 import type { Action, ActionUpdates, AppState, Application, PostingSnapshot, ResumePlan, ResumeTailoringStatus } from "../core/types";
@@ -67,9 +67,21 @@ export function PostingDetailPage({ data, refresh, applyActionUpdate, applyAppli
     const form = new FormData(event.currentTarget);
     setOperationStatus("Saving posting...");
     try {
+      let company = String(form.get("company") ?? app!.company ?? "").trim();
+      let companyId = String(form.get("company_id") ?? app!.company_id ?? "");
+      if (createNew && company && !companyId) {
+        const normalizedName = normalizeCompanyName(company);
+        const existingCompany = data.companies.find(item => (
+          normalizeCompanyName(item.name) === normalizedName
+          || item.aliases.split(",").some(alias => normalizeCompanyName(alias) === normalizedName)
+        ));
+        const managedCompany = existingCompany || (await upsertCompany("", { name: company })).company;
+        company = managedCompany.name;
+        companyId = managedCompany.id;
+      }
       const values = {
-        company: String(form.get("company") ?? app!.company ?? ""),
-        company_id: String(form.get("company_id") ?? app!.company_id ?? ""),
+        company,
+        company_id: companyId,
         role: String(form.get("role") || ""),
         location: String(form.get("location") || ""),
         work_mode: String(form.get("work_mode") || ""),
@@ -697,17 +709,50 @@ function PostingEditor({
   tagDraft: string[];
   tagInput: string;
 }) {
+  const [companyId, setCompanyId] = useState(app.company_id || "");
+  const [companyName, setCompanyName] = useState(app.company || "");
+  const companyOptions = useMemo(
+    () => [...data.companies].sort((left, right) => left.name.localeCompare(right.name)),
+    [data.companies]
+  );
+
+  useEffect(() => {
+    setCompanyId(app.company_id || "");
+    setCompanyName(app.company || "");
+  }, [app.id, app.company, app.company_id]);
+
+  function updateCompanyName(value: string) {
+    const normalizedName = normalizeCompanyName(value);
+    const match = data.companies.find(company => normalizeCompanyName(company.name) === normalizedName);
+    setCompanyName(value);
+    setCompanyId(match?.id || "");
+  }
+
   return (
     <article className="panel posting-editor-panel">
       <div className="posting-section-header"><div><h2>Posting details</h2><p>Update role, tracking, location, and application timing.</p></div></div>
       <form className="management-form" onSubmit={onSubmit} key={app.id}>
         <label className="form-field">Role <input name="role" type="text" defaultValue={app.role || ""} required /></label>
-        <label className="form-field">Company <select name="company_id" defaultValue={app.company_id || ""} required={createNew}>
-          {createNew
-            ? <option value="" disabled>Select company</option>
-            : <option value="">{app.company && !app.company_id ? `${app.company} (not managed)` : "Not managed"}</option>}
+        {createNew ? <label className="form-field">
+          Company
+          <input
+            required
+            name="company"
+            list="posting-company-options"
+            value={companyName}
+            onChange={event => updateCompanyName(event.target.value)}
+            placeholder="Select or enter a company"
+            autoComplete="off"
+          />
+          <input name="company_id" type="hidden" value={companyId} />
+          <datalist id="posting-company-options">
+            {companyOptions.map(company => <option key={company.id} value={company.name} />)}
+          </datalist>
+          <small>Select an existing company or type a new company name.</small>
+        </label> : <label className="form-field">Company <select name="company_id" defaultValue={app.company_id || ""}>
+          <option value="">{app.company && !app.company_id ? `${app.company} (not managed)` : "Not managed"}</option>
           {data.companies.map(company => <option key={company.id} value={company.id}>{company.name}</option>)}
-        </select></label>
+        </select></label>}
         <label className="form-field">Location <input name="location" type="text" defaultValue={app.location || ""} /></label>
         <label className="form-field">Work mode <input name="work_mode" type="text" defaultValue={app.work_mode || ""} placeholder="Remote, hybrid, on-site" /></label>
         <label className="form-field full">Source URL <input name="source_url" type="url" defaultValue={app.source_url || ""} /></label>
@@ -947,6 +992,10 @@ function stageOptions(data: AppState, currentStage: string) {
     return [...stages, { id: currentStage, label: titleCase(currentStage), sort_order: "999", is_terminal: "", is_active: "" }];
   }
   return stages;
+}
+
+function normalizeCompanyName(value: string) {
+  return value.trim().toLocaleLowerCase();
 }
 
 function blankApplication(data: AppState): Application {

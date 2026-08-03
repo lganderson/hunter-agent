@@ -438,6 +438,64 @@ def matching_company_record(name="", profile_url="", website=""):
     return None
 
 
+def matching_company_record_from_url(value):
+    """Resolve a known company from an employer or ATS posting hostname."""
+    host = company_domain(value)
+    if not host:
+        return None
+
+    rows = repository.read_companies()
+    for company in rows:
+        for field in ["website", "careers_url"]:
+            known_host = company_domain(company.get(field, ""))
+            if known_host and (
+                host == known_host
+                or host.endswith(f".{known_host}")
+                or known_host.endswith(f".{host}")
+            ):
+                return company
+
+    generic_labels = {
+        "apply",
+        "boards",
+        "career",
+        "careers",
+        "com",
+        "en",
+        "external",
+        "global",
+        "io",
+        "job",
+        "jobs",
+        "net",
+        "org",
+        "recruiting",
+        "talent",
+        "us",
+        "www",
+    }
+    host_labels = {
+        re.sub(r"[^a-z0-9]+", "", label.lower())
+        for label in host.split(".")
+        if label.lower() not in generic_labels
+    }
+    host_labels.discard("")
+    for company in rows:
+        names = [company.get("name", ""), *split_aliases(company.get("aliases", ""))]
+        identity_keys = {
+            compact
+            for name in names
+            for compact in [
+                re.sub(r"[^a-z0-9]+", "", normalized_key(name)),
+                company_merge_key(name),
+            ]
+            if compact
+        }
+        if identity_keys & host_labels:
+            return company
+    return None
+
+
 def company_merge_key(name):
     normalized = storage.clean(name).lower()
     normalized = re.sub(
@@ -518,6 +576,18 @@ def merge_companies(keep_company_id, merge_company_id):
         "company_metadata_checked_at",
         "company_metadata_suggestions_json",
         "company_research_status",
+        "company_discovery_source",
+        "company_discovery_source_url",
+        "company_discovery_query",
+        "company_discovery_evidence",
+        "company_location_fit",
+        "company_location",
+        "company_remote_policy",
+        "company_location_evidence",
+        "company_location_checked_at",
+        "company_fit_score",
+        "company_fit_summary",
+        "company_fit_checked_at",
         "last_checked_at",
         "last_check_status",
     ]:
@@ -590,6 +660,10 @@ def record_discovered_company(metadata, seen_at=""):
 
 def track_company(company_id):
     return upsert_company(company_id, {"tracking_status": "tracked"})
+
+
+def untrack_company(company_id):
+    return upsert_company(company_id, {"tracking_status": "discovered"})
 
 
 def set_company_research_status(company_id, status, checked_at=""):

@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import { Link, NavLink, Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { ActionsPage } from "./actions/ActionsPage";
@@ -8,12 +8,14 @@ import { CandidatesPage } from "./candidates/CandidatesPage";
 import { BriefcaseIcon, CalendarIcon, ChevronLeftIcon, ChevronRightIcon, GearIcon, HomeIcon, ListIcon, PeopleIcon, SearchIcon } from "./components/Icons";
 import { CompaniesPage, CompanyDetailPage } from "./companies/CompaniesPage";
 import { ContactsPage } from "./contacts/ContactsPage";
-import type { AppState } from "./core/types";
+import type { AppState, CompanyPostingCandidate } from "./core/types";
 import { routes } from "./core/routes";
 import { DashboardPage } from "./dashboard/DashboardPage";
 import { PostingDetailPage } from "./postings/PostingDetailPage";
 import { PostingsPage } from "./postings/PostingsPage";
 import { SettingsPage } from "./settings/SettingsPage";
+import { getCompanyDiscoveryJob, startCompanyDiscovery } from "./core/api";
+import type { CompanyDiscoveryJob } from "./core/types";
 import type { ActionUpdateResult } from "./core/useHunterData";
 
 type AppProps = {
@@ -21,6 +23,7 @@ type AppProps = {
   refresh: () => Promise<AppState>;
   applyActionUpdate: (result: ActionUpdateResult) => void;
   applyApplicationUpdate: (application: AppState["applications"][number]) => void;
+  applyCompanyCandidateUpdates: (candidates: CompanyPostingCandidate[]) => void;
 };
 
 const navItems = [
@@ -78,13 +81,15 @@ function AppNav({ collapsed = false, mobile = false }: { collapsed?: boolean; mo
   return <ul className={className}>{links.map((link, index) => <li key={navItems[index].to}>{link}</li>)}</ul>;
 }
 
-export function App({ data, refresh, applyActionUpdate, applyApplicationUpdate }: AppProps) {
+export function App({ data, refresh, applyActionUpdate, applyApplicationUpdate, applyCompanyCandidateUpdates }: AppProps) {
   const closed = data.applications.filter(app => app.is_closed).length;
   const location = useLocation();
   const [agentOpen, setAgentOpen] = useState(false);
   const [agentPanelWidth, setAgentPanelWidth] = useState(storedAgentPanelWidth);
   const [navCollapsed, setNavCollapsed] = useState(() => storedBoolean(NAV_COLLAPSED_KEY));
   const shellRef = useRef<HTMLDivElement | null>(null);
+  const [companyDiscoveryJob, setCompanyDiscoveryJob] = useState<CompanyDiscoveryJob | null>(null);
+  const lastRefreshedDiscoveryJob = useRef("");
   const agentContext = useMemo(
     () => buildAgentContext(location.pathname, location.search, data),
     [data, location.pathname, location.search]
@@ -99,6 +104,38 @@ export function App({ data, refresh, applyActionUpdate, applyApplicationUpdate }
     } catch {
       // The panel still resizes for this session when local storage is unavailable.
     }
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    async function pollDiscoveryJob() {
+      try {
+        const response = await getCompanyDiscoveryJob();
+        if (!active) return;
+        setCompanyDiscoveryJob(response.job);
+        if (
+          response.job?.status === "completed"
+          && lastRefreshedDiscoveryJob.current !== response.job.id
+        ) {
+          lastRefreshedDiscoveryJob.current = response.job.id;
+          await refresh();
+        }
+      } catch {
+        // The rest of Hunter remains usable while the local job endpoint reconnects.
+      }
+    }
+    void pollDiscoveryJob();
+    const interval = window.setInterval(() => void pollDiscoveryJob(), 1_000);
+    return () => {
+      active = false;
+      window.clearInterval(interval);
+    };
+  }, [refresh]);
+
+  const beginCompanyDiscovery = useCallback(async (payload: CompanyDiscoveryJob["request"]) => {
+    const response = await startCompanyDiscovery(payload);
+    setCompanyDiscoveryJob(response.job);
+    return response.job;
   }, []);
 
   function toggleNavigation() {
@@ -144,15 +181,17 @@ export function App({ data, refresh, applyActionUpdate, applyApplicationUpdate }
       <main className="main">
         <AppNav mobile />
 
+        <CompanyDiscoveryJobBanner job={companyDiscoveryJob} />
+
         <Routes>
           <Route path="/" element={<DashboardPage data={data} refresh={refresh} />} />
           <Route path="/postings" element={<PostingsPage data={data} />} />
           <Route path="/postings/new" element={<PostingDetailPage data={data} refresh={refresh} createNew />} />
           <Route path="/postings/:id" element={<PostingDetailPage data={data} refresh={refresh} applyActionUpdate={applyActionUpdate} applyApplicationUpdate={applyApplicationUpdate} />} />
-          <Route path="/companies" element={<CompaniesPage data={data} refresh={refresh} />} />
-          <Route path="/companies/new" element={<CompanyDetailPage data={data} refresh={refresh} createNew />} />
-          <Route path="/companies/:id" element={<CompanyDetailPage data={data} refresh={refresh} />} />
-          <Route path="/candidates" element={<CandidatesPage data={data} refresh={refresh} />} />
+          <Route path="/companies" element={<CompaniesPage data={data} refresh={refresh} discoveryJob={companyDiscoveryJob} startDiscoveryJob={beginCompanyDiscovery} />} />
+          <Route path="/companies/new" element={<CompanyDetailPage data={data} refresh={refresh} applyCompanyCandidateUpdates={applyCompanyCandidateUpdates} createNew />} />
+          <Route path="/companies/:id" element={<CompanyDetailPage data={data} refresh={refresh} applyCompanyCandidateUpdates={applyCompanyCandidateUpdates} />} />
+          <Route path="/candidates" element={<CandidatesPage data={data} refresh={refresh} applyCompanyCandidateUpdates={applyCompanyCandidateUpdates} />} />
           <Route path="/actions" element={<ActionsPage data={data} refresh={refresh} />} />
           <Route path="/contacts" element={<ContactsPage data={data} refresh={refresh} />} />
           <Route path="/settings" element={<SettingsPage refresh={refresh} />} />
@@ -169,5 +208,27 @@ export function App({ data, refresh, applyActionUpdate, applyApplicationUpdate }
         refresh={refresh}
       />
     </div>
+  );
+}
+
+function CompanyDiscoveryJobBanner({ job }: { job: CompanyDiscoveryJob | null }) {
+  const [dismissedJobId, setDismissedJobId] = useState("");
+  if (!job || (job.status === "completed" && dismissedJobId === job.id)) return null;
+  const active = job.status === "queued" || job.status === "running";
+  const maximum = Math.max(1, job.total_steps || 1);
+  const value = Math.min(maximum, Math.max(0, job.completed_steps || 0));
+  return (
+    <aside className={`global-job-status ${job.status}`} aria-live="polite" aria-label="Company discovery status">
+      <div className="global-job-status-copy">
+        <strong>{active ? "Company discovery running" : job.status === "completed" ? "Company discovery complete" : "Company discovery needs attention"}</strong>
+        <span>{job.message}</span>
+      </div>
+      <div className="global-job-status-progress">
+        <progress value={value} max={maximum} aria-label="Company discovery progress" />
+        <span>{Math.round((value / maximum) * 100)}%</span>
+      </div>
+      <Link className="button compact" to="/companies">View companies</Link>
+      {!active ? <button className="button compact secondary" type="button" onClick={() => setDismissedJobId(job.id)}>Dismiss</button> : null}
+    </aside>
   );
 }

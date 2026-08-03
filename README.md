@@ -219,6 +219,44 @@ python3 hunter.py companies ingest-candidate CP0001
 
 Companies are local SQLite records for interest tracking, careers URLs, notes,
 contacts, associated postings, and manually reviewed posting candidates.
+The Companies view also includes **Discover companies**, a company-first search
+for smaller employers that may not have a relevant opening on the major boards
+yet. Choose a focus, employee-size bands, and one or more source families:
+startup directories, venture portfolios, and public company profiles. Hunter
+uses the configured OpenAI token with the cost-sensitive `gpt-5.6-luna`
+Responses API web-search tool and allowed-domain filters instead of requiring
+the signed-in Hunter Chrome profile. Each source
+request searches the focus terms as independent lanes, keeps at most two
+results per lane, uses low search context, requests a two-call web-search
+budget, and returns at most twelve company
+profiles. Hunter filters known out-of-range employers and saves source evidence
+with a transparent fit score and summary.
+
+Company discovery also requires a location match. The form provides independent
+remote-region and metro-area eligibility rules; `United States` and
+`Minneapolis-Saint Paul metro` are initial values, not hardcoded constraints.
+The browser remembers edited values locally. Each result stores a remote,
+metro-area, or combined classification plus the supporting location and
+remote-policy evidence. Older discoveries without that evidence remain in a
+separate **Verify location** queue instead of appearing as eligible
+recommendations.
+
+Searches run as local background jobs. Starting one returns immediately and
+writes private progress state to `data/company_discovery_job.json`. A global
+status banner follows the job across Hunter routes, shows the current source or
+evidence-check step, and refreshes app data when the job finishes. Navigating
+away from Companies does not stop the server-side search; restarting the local
+server marks an unfinished job as interrupted instead of leaving it apparently
+active.
+
+Results enter a review queue as **Discovered**. Nothing is tracked
+automatically: use **Track** to add a company to watched-company workflows, or
+**Not interested** to retain its history while suppressing it from future
+company and role discovery. Unknown company sizes stay visible as **Verify** so
+the absence of evidence is not treated as a size match. Source links, search
+terms, evidence, and the last fit-check date remain available on the company
+detail page.
+
 Marking a company **Not interested** is reversible: Hunter retains its history
 but hides its existing roles from Discovery and suppresses future Discovery
 matches for that company before enrichment or storage.
@@ -350,7 +388,7 @@ python3 hunter.py serve 8010
 make frontend-dev
 ```
 
-The Vite dev server proxies `/api` to `http://127.0.0.1:8010` by default. For worktrees or parallel dev servers, use `make frontend-dev API_PORT=8011 VITE_PORT=5174`. The built React app loads private postings, actions, contacts, and note bodies from `GET /api/app-state` at runtime. The Settings page stores provider/model/token data in `data/settings.local.json`, which is ignored by git. Tokens are not embedded into frontend source or build files.
+The Vite dev server proxies `/api` to `http://127.0.0.1:8010` by default. For worktrees or parallel dev servers, use `make frontend-dev API_PORT=8011 VITE_PORT=5174`. The built React app loads private postings, actions, contacts, and note bodies from `GET /api/app-state` at runtime. The Settings page stores provider/model/token data in `data/settings.local.json`, which is ignored by git. Tokens are not embedded into frontend source or build files. New OpenAI calls append private response-usage counters to `data/agent_usage.jsonl` with a feature label. Settings aggregates requests, input/cached/output tokens, and web-search calls by feature; older unlabelled records remain visible as `Unattributed`.
 
 ## MCP Support
 

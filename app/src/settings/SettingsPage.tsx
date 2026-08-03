@@ -27,9 +27,14 @@ const emptyFitSignals: FitSignals = {
   exclusion_terms: "",
   strength_terms: ""
 };
+const emptyApiUsage = {
+  totals: { request_count: 0, input_tokens: 0, cached_input_tokens: 0, uncached_input_tokens: 0, output_tokens: 0, reasoning_tokens: 0, total_tokens: 0, tool_call_count: 0, web_search_call_count: 0 },
+  features: []
+};
 
 const settingsSections = [
   ["settings-connection", "Connection"],
+  ["settings-usage", "API usage"],
   ["settings-goals", "Goals"],
   ["settings-signals", "Signals"],
   ["settings-resume", "Resume"],
@@ -69,7 +74,7 @@ const seniorityImpactOptions: ImpactOption[] = [
 ];
 
 export function SettingsPage({ refresh }: { refresh: () => Promise<AppState> }) {
-  const [settings, setSettings] = useState<SettingsStatus>({ provider: "openai", model: "", api_base: "", search_goals: "", fit_signals: emptyFitSignals, token_configured: false, resume: emptyResume });
+  const [settings, setSettings] = useState<SettingsStatus>({ provider: "openai", model: "", api_base: "", search_goals: "", fit_signals: emptyFitSignals, token_configured: false, resume: emptyResume, api_usage: emptyApiUsage });
   const [workflow, setWorkflow] = useState<Workflow>(emptyWorkflow);
   const [token, setToken] = useState("");
   const [resumeFile, setResumeFile] = useState<File | null>(null);
@@ -205,6 +210,42 @@ export function SettingsPage({ refresh }: { refresh: () => Promise<AppState> }) 
           <div className="detail-actions">
             <button className="button primary" type="button" onClick={save}><FilterIcon size={16} /> Save Settings</button>
             <button className="button" type="button" onClick={createActions}><CalendarIcon /> Generate Actions</button>
+          </div>
+        </article>
+
+        <article className="panel settings-card" id="settings-usage">
+          <div className="panel-header">
+            <h2 className="panel-title">API usage by feature</h2>
+            <span className="panel-kicker">{settings.api_usage.totals.total_tokens.toLocaleString()} tokens</span>
+          </div>
+          <p className="settings-helper">Stored locally from Hunter API responses. Older records without feature attribution appear as Unattributed.</p>
+          <div className="table-scroll">
+            <table className="simple-table settings-usage-table">
+              <thead>
+                <tr>
+                  <th>Feature</th>
+                  <th>Requests</th>
+                  <th>Input</th>
+                  <th>Cached</th>
+                  <th>Output</th>
+                  <th>Web searches</th>
+                </tr>
+              </thead>
+              <tbody>
+                {settings.api_usage.features.length ? settings.api_usage.features.map(row => (
+                  <tr key={row.feature}>
+                    <td>{titleCase(row.feature.replaceAll("-", " "))}</td>
+                    <td>{row.request_count.toLocaleString()}</td>
+                    <td>{row.input_tokens.toLocaleString()}</td>
+                    <td>{row.cached_input_tokens.toLocaleString()}</td>
+                    <td>{row.output_tokens.toLocaleString()}</td>
+                    <td>{row.web_search_call_count.toLocaleString()}</td>
+                  </tr>
+                )) : (
+                  <tr><td colSpan={6}>No API usage has been logged yet.</td></tr>
+                )}
+              </tbody>
+            </table>
           </div>
         </article>
 

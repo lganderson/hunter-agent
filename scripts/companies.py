@@ -10,7 +10,7 @@ ROOT_FOR_IMPORTS = Path(__file__).resolve().parents[1]
 if str(ROOT_FOR_IMPORTS) not in sys.path:
     sys.path.insert(0, str(ROOT_FOR_IMPORTS))
 
-from hunter import companies, repository, sqlite_store  # noqa: E402
+from hunter import companies, company_discovery, repository, sqlite_store  # noqa: E402
 
 
 def print_json(payload):
@@ -120,6 +120,31 @@ def cmd_check(args):
             print(f"  {candidate['id']}: {candidate['title'] or candidate['url']} - {candidate['url']}")
 
 
+def cmd_research_locations(args):
+    sqlite_store.initialize()
+
+    def print_progress(event):
+        print(event.get("message", ""), flush=True)
+
+    result = company_discovery.research_tracked_company_locations(
+        remote_region=args.remote_region,
+        metro_area=args.onsite_region,
+        include_known=args.include_known,
+        progress=print_progress,
+    )
+    print(
+        "Tracked company location research: "
+        f"targets={result['target_count']}, "
+        f"verified={result['updated_count']}, "
+        f"needs verification={result['needs_verification_count']}, "
+        f"errors={result['error_count']}"
+    )
+    if result["errors"]:
+        print("Errors:")
+        for error in result["errors"]:
+            print(f"  {error}")
+
+
 def cmd_link_contact(args):
     sqlite_store.initialize()
     link = companies.link_contact(args.company_id, args.contact_id)
@@ -181,6 +206,15 @@ def build_parser():
     check_parser = subparsers.add_parser("check", help="Check a company's careers URL.")
     check_parser.add_argument("company_id")
     check_parser.set_defaults(func=cmd_check)
+
+    location_parser = subparsers.add_parser(
+        "research-locations",
+        help="Research location eligibility for tracked companies.",
+    )
+    location_parser.add_argument("--remote-region", default=company_discovery.DEFAULT_REMOTE_REGION)
+    location_parser.add_argument("--onsite-region", default=company_discovery.DEFAULT_METRO_AREA)
+    location_parser.add_argument("--include-known", action="store_true")
+    location_parser.set_defaults(func=cmd_research_locations)
 
     link_parser = subparsers.add_parser("link-contact", help="Link a contact to a company.")
     link_parser.add_argument("company_id")

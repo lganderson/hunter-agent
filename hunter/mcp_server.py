@@ -449,6 +449,11 @@ def tool_track_company(args):
     return text_result({"company": compact_company(company)})
 
 
+def tool_untrack_company(args):
+    company = company_store.untrack_company(args.get("id", ""))
+    return text_result({"company": compact_company(company)})
+
+
 def tool_resolve_company_metadata_suggestion(args):
     company = company_store.resolve_company_metadata_suggestion(
         args.get("id", ""),
@@ -957,6 +962,15 @@ TOOLS = {
             "required": ["id"],
         },
         "handler": tool_track_company,
+    },
+    "hunter_untrack_company": {
+        "description": "Move a tracked company back to Discovery while preserving its company record, linked roles, contacts, candidates, and research.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"id": {"type": "string"}},
+            "required": ["id"],
+        },
+        "handler": tool_untrack_company,
     },
     "hunter_resolve_company_metadata_suggestion": {
         "description": "Apply or dismiss one source-backed company metadata suggestion after review.",

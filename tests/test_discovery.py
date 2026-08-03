@@ -134,11 +134,15 @@ class HunterDiscoveryTest(unittest.TestCase):
             "https://www.linkedin.com/jobs/search/?keywords=technical+program+manager&location=Minnesota",
             page=1,
         )
+        browser.linkedin_companies("developer tools", page=1)
 
         self.assertIn("start=10", opened_urls[0][0])
         self.assertFalse(opened_urls[0][1])
         self.assertIn("start=25", opened_urls[1][0])
         self.assertTrue(opened_urls[1][1])
+        self.assertIn("keywords=developer+tools", opened_urls[2][0])
+        self.assertIn("page=2", opened_urls[2][0])
+        self.assertTrue(opened_urls[2][1])
 
     def test_linkedin_result_scrolls_until_cards_stabilize_at_end(self):
         browser = browser_discovery.HunterChrome(sleeper=lambda _seconds: None)
@@ -899,6 +903,46 @@ class HunterDiscoveryTest(unittest.TestCase):
                 company,
             )
         )
+
+    def test_search_infers_not_interested_company_from_employer_hostname(self):
+        search = self.save_search("Technical platforms", "technical program manager")
+        companies.upsert_company(
+            "",
+            {"name": "Walmart", "interest_status": "not-interested"},
+        )
+        posting_url = "https://careers.walmart.com/us/en/jobs/R-2496298"
+        detail_calls = []
+
+        result = discovery.run_search(
+            search["id"],
+            browser_searcher=lambda engine, value, page: (
+                [{
+                    "url": posting_url,
+                    "title": "(USA) Principal, Technical Program Manager",
+                    "snippet": "Lead large technical programs across multiple teams.",
+                }]
+                if engine == "google"
+                else []
+            ),
+            posting_fetcher=lambda url: {
+                "html": (
+                    "<html><head><title>(USA) Principal, Technical Program Manager</title></head>"
+                    "<body><h1>(USA) Principal, Technical Program Manager</h1>"
+                    "<p>What you'll do: lead complex technical programs, manage dependencies, "
+                    "coordinate engineering teams, define milestones, communicate risks, and "
+                    "deliver durable systems for a large organization. Apply now for this role.</p>"
+                    "</body></html>"
+                ),
+                "final_url": url,
+                "error": "",
+            },
+            browser_detailer=lambda url: detail_calls.append(url) or {},
+        )
+
+        self.assertEqual(result["found_count"], 0)
+        self.assertEqual(result["skip_reasons"]["not-interested-company"], 1)
+        self.assertEqual(detail_calls, [])
+        self.assertEqual(repository.read_discovery_candidates(), [])
 
     def test_search_researches_missing_company_information_and_links_company(self):
         search = self.save_search("Technical platforms", "technical program manager")
@@ -1843,6 +1887,32 @@ class HunterDiscoveryTest(unittest.TestCase):
         self.assertEqual(second_result["ignored_company_count"], 0)
         self.assertEqual(second_result["ignored_exclusion_count"], 0)
         self.assertEqual(second_result["screened_count"], 0)
+
+    def test_cleanup_links_company_from_employer_hostname_before_ignoring(self):
+        company = companies.upsert_company(
+            "",
+            {"name": "Walmart", "interest_status": "not-interested"},
+        )
+        row = {field: "" for field in schema.DISCOVERY_CANDIDATE_FIELDS}
+        row.update(
+            {
+                "id": "DC0001",
+                "title": "(USA) Principal, Technical Program Manager",
+                "url": "https://careers.walmart.com/us/en/jobs/R-2496298",
+                "canonical_url": "https://careers.walmart.com/us/en/jobs/R-2496298",
+                "status": "new",
+            }
+        )
+        repository.write_discovery_candidates([row])
+
+        result = discovery.cleanup_candidates()
+        candidate = repository.read_discovery_candidates()[0]
+
+        self.assertEqual(result["linked_count"], 1)
+        self.assertEqual(result["ignored_company_count"], 1)
+        self.assertEqual(candidate["company_id"], company["id"])
+        self.assertEqual(candidate["status"], "ignored")
+        self.assertEqual(candidate["ignore_reason"], "company")
 
     def test_company_research_queue_fills_missing_active_companies_beyond_posting_batch(self):
         candidate_rows = []

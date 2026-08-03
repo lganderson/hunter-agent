@@ -10,6 +10,8 @@ import type {
   Company,
   CompanyCareerScan,
   CompanyCareerSource,
+  CompanyDiscoveryRunResult,
+  CompanyDiscoveryJob,
   CompanyPostingCandidate,
   CompanyUpdates,
   Contact,
@@ -253,6 +255,38 @@ export function researchCompany(id: string): Promise<{
 
 export function trackCompany(id: string): Promise<{ company: Company }> {
   return postJson<{ company: Company }>("/api/companies/track", { id });
+}
+
+export function untrackCompany(id: string): Promise<{ company: Company }> {
+  return postJson<{ company: Company }>("/api/companies/untrack", { id });
+}
+
+export function runCompanyDiscovery(payload: {
+  focus: string;
+  sizes: string[];
+  sources: string[];
+  locations: string[];
+  remote_region?: string;
+  metro_area?: string;
+}): Promise<CompanyDiscoveryRunResult> {
+  return postJson<CompanyDiscoveryRunResult>("/api/companies/discover", payload);
+}
+
+export function startCompanyDiscovery(payload: {
+  focus: string;
+  sizes: string[];
+  sources: string[];
+  locations: string[];
+  remote_region: string;
+  metro_area: string;
+}): Promise<{ job: CompanyDiscoveryJob }> {
+  return postJson<{ job: CompanyDiscoveryJob }>("/api/companies/discovery-jobs", payload);
+}
+
+export async function getCompanyDiscoveryJob(): Promise<{ job: CompanyDiscoveryJob | null }> {
+  return readJson<{ job: CompanyDiscoveryJob | null }>(
+    await fetch("/api/companies/discovery-jobs/current", { cache: "no-store" })
+  );
 }
 
 export function resolveCompanyMetadataSuggestion(

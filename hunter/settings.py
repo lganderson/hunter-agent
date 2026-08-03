@@ -15,7 +15,7 @@ from io import BytesIO
 from pathlib import Path
 from xml.etree import ElementTree
 
-from . import paths
+from . import api_usage, paths
 
 
 MAX_RESUME_BYTES = 8 * 1024 * 1024
@@ -161,6 +161,7 @@ def settings_status():
         "fit_signals": read_fit_signals(settings),
         "token_configured": bool(settings.get("api_token")),
         "resume": resume_status(settings),
+        "api_usage": api_usage.usage_summary(),
     }
 
 

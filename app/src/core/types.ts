@@ -101,6 +101,18 @@ export type Company = {
   company_metadata_checked_at: string;
   company_metadata_suggestions_json: string;
   company_research_status: string;
+  company_discovery_source: string;
+  company_discovery_source_url: string;
+  company_discovery_query: string;
+  company_discovery_evidence: string;
+  company_location_fit: string;
+  company_location: string;
+  company_remote_policy: string;
+  company_location_evidence: string;
+  company_location_checked_at: string;
+  company_fit_score: string;
+  company_fit_summary: string;
+  company_fit_checked_at: string;
   discovery_role_count: number;
   recommended_discovery_role_count: number;
   ignored_role_count: number;
@@ -120,6 +132,58 @@ export type CompanyMergeSuggestion = {
   merge_company_name: string;
   reason: string;
   match_key: string;
+};
+
+export type CompanyDiscoveryRunResult = {
+  focus: string;
+  sizes: string[];
+  sources: string[];
+  locations: string[];
+  remote_region: string;
+  metro_area: string;
+  companies: Company[];
+  location_verification_companies: Company[];
+  review_count: number;
+  location_verification_count: number;
+  new_count: number;
+  updated_count: number;
+  already_tracked_count: number;
+  skipped_size_count: number;
+  skipped_not_interested_count: number;
+  research_count: number;
+  source_runs: Array<{
+    source: string;
+    label: string;
+    query: string;
+    found_count: number;
+    qualified_count: number;
+    lane_counts?: Record<string, number>;
+    location_counts?: Record<string, number>;
+  }>;
+  errors: string[];
+};
+
+export type CompanyDiscoveryJob = {
+  id: string;
+  status: "queued" | "running" | "completed" | "failed";
+  phase: string;
+  message: string;
+  completed_steps: number;
+  total_steps: number;
+  source: string;
+  started_at: string;
+  updated_at: string;
+  completed_at: string;
+  error: string;
+  request: {
+    focus: string;
+    sizes: string[];
+    sources: string[];
+    locations: string[];
+    remote_region: string;
+    metro_area: string;
+  };
+  result: CompanyDiscoveryRunResult | null;
 };
 
 export type ApplicationContact = {
@@ -387,6 +451,24 @@ export type SettingsStatus = {
   fit_signals: FitSignals;
   token_configured: boolean;
   resume: ResumeStatus;
+  api_usage: ApiUsageSummary;
+};
+
+export type ApiUsageTotals = {
+  request_count: number;
+  input_tokens: number;
+  cached_input_tokens: number;
+  uncached_input_tokens: number;
+  output_tokens: number;
+  reasoning_tokens: number;
+  total_tokens: number;
+  tool_call_count: number;
+  web_search_call_count: number;
+};
+
+export type ApiUsageSummary = {
+  totals: ApiUsageTotals;
+  features: Array<ApiUsageTotals & { feature: string }>;
 };
 
 export type FitSignals = {

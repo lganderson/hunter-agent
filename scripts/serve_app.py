@@ -22,6 +22,8 @@ from hunter import actions as action_store
 from hunter import applications as application_store
 from hunter import chat_history
 from hunter import companies as company_store
+from hunter import company_discovery as company_discovery_store
+from hunter import company_discovery_jobs
 from hunter import contacts as contact_store
 from hunter import discovery as discovery_store
 from hunter import settings as settings_store
@@ -167,6 +169,9 @@ class AppHandler(SimpleHTTPRequestHandler):
                 self.send_json({"error": str(exc)}, status=400)
                 return
             self.send_download_file(result["path"])
+            return
+        if path == "/api/companies/discovery-jobs/current":
+            self.send_json({"job": company_discovery_jobs.current_job()})
             return
         if path == "/api/settings":
             self.send_json(action_engine.settings_status())
@@ -558,6 +563,16 @@ class AppHandler(SimpleHTTPRequestHandler):
             self.send_json({"company": company})
             return
 
+        if path == "/api/companies/untrack":
+            payload = self.read_json()
+            try:
+                company = company_store.untrack_company(payload.get("id", ""))
+            except ValueError as exc:
+                self.send_json({"error": str(exc)}, status=400)
+                return
+            self.send_json({"company": company})
+            return
+
         if path == "/api/companies/metadata-suggestions/resolve":
             payload = self.read_json()
             try:
@@ -570,6 +585,36 @@ class AppHandler(SimpleHTTPRequestHandler):
                 self.send_json({"error": str(exc)}, status=400)
                 return
             self.send_json({"company": company})
+            return
+
+        if path == "/api/companies/discover":
+            payload = self.read_json()
+            try:
+                result = company_discovery_store.run_company_discovery(
+                    focus=payload.get("focus", company_discovery_store.DEFAULT_FOCUS),
+                    sizes=payload.get("sizes", []),
+                    sources=payload.get("sources", []),
+                    locations=payload.get("locations", []),
+                    remote_region=payload.get("remote_region", company_discovery_store.DEFAULT_REMOTE_REGION),
+                    metro_area=payload.get("metro_area", company_discovery_store.DEFAULT_METRO_AREA),
+                )
+            except ValueError as exc:
+                self.send_json({"error": str(exc)}, status=400)
+                return
+            except RuntimeError as exc:
+                self.send_json({"error": str(exc)}, status=502)
+                return
+            self.send_json(result)
+            return
+
+        if path == "/api/companies/discovery-jobs":
+            payload = self.read_json()
+            try:
+                job = company_discovery_jobs.start_job(payload)
+            except ValueError as exc:
+                self.send_json({"error": str(exc), "job": company_discovery_jobs.current_job()}, status=409)
+                return
+            self.send_json({"job": job}, status=202)
             return
 
         if path == "/api/companies/check":

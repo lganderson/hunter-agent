@@ -19,6 +19,7 @@ if str(ROOT_FOR_IMPORTS) not in sys.path:
     sys.path.insert(0, str(ROOT_FOR_IMPORTS))
 
 from hunter import actions as action_store
+from hunter import api_usage
 from hunter import paths as hunter_paths
 from hunter import repository
 from hunter import schema as hunter_schema
@@ -322,6 +323,8 @@ def recover_posting_with_openai(app):
     except Exception as exc:  # noqa: BLE001 - archive operation should surface provider failures.
         return None, f"OpenAI web recovery failed: {exc}"
 
+    api_usage.log_usage("posting-recovery", model, data, operation="web-search")
+
     content_text, sources = openai_response_text_and_sources(data)
     if content_text.upper() == "UNAVAILABLE" or len(content_text) < 200:
         return None, "OpenAI web recovery did not find enough posting content. Paste the posting content instead."
@@ -357,6 +360,7 @@ def call_openai(token, model, prompt, app, api_base=""):
         )
     except Exception as exc:  # noqa: BLE001 - surface provider failure as a warning.
         return [], f"OpenAI action generation failed: {exc}"
+    api_usage.log_usage("action-generation", model, data, operation="application-actions")
     text = data.get("output_text", "")
     if not text:
         chunks = []

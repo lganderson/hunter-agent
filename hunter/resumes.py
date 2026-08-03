@@ -235,7 +235,7 @@ def propose_changes(application_id, guidance=""):
         "prompt_cache_key": RESUME_PLAN_CACHE_KEY,
     }
     response = agent._request_json(f"{config['api_base']}/responses", config["token"], payload)
-    agent.log_usage(config["model"], response, 0, 0)
+    agent.log_usage(config["model"], response, 0, 0, feature="resume-tailoring", operation="edit-plan")
     refusal = _response_refusal(response)
     if refusal:
         raise ValueError(f"Resume tailoring was declined by the model: {refusal}")

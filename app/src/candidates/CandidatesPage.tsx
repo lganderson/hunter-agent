@@ -29,6 +29,7 @@ import { CandidateBulkActions, CandidateSelectionCheckbox } from "./CandidateBul
 type CandidateReviewPageProps = {
   data: AppState;
   refresh: () => Promise<AppState>;
+  applyCompanyCandidateUpdates: (candidates: CompanyPostingCandidate[]) => void;
 };
 
 type CandidateRow = {
@@ -43,7 +44,7 @@ const FIT_VALUES = ["all", "strong", "recommended", "low"];
 const MAX_BULK_INGEST = 25;
 type CandidateSortKey = "title" | "company" | "fit" | "status" | "last_seen";
 
-export function CandidatesPage({ data, refresh }: CandidateReviewPageProps) {
+export function CandidatesPage({ data, refresh, applyCompanyCandidateUpdates }: CandidateReviewPageProps) {
   const [searchParams, setSearchParams] = useSearchParams();
   const mode = searchParams.get("mode") === "discovery" ? "discovery" : "companies";
   const [search, setSearch] = useState("");
@@ -67,7 +68,10 @@ export function CandidatesPage({ data, refresh }: CandidateReviewPageProps) {
   );
   const companyOptions = useMemo(
     () => data.companies
-      .filter(company => data.company_posting_candidates.some(candidate => candidate.company_id === company.id))
+      .filter(company => (
+        company.tracking_status === "tracked"
+        && data.company_posting_candidates.some(candidate => candidate.company_id === company.id)
+      ))
       .sort((a, b) => a.name.localeCompare(b.name)),
     [data.companies, data.company_posting_candidates]
   );
@@ -99,7 +103,7 @@ export function CandidatesPage({ data, refresh }: CandidateReviewPageProps) {
         fitScore: candidateFitScore(candidate),
         latestCheckAt: company?.last_checked_at || ""
       };
-    }),
+    }).filter(row => row.company?.tracking_status === "tracked"),
     [companyById, data.company_posting_candidates]
   );
 
@@ -194,8 +198,8 @@ export function CandidatesPage({ data, refresh }: CandidateReviewPageProps) {
     setOperationPending(true);
     setOperationStatus(status === "ignored" ? "Ignoring candidate..." : "Updating candidate...");
     try {
-      await updateCompanyCandidate(candidateId, status);
-      await refresh();
+      const result = await updateCompanyCandidate(candidateId, status);
+      applyCompanyCandidateUpdates([result.candidate]);
       setOperationStatus(status === "ignored" ? "Candidate ignored." : "Candidate returned to New.");
     } catch (error) {
       setOperationStatus(`Could not update candidate. ${error instanceof Error ? error.message : String(error)}`);
@@ -261,11 +265,11 @@ export function CandidatesPage({ data, refresh }: CandidateReviewPageProps) {
             ? `Ignoring ${eligibleRows.length} selected candidates...`
             : `Returning ${eligibleRows.length} selected candidates to New...`
         );
-        await updateCompanyCandidates(
+        const result = await updateCompanyCandidates(
           eligibleRows.map(row => row.candidate.id),
           status
         );
-        await refresh();
+        applyCompanyCandidateUpdates(result.candidates);
         setOperationStatus(
           action === "ignored"
             ? `${eligibleRows.length} candidates ignored.`
@@ -579,7 +583,7 @@ function CandidateModeSwitch({
 }) {
   return (
     <div className="candidate-mode-switch" role="tablist" aria-label="Candidate source mode">
-      <button className={mode === "companies" ? "active" : ""} type="button" role="tab" aria-selected={mode === "companies"} onClick={() => chooseMode("companies")}>Companies</button>
+      <button className={mode === "companies" ? "active" : ""} type="button" role="tab" aria-selected={mode === "companies"} onClick={() => chooseMode("companies")}>Tracked Companies</button>
       <button className={mode === "discovery" ? "active" : ""} type="button" role="tab" aria-selected={mode === "discovery"} onClick={() => chooseMode("discovery")}>Discovery</button>
     </div>
   );
@@ -660,7 +664,10 @@ function matchesSelection(value: string, selected: string[], values: string[]) {
 
 function companyOptionsFromData(data: AppState) {
   return data.companies
-    .filter(company => data.company_posting_candidates.some(candidate => candidate.company_id === company.id))
+    .filter(company => (
+      company.tracking_status === "tracked"
+      && data.company_posting_candidates.some(candidate => candidate.company_id === company.id)
+    ))
     .map(company => company.id);
 }
 

@@ -86,6 +86,10 @@ class HunterCompaniesTest(unittest.TestCase):
             self.assertIn("industry", company_columns)
             self.assertIn("company_size", company_columns)
             self.assertIn("company_metadata_source", company_columns)
+            self.assertIn("company_fit_score", company_columns)
+            self.assertIn("company_discovery_source_url", company_columns)
+            self.assertIn("company_location_fit", company_columns)
+            self.assertIn("company_location_evidence", company_columns)
 
     def test_upsert_company_auto_associates_exact_posting_and_syncs_action_company(self):
         sqlite_store.initialize()
@@ -368,6 +372,29 @@ class HunterCompaniesTest(unittest.TestCase):
 
         self.assertEqual(archived["interest_status"], "archived")
         self.assertEqual(restored["interest_status"], "neutral")
+        self.assertEqual(repository.read_applications()[0]["company_id"], company["id"])
+        self.assertEqual(repository.read_company_contacts()[0]["company_id"], company["id"])
+
+    def test_untrack_company_returns_to_discovery_without_losing_associations(self):
+        sqlite_store.initialize()
+        repository.write_applications([
+            application_row({"id": "A0001", "company": "Apple", "company_id": ""}),
+        ])
+        repository.write_contacts([contact_row({"id": "C0001", "name": "Ada"})])
+        company = companies.upsert_company(
+            "",
+            {
+                "name": "Apple",
+                "careers_url": "https://jobs.apple.com",
+                "tracking_status": "tracked",
+            },
+        )
+        companies.link_contact(company["id"], "C0001")
+
+        updated = companies.untrack_company(company["id"])
+
+        self.assertEqual(updated["tracking_status"], "discovered")
+        self.assertEqual(updated["careers_url"], "https://jobs.apple.com")
         self.assertEqual(repository.read_applications()[0]["company_id"], company["id"])
         self.assertEqual(repository.read_company_contacts()[0]["company_id"], company["id"])
 
@@ -2974,6 +3001,7 @@ class HunterCompaniesTest(unittest.TestCase):
         self.assertIn("hunter_restore_company", tool_names)
         self.assertIn("hunter_research_company", tool_names)
         self.assertIn("hunter_track_company", tool_names)
+        self.assertIn("hunter_untrack_company", tool_names)
         self.assertIn("hunter_resolve_company_metadata_suggestion", tool_names)
         self.assertIn("hunter_check_company_postings", tool_names)
         self.assertIn("hunter_get_company_candidate", tool_names)

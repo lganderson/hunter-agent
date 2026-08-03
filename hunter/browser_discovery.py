@@ -698,6 +698,19 @@ class HunterChrome:
             scroll="linkedin-results",
         )
 
+    def linkedin_companies(self, query, page=0):
+        target_url = LINKEDIN_COMPANY_SEARCH_URL.format(query=quote_plus(query))
+        if page:
+            parsed = urlparse(target_url)
+            values = dict(parse_qsl(parsed.query, keep_blank_values=True))
+            values["page"] = str(max(1, int(page) + 1))
+            target_url = urlunparse(parsed._replace(query=urlencode(values)))
+        return self._search_tab(
+            target_url,
+            LINKEDIN_COMPANY_RESULTS_SCRIPT,
+            scroll=True,
+        )
+
     def details(self, url):
         items = self._search_tab(url, DETAIL_RESULTS_SCRIPT, scroll=True)
         return items[0] if items else {}
@@ -753,6 +766,8 @@ def search(engine, value, page=0, browser=None):
     chrome.find_window()
     if engine == "linkedin":
         return chrome.linkedin(value, page=page)
+    if engine == "linkedin-companies":
+        return chrome.linkedin_companies(value, page=page)
     if engine == "google":
         return chrome.google(value, page=page)
     raise ValueError(f"Unsupported Hunter Chrome search engine: {engine}")

@@ -255,6 +255,7 @@ class ResumeSettingsTest(unittest.TestCase):
         self.assertEqual(usage["uncached_input_tokens"], 304)
         self.assertEqual(usage["output_tokens"], 20)
         self.assertEqual(usage["reasoning_tokens"], 4)
+        self.assertEqual(usage["feature"], "hunter-chat")
 
     def test_mutating_tool_receipts_are_human_readable(self):
         receipt = agent._tool_receipt(

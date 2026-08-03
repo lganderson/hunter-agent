@@ -70,6 +70,10 @@ export function ExternalIcon(props: IconProps) {
   return <Icon {...props}><path d="M14 4h6v6M13 11l7-7M20 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1h5" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" /></Icon>;
 }
 
+export function GlobeIcon(props: IconProps) {
+  return <Icon {...props}><path d="M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18Zm0-18c2.3 2.5 3.5 5.5 3.5 9S14.3 18.5 12 21m0-18C9.7 5.5 8.5 8.5 8.5 12s1.2 6.5 3.5 9M3.5 9h17m-17 6h17" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" /></Icon>;
+}
+
 export function DownloadIcon(props: IconProps) {
   return <Icon {...props}><path d="M12 3v11m0 0 4-4m-4 4-4-4M4 17v3h16v-3" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" /></Icon>;
 }

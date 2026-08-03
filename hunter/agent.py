@@ -3,11 +3,10 @@
 import json
 import os
 import ssl
-from datetime import datetime
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
-from . import mcp_server, paths, settings as settings_store, storage
+from . import api_usage, mcp_server, settings as settings_store, storage
 
 
 DEFAULT_MODEL = "gpt-5.5"
@@ -16,7 +15,7 @@ PROMPT_CACHE_RETENTION_MODELS = (
     "gpt-5",
     "gpt-4.1",
 )
-USAGE_LOG_FILE = "agent_usage.jsonl"
+USAGE_LOG_FILE = api_usage.USAGE_LOG_FILE
 MUTATING_TOOLS = {
     "hunter_create_action",
     "hunter_update_action",
@@ -32,6 +31,7 @@ MUTATING_TOOLS = {
     "hunter_restore_company",
     "hunter_research_company",
     "hunter_track_company",
+    "hunter_untrack_company",
     "hunter_resolve_company_metadata_suggestion",
     "hunter_check_company_postings",
     "hunter_link_company_contact",
@@ -67,8 +67,9 @@ hunter_research_company to fill blank company fields from the signed-in browser
 and create reviewable suggestions when source-backed values conflict with
 existing data. Never claim a suggestion changed the record until
 hunter_resolve_company_metadata_suggestion applies it. Use hunter_track_company
-when the user approves promoting a discovered company. Careers-page checks are
-for tracked companies only.
+when the user approves promoting a discovered company. Use hunter_untrack_company
+to move it back to Discovery without deleting linked data. Careers-page checks
+are for tracked companies only.
 If the user asks to update Search Goals or fit settings, use Hunter settings
 tools instead of only remembering the preference in the conversation.
 Use the compact local fit profile for ordinary fit/recommendation answers. If
@@ -221,6 +222,8 @@ def _tool_receipt(name, arguments):
         return f'Researched {arguments.get("id", "the company")} and saved source-backed findings locally.'
     if name == "hunter_track_company":
         return f'Promoted {arguments.get("id", "the company")} into explicit company tracking.'
+    if name == "hunter_untrack_company":
+        return f'Moved {arguments.get("id", "the company")} back to Discovery and kept its linked data.'
     if name == "hunter_resolve_company_metadata_suggestion":
         return (
             f'{arguments.get("action", "Resolved").capitalize()} the selected company '
@@ -289,35 +292,19 @@ def _sanitize_tool_arguments(name, arguments):
 
 
 def _usage_metrics(response):
-    usage = response.get("usage") or {}
-    input_details = usage.get("input_tokens_details") or {}
-    output_details = usage.get("output_tokens_details") or {}
-    return {
-        "input_tokens": int(usage.get("input_tokens") or 0),
-        "cached_input_tokens": int(input_details.get("cached_tokens") or 0),
-        "output_tokens": int(usage.get("output_tokens") or 0),
-        "reasoning_tokens": int(output_details.get("reasoning_tokens") or 0),
-        "total_tokens": int(usage.get("total_tokens") or 0),
-    }
+    return api_usage.usage_metrics(response)
 
 
-def log_usage(model, response, tool_round, tool_call_count):
-    metrics = _usage_metrics(response)
-    if not any(metrics.values()):
-        return
-    paths.DATA_DIR.mkdir(parents=True, exist_ok=True)
-    uncached = max(0, metrics["input_tokens"] - metrics["cached_input_tokens"])
-    payload = {
-        "created_at": datetime.now().isoformat(timespec="seconds"),
-        "model": model,
-        "tool_round": tool_round,
-        "tool_call_count": tool_call_count,
-        "prompt_cache_key": PROMPT_CACHE_KEY,
-        **metrics,
-        "uncached_input_tokens": uncached,
-    }
-    with (paths.DATA_DIR / USAGE_LOG_FILE).open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(payload, sort_keys=True) + "\n")
+def log_usage(model, response, tool_round, tool_call_count, feature="hunter-chat", operation=""):
+    api_usage.log_usage(
+        feature,
+        model,
+        response,
+        operation=operation,
+        tool_round=tool_round,
+        tool_call_count=tool_call_count,
+        prompt_cache_key=PROMPT_CACHE_KEY if feature == "hunter-chat" else "",
+    )
 
 
 def chat(messages, context=None):

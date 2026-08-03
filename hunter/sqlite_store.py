@@ -486,6 +486,18 @@ def initialize():
             "company_metadata_checked_at TEXT NOT NULL DEFAULT '', "
             "company_metadata_suggestions_json TEXT NOT NULL DEFAULT '[]', "
             "company_research_status TEXT NOT NULL DEFAULT '', "
+            "company_discovery_source TEXT NOT NULL DEFAULT '', "
+            "company_discovery_source_url TEXT NOT NULL DEFAULT '', "
+            "company_discovery_query TEXT NOT NULL DEFAULT '', "
+            "company_discovery_evidence TEXT NOT NULL DEFAULT '', "
+            "company_location_fit TEXT NOT NULL DEFAULT '', "
+            "company_location TEXT NOT NULL DEFAULT '', "
+            "company_remote_policy TEXT NOT NULL DEFAULT '', "
+            "company_location_evidence TEXT NOT NULL DEFAULT '', "
+            "company_location_checked_at TEXT NOT NULL DEFAULT '', "
+            "company_fit_score TEXT NOT NULL DEFAULT '', "
+            "company_fit_summary TEXT NOT NULL DEFAULT '', "
+            "company_fit_checked_at TEXT NOT NULL DEFAULT '', "
             "notes TEXT NOT NULL DEFAULT '', "
             "last_checked_at TEXT NOT NULL DEFAULT '', "
             "last_check_status TEXT NOT NULL DEFAULT ''"
@@ -578,7 +590,7 @@ def initialize():
         ensure_text_columns(connection, "discovery_candidates", schema.DISCOVERY_CANDIDATE_FIELDS)
         migrate_discovery_candidates_schema(connection)
         connection.execute(
-            "INSERT INTO meta(key, value) VALUES('schema_version', '16') "
+            "INSERT INTO meta(key, value) VALUES('schema_version', '18') "
             "ON CONFLICT(key) DO UPDATE SET value=excluded.value"
         )
 

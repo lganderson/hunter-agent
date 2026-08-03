@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { getAppState } from "./api";
-import type { Action, AppState, Application } from "./types";
+import type { Action, AppState, Application, CompanyPostingCandidate } from "./types";
 
 export type ActionUpdateResult = {
   action: Action;
@@ -53,11 +53,25 @@ export function useHunterData() {
     });
   }, []);
 
+  const applyCompanyCandidateUpdates = useCallback((candidates: CompanyPostingCandidate[]) => {
+    const updates = new Map(candidates.map(candidate => [candidate.id, candidate]));
+    setData(current => {
+      if (!current || !updates.size) return current;
+      return {
+        ...current,
+        generated_at: new Date().toISOString(),
+        company_posting_candidates: current.company_posting_candidates.map(candidate => (
+          updates.has(candidate.id) ? { ...candidate, ...updates.get(candidate.id) } : candidate
+        ))
+      };
+    });
+  }, []);
+
   useEffect(() => {
     refresh().catch((err: unknown) => {
       setError(err instanceof Error ? err.message : String(err));
     });
   }, [refresh]);
 
-  return { data, error, refresh, applyActionUpdate, applyApplicationUpdate };
+  return { data, error, refresh, applyActionUpdate, applyApplicationUpdate, applyCompanyCandidateUpdates };
 }
