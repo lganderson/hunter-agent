@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from hunter import app_state, companies, mcp_server, paths, repository, schema, settings, sqlite_store
+from hunter import app_state, companies, discovery, mcp_server, paths, repository, schema, settings, sqlite_store
 
 
 class HunterCompaniesTest(unittest.TestCase):
@@ -3497,6 +3497,69 @@ class HunterCompaniesTest(unittest.TestCase):
         self.assertIn("hunter_get_resume_text", tool_names)
         self.assertIn("hunter_get_settings", tool_names)
         self.assertIn("hunter_update_settings", tool_names)
+
+    def test_app_state_enriches_company_candidates_with_scope_and_discovery_overlap(self):
+        sqlite_store.initialize()
+        company = companies.upsert_company(
+            "",
+            {"name": "Example", "tracking_status": "tracked", "interest_status": "interested"},
+        )
+        discovery.upsert_search(
+            "",
+            {
+                "name": "US remote",
+                "keywords": "technical program manager",
+                "lanes": [
+                    {
+                        "id": "remote-us",
+                        "label": "United States remote",
+                        "location": "United States",
+                        "work_modes": ["remote"],
+                    }
+                ],
+            },
+        )
+        matching_url = "https://jobs.example.com/jobs/technical-program-manager"
+        repository.write_company_posting_candidates([
+            {field: "" for field in schema.COMPANY_POSTING_CANDIDATE_FIELDS} | {
+                "id": "CP0001",
+                "company_id": company["id"],
+                "title": "Technical Program Manager",
+                "url": matching_url,
+                "location": "Remote; US",
+                "work_mode": "Remote",
+                "status": "new",
+            },
+            {field: "" for field in schema.COMPANY_POSTING_CANDIDATE_FIELDS} | {
+                "id": "CP0002",
+                "company_id": company["id"],
+                "title": "Technical Program Manager",
+                "url": "https://jobs.example.com/jobs/india-program-manager",
+                "location": "Remote; Bengaluru, India",
+                "work_mode": "Remote",
+                "status": "new",
+            },
+        ])
+        repository.write_discovery_candidates([
+            {field: "" for field in schema.DISCOVERY_CANDIDATE_FIELDS} | {
+                "id": "DC0001",
+                "company_id": company["id"],
+                "title": "Technical Program Manager",
+                "url": matching_url,
+                "canonical_url": matching_url,
+                "status": "ignored",
+            }
+        ])
+
+        candidates = {
+            candidate["id"]: candidate
+            for candidate in app_state.build_payload()["company_posting_candidates"]
+        }
+
+        self.assertEqual(candidates["CP0001"]["lane_match"], "United States remote · Remote")
+        self.assertEqual(candidates["CP0001"]["discovery_candidate_id"], "DC0001")
+        self.assertEqual(candidates["CP0002"]["lane_match"], "")
+        self.assertEqual(candidates["CP0002"]["discovery_candidate_id"], "")
 
     def test_company_merge_suggestion_and_reviewed_merge_relink_records(self):
         sqlite_store.initialize()

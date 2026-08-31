@@ -296,6 +296,8 @@ export type CompanyPostingCandidate = {
   fit_summary: string;
   fit_checked_at: string;
   notes: string;
+  lane_match: string;
+  discovery_candidate_id: string;
 };
 
 export type CompanyCareerScan = {

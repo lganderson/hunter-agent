@@ -79,8 +79,18 @@ export function CandidatesPage({ data, refresh, applyCompanyCandidateUpdates, ap
   );
   const companyOptionIds = companyOptions.map(company => company.id);
   const companyIds = selectionFromParam(viewParams.get("companies"), companyOptionIds, companyOptionIds);
-  const fitFilter = FIT_VALUES.includes(viewParams.get("fit") || "") ? viewParams.get("fit") || "all" : "all";
-  const latestOnly = viewParams.get("latest") === "true";
+  const requestedFitFilter = viewParams.get("fit") || "";
+  const fitFilter = FIT_VALUES.includes(requestedFitFilter)
+    ? requestedFitFilter
+    : candidateFilter === "needs-decision" ? "recommended" : "all";
+  const requestedLatestFilter = viewParams.get("latest");
+  const latestOnly = requestedLatestFilter
+    ? requestedLatestFilter === "true"
+    : candidateFilter === "needs-decision";
+  const requestedScopeFilter = viewParams.get("scope");
+  const searchScopeOnly = requestedScopeFilter
+    ? requestedScopeFilter === "matching"
+    : candidateFilter === "needs-decision";
   const sort = sortFromParams(viewParams, "sort", "direction", CANDIDATE_SORT_KEYS, { key: "fit", direction: "desc" });
 
   const allRows = useMemo<CandidateRow[]>(
@@ -92,7 +102,10 @@ export function CandidatesPage({ data, refresh, applyCompanyCandidateUpdates, ap
         fitScore: candidateFitScore(candidate),
         latestCheckAt: company?.last_checked_at || ""
       };
-    }).filter(row => row.company?.tracking_status === "tracked"),
+    }).filter(row => (
+      row.company?.tracking_status === "tracked"
+      && !row.candidate.discovery_candidate_id
+    )),
     [companyById, data.company_posting_candidates]
   );
 
@@ -104,6 +117,7 @@ export function CandidatesPage({ data, refresh, applyCompanyCandidateUpdates, ap
       if (!company && interestStatuses.length !== INTEREST_VALUES.length) return false;
       if (!matchesSelection(candidate.company_id, companyIds, companyOptions.map(item => item.id))) return false;
       if (latestOnly && !isCurrentNewCandidate(candidate, row.latestCheckAt)) return false;
+      if (searchScopeOnly && !candidate.lane_match) return false;
       if (!matchesFitFilter(fitScore, fitFilter)) return false;
       if (query) {
         const haystack = [
@@ -131,7 +145,7 @@ export function CandidatesPage({ data, refresh, applyCompanyCandidateUpdates, ap
       }
       return true;
     }),
-    [allRows, companyIds, companyOptions, fitFilter, interestStatuses, latestOnly, search]
+    [allRows, companyIds, companyOptions, fitFilter, interestStatuses, latestOnly, search, searchScopeOnly]
   );
 
   const candidateCounts = useMemo(
@@ -371,6 +385,7 @@ export function CandidatesPage({ data, refresh, applyCompanyCandidateUpdates, ap
       companies: null,
       fit: null,
       latest: null,
+      scope: null,
       sort: null,
       direction: null
     });
@@ -403,10 +418,15 @@ export function CandidatesPage({ data, refresh, applyCompanyCandidateUpdates, ap
           </label>
           <MultiFilter label="Interest" values={INTEREST_VALUES} selected={interestStatuses} onChange={values => updateViewParams({ interest: selectionParamValue(values, INTEREST_VALUES, INTEREST_VALUES) })} />
           <MultiFilter label="Company" values={companyOptionIds} selected={companyIds} onChange={values => updateViewParams({ companies: selectionParamValue(values, companyOptionIds, companyOptionIds) })} labelForValue={id => companyById.get(id)?.name || id} />
-          <label className="filter">Fit <select value={fitFilter} onChange={event => updateViewParams({ fit: event.target.value === "all" ? null : event.target.value })}>
+          <label className="filter">Fit <select value={fitFilter} onChange={event => updateViewParams({
+            fit: event.target.value === (candidateFilter === "needs-decision" ? "recommended" : "all")
+              ? null
+              : event.target.value
+          })}>
             {FIT_VALUES.map(value => <option key={value} value={value}>{fitFilterLabel(value)}</option>)}
           </select></label>
-          <label className="toggle"><input checked={latestOnly} onChange={event => updateViewParams({ latest: event.target.checked ? "true" : null })} type="checkbox" /> Latest scan</label>
+          <label className="toggle"><input checked={latestOnly} onChange={event => updateViewParams({ latest: event.target.checked ? "true" : "false" })} type="checkbox" /> Latest scan</label>
+          <label className="toggle"><input checked={searchScopeOnly} onChange={event => updateViewParams({ scope: event.target.checked ? "matching" : "all" })} type="checkbox" /> Search scope</label>
           <button className="button" type="button" onClick={clearFilters}><FilterIcon size={16} /> Clear</button>
           <button className="button primary" type="button" disabled={checkingAll} onClick={checkAllCompanies}>
             {checkingAll ? "Checking..." : "Check All Careers"}

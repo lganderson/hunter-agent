@@ -147,9 +147,50 @@ def enrich_companies(company_rows, discovery_candidates, company_candidates=None
     return enriched
 
 
+def enrich_company_candidates(candidate_rows, discovery_candidates, searches):
+    discovery_by_identity = {}
+    for candidate in discovery_candidates:
+        if candidate.get("status") not in {"new", "pursued", "ignored", "duplicate"}:
+            continue
+        urls = [
+            candidate.get("canonical_url", ""),
+            candidate.get("url", ""),
+            *(candidate.get("source_urls", []) or []),
+        ]
+        for url in urls:
+            for identity in company_store.posting_identity_keys(url):
+                discovery_by_identity.setdefault(identity, candidate.get("id", ""))
+
+    enriched = []
+    for candidate in candidate_rows:
+        payload = dict(candidate)
+        payload["lane_match"] = discovery_store.candidate_lane_match(
+            {
+                **candidate,
+                "description_text": candidate.get("description_excerpt", ""),
+            },
+            searches,
+        )
+        payload["discovery_candidate_id"] = next(
+            (
+                discovery_by_identity[identity]
+                for identity in company_store.posting_identity_keys(candidate.get("url", ""))
+                if discovery_by_identity.get(identity)
+            ),
+            "",
+        )
+        enriched.append(payload)
+    return enriched
+
+
 def build_payload():
     discovery_candidates = discovery_store.list_candidates()
-    company_candidates = repository.read_company_posting_candidates()
+    discovery_searches = discovery_store.list_searches()
+    company_candidates = enrich_company_candidates(
+        repository.read_company_posting_candidates(),
+        discovery_candidates,
+        discovery_searches,
+    )
     companies = enrich_companies(
         repository.read_companies(),
         discovery_candidates,
@@ -169,7 +210,7 @@ def build_payload():
         "company_career_sources": repository.read_company_career_sources(),
         "company_posting_candidates": company_candidates,
         "company_career_scans": repository.read_company_career_scans(limit=200),
-        "discovery_searches": discovery_store.list_searches(),
+        "discovery_searches": discovery_searches,
         "discovery_candidates": discovery_candidates,
         "discovery_preference_suggestions": discovery_store.preference_suggestions(discovery_candidates),
         "dismissed_suggestion_ids": sorted(suggestions.dismissed_ids()),

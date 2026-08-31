@@ -1959,6 +1959,104 @@ class HunterDiscoveryTest(unittest.TestCase):
         self.assertFalse(admitted)
         self.assertIn("outside the configured location lanes", reason)
 
+    def test_us_remote_lane_rejects_foreign_remote_role(self):
+        lane = {
+            "id": "remote-us",
+            "label": "United States remote",
+            "location": "United States",
+            "work_modes": ["remote"],
+        }
+
+        self.assertFalse(
+            discovery.candidate_matches_lane(
+                {
+                    "location": "Remote; Bengaluru, India; India",
+                    "work_mode": "Remote",
+                    "description_text": "This role is remote within India.",
+                },
+                {},
+                lane,
+            )
+        )
+
+    def test_us_remote_lane_ignores_pronoun_us_in_foreign_role_description(self):
+        lane = {
+            "id": "remote-us",
+            "label": "United States remote",
+            "location": "United States",
+            "work_modes": ["remote"],
+        }
+
+        self.assertFalse(
+            discovery.candidate_matches_lane(
+                {
+                    "location": "Remote; Newcastle, New South Wales, AU; AU",
+                    "work_mode": "Remote",
+                    "description_text": (
+                        "We are an Australian company with a presence across North America, "
+                        "and we are looking for someone to help us improve product operations."
+                    ),
+                },
+                {},
+                lane,
+            )
+        )
+
+    def test_us_remote_lane_accepts_explicit_us_remote_role(self):
+        lane = {
+            "id": "remote-us",
+            "label": "United States remote",
+            "location": "United States",
+            "work_modes": ["remote"],
+        }
+
+        self.assertTrue(
+            discovery.candidate_matches_lane(
+                {
+                    "location": "Remote; US",
+                    "work_mode": "Remote",
+                    "description_text": "This role is remote within the United States.",
+                },
+                {},
+                lane,
+            )
+        )
+
+    def test_lane_matching_prefers_explicit_hybrid_policy_over_remote_flag(self):
+        lane = {
+            "id": "remote-us",
+            "label": "United States remote",
+            "location": "United States",
+            "work_modes": ["remote"],
+        }
+
+        self.assertFalse(
+            discovery.candidate_matches_lane(
+                {
+                    "location": "Livermore, CA, US",
+                    "work_mode": "Remote",
+                    "description_text": (
+                        "Our hybrid roles combine on-site collaboration with flexibility. "
+                        "You will work 3+ days per week on-site and remotely for the balance."
+                    ),
+                },
+                {},
+                lane,
+            )
+        )
+
+    def test_optional_telecommuting_does_not_override_fixed_office_location(self):
+        self.assertEqual(
+            discovery.work_mode_from_text(
+                "Newark, New Jersey, USA",
+                (
+                    "Position is fixed location based in the Newark office; however, "
+                    "telecommuting from a home office may also be allowed."
+                ),
+            ),
+            "On-site",
+        )
+
     def test_reclassify_memberships_preserves_decisions_and_unassigns_bad_active_rows(self):
         tpm = discovery.upsert_search(
             "",

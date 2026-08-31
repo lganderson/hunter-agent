@@ -1195,10 +1195,12 @@ def normalized_location_text(value):
 def location_match_terms(location):
     normalized = normalized_location_text(location)
     terms = [normalized] if normalized else []
+    if normalized in {"united states", "us", "usa", "u s"}:
+        terms.extend(["united states", "us", "usa", "u s"])
     abbreviation = US_STATE_ABBREVIATIONS.get(normalized, "")
     if abbreviation:
         terms.append(abbreviation.lower())
-    return terms
+    return list(dict.fromkeys(terms))
 
 
 def contains_location_term(text, terms):
@@ -1222,7 +1224,12 @@ def result_has_location_signal(result, desired_location):
         "residents of",
         "salary range",
     }
-    for term in location_match_terms(desired_location):
+    terms = location_match_terms(desired_location)
+    if normalized_location_text(desired_location) in {"united states", "us", "usa", "u s"}:
+        # A standalone "us" in prose is far more likely to be the pronoun than
+        # a location. Structured location fields still accept it as an alias.
+        terms = [term for term in terms if term != "us"]
+    for term in terms:
         for match in re.finditer(rf"(^|\s){re.escape(term)}(\s|$)", text):
             start = max(0, match.start() - 100)
             end = min(len(text), match.end() + 100)
@@ -1244,6 +1251,12 @@ def candidate_matches_lane(
     expected_modes = set(lane.get("work_modes", []))
     actual_mode = storage.clean(candidate.get("work_mode", "")).lower()
     actual_mode = "on-site" if actual_mode in {"onsite", "on site"} else actual_mode
+    inferred_mode = work_mode_from_text(
+        candidate.get("location", ""),
+        candidate.get("description_text", "") or candidate.get("description_excerpt", ""),
+    ).lower()
+    if inferred_mode and inferred_mode != actual_mode:
+        actual_mode = inferred_mode
     if actual_mode and actual_mode not in expected_modes:
         return False
 
@@ -1269,9 +1282,16 @@ def candidate_matches_lane(
         if actual_mode != "remote":
             return False
         return (
-            country_wide
-            or contains_location_term(candidate_location, location_match_terms(desired_location))
+            contains_location_term(candidate_location, location_match_terms(desired_location))
             or result_has_location_signal(result, desired_location)
+            or result_has_location_signal(
+                {
+                    "title": candidate.get("location", ""),
+                    "snippet": candidate.get("description_text", "")
+                    or candidate.get("description_excerpt", ""),
+                },
+                desired_location,
+            )
         )
     if candidate_location and actual_mode != "remote":
         return country_wide or contains_location_term(candidate_location, location_match_terms(desired_location))
@@ -3877,18 +3897,24 @@ def work_mode_from_text(location, description):
     if re.search(
         r"\b(?:this|the)?\s*(?:role|position|job|work arrangement|work location)\s+"
         r"(?:is|will be|can be|may be|offers?)\s+(?:fully\s+)?hybrid\b"
-        r"|\bhybrid\s+(?:role|position|job|schedule|work arrangement)\b",
+        r"|\bhybrid\s+(?:roles?|positions?|jobs?|schedule|work|working model|work arrangement)\b"
+        r"|\b(?:in|at)\s+(?:the\s+)?(?:local\s+)?office\s+(?:at least\s+)?\d+\+?\s+days?\s+per\s+week\b",
         description_text,
     ):
         return "Hybrid"
+    if re.search(
+        r"\bfixed location based in\b"
+        r"|\b(?:this|the)?\s*(?:role|position|job)\s+is\s+(?:office|location)[ -]based\b",
+        description_text,
+    ):
+        return "On-site"
     if re.search(
         r"\b(?:this|the)?\s*(?:role|position|job|work arrangement|work location)\s+"
         r"(?:is|will be|can be|may be|offers?)\s+(?:fully\s+)?remote\b"
         r"|\bremote\s+(?:role|position|job|work arrangement)\b"
         r"|\bremote\s+(?:in|within|across)\s+(?:the\s+)?(?:united states|u\.?s\.?|usa)\b"
         r"|\b(?:united states|u\.?s\.?|usa)\s*[·|,;-]\s*remote\b"
-        r"|\bwork(?:ing)?\s+(?:fully\s+)?remotely\b"
-        r"|\btelecommut(?:e|ing)\b",
+        r"|\bwork(?:ing)?\s+(?:fully\s+)?remotely\b",
         description_text,
     ):
         return "Remote"
@@ -4007,6 +4033,7 @@ def extracted_candidate(url, fetcher=None):
         if storage.clean(str(job.get("jobLocationType", ""))).upper() == "TELECOMMUTE"
         else ""
     )
+    inferred_work_mode = work_mode_from_text(location, description)
 
     return {
         "company": company,
@@ -4014,7 +4041,7 @@ def extracted_candidate(url, fetcher=None):
         "url": companies.normalize_url(url),
         "canonical_url": canonical_url,
         "location": location,
-        "work_mode": structured_work_mode or work_mode_from_text(location, description),
+        "work_mode": inferred_work_mode or structured_work_mode,
         **company_metadata,
         "company_metadata_source": final_url if any(company_metadata.values()) else "",
         "source_platform": platform,

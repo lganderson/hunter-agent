@@ -164,7 +164,8 @@ export function DiscoveryMode({ data, refresh, applyDiscoveryCandidateUpdate, en
   );
   const selectedCandidates = useMemo(
     () => data.discovery_candidates.filter(
-      candidate => !candidate.company_id || !discoveryExcludedCompanyIds.has(candidate.company_id)
+      candidate => (!candidate.company_id || !discoveryExcludedCompanyIds.has(candidate.company_id))
+        && (candidate.status !== "new" || Boolean(candidate.lane_match))
     ),
     [data.discovery_candidates, discoveryExcludedCompanyIds]
   );
@@ -226,9 +227,7 @@ export function DiscoveryMode({ data, refresh, applyDiscoveryCandidateUpdate, en
     [selectedCandidateIds, visibleCandidates]
   );
   const bulkIngestCandidates = bulkSelectedCandidates.filter(
-    candidate => candidate.status === "new"
-      && candidate.detail_state === "ready"
-      && candidate.freshness_status !== "closed"
+    candidate => candidate.recommendation_eligible
       && Boolean(candidate.company_id && candidate.title)
   );
   const bulkIgnoreCandidates = bulkSelectedCandidates.filter(candidate => candidate.status === "new");
@@ -259,7 +258,7 @@ export function DiscoveryMode({ data, refresh, applyDiscoveryCandidateUpdate, en
   const decisionHistoryCount = DISCOVERY_FILTERS.reduce((total, filter) => total + counts[filter.id], 0);
   const reviewQueue = useMemo(
     () => [...selectedCandidates
-      .filter(candidate => candidate.status === "new" && candidate.detail_state === "ready" && candidate.freshness_status !== "closed")]
+      .filter(candidate => candidate.recommendation_eligible)]
       .sort((left, right) => (
         compareNumber(left.fit_score, right.fit_score, "desc")
         || compareText(left.title, right.title, "asc")
@@ -1029,10 +1028,10 @@ export function DiscoveryMode({ data, refresh, applyDiscoveryCandidateUpdate, en
           <button
             className="button primary discovery-review-next"
             type="button"
-            title={`Review the top ${reviewBatch.length} of ${reviewQueue.length} roles, ordered by match`}
+            title={`Review the top ${reviewBatch.length} of ${reviewQueue.length} verified roles, ordered by match`}
             onClick={() => setReviewCandidateId(reviewBatch[0].id)}
           >
-            Review <span>{reviewBatch.length} of {reviewQueue.length} ready</span>
+            Review <span>{reviewBatch.length} of {reviewQueue.length} verified</span>
           </button>
         ) : null}
         <button className="button" type="button" onClick={() => updateViewParams({ discovery_q: null, discovery_status: null, discovery_companies: null, discovery_industries: null, discovery_sizes: null, discovery_sources: null, discovery_sort: null, discovery_direction: null })}><FilterIcon size={15} /> Clear</button>
