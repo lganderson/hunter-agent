@@ -46,6 +46,10 @@ export function XIcon(props: IconProps) {
   return <Icon {...props}><path d="M18 6 6 18M6 6l12 12" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" /></Icon>;
 }
 
+export function CheckIcon(props: IconProps) {
+  return <Icon {...props}><path d="m5 12.5 4.25 4.25L19 7" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" /></Icon>;
+}
+
 export function ChevronLeftIcon(props: IconProps) {
   return <Icon {...props}><path d="m15 18-6-6 6-6" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" /></Icon>;
 }

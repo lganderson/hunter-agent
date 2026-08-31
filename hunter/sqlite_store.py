@@ -23,11 +23,12 @@ LEGACY_CLOSED_STATUSES = {"rejected", "withdrawn", "archived", "offer_declined",
 LEGACY_STAGE_MAP = {
     "closed-posting": "closed",
     "research": schema.DEFAULT_STAGE,
+    **schema.WORKFLOW_STAGE_ALIASES,
 }
 LEGACY_STATUS_STAGE_MAP = {
-    "applied": "application-submitted",
-    "interviewing": "recruiter-screen",
-    "offer": "offer-review",
+    "applied": "applied",
+    "interviewing": "interviewing",
+    "offer": "offer",
     "prospect": schema.DEFAULT_STAGE,
     "saved": schema.DEFAULT_STAGE,
 }
@@ -215,6 +216,7 @@ def discovery_candidates_table_sql(table="discovery_candidates", if_not_exists=T
         f"CREATE TABLE {qualifier}{table} ("
         "id TEXT PRIMARY KEY, "
         "search_id TEXT NOT NULL DEFAULT '', "
+        "search_ids_json TEXT NOT NULL DEFAULT '', "
         "company_id TEXT NOT NULL DEFAULT '', "
         "title TEXT NOT NULL DEFAULT '', "
         "url TEXT NOT NULL DEFAULT '', "
@@ -226,6 +228,9 @@ def discovery_candidates_table_sql(table="discovery_candidates", if_not_exists=T
         "last_seen_at TEXT NOT NULL DEFAULT '', "
         "status TEXT NOT NULL DEFAULT 'new', "
         "processing_status TEXT NOT NULL DEFAULT 'needs-details', "
+        "detail_attempt_count TEXT NOT NULL DEFAULT '', "
+        "detail_last_attempt_at TEXT NOT NULL DEFAULT '', "
+        "detail_last_error TEXT NOT NULL DEFAULT '', "
         "fit_score TEXT NOT NULL DEFAULT '', "
         "fit_summary TEXT NOT NULL DEFAULT '', "
         "fit_checked_at TEXT NOT NULL DEFAULT '', "
@@ -375,6 +380,56 @@ def seed_workflow_defaults(connection):
         )
 
 
+def migrate_simplified_workflow(connection):
+    for table in ("company_posting_candidates", "discovery_candidates"):
+        connection.execute(
+            f"UPDATE {table} SET status = 'pursued' WHERE lower(trim(status)) = 'ingested'"
+        )
+    migrated = connection.execute(
+        "SELECT value FROM meta WHERE key = 'simplified_workflow_v1'"
+    ).fetchone()
+    if not migrated:
+        for old_stage, new_stage in schema.WORKFLOW_STAGE_ALIASES.items():
+            connection.execute(
+                "UPDATE applications SET stage = ? WHERE lower(trim(stage)) = ?",
+                (new_stage, old_stage),
+            )
+        for row in schema.DEFAULT_WORKFLOW_ACTION_TYPES:
+            connection.execute(
+                "UPDATE workflow_action_types SET label = ?, description = ?, default_priority = ?, "
+                "default_due_days = ?, allowed_stages = ?, sort_order = ? WHERE id = ?",
+                (
+                    row["label"], row["description"], row["default_priority"],
+                    row["default_due_days"], row["allowed_stages"], row["sort_order"], row["id"],
+                ),
+            )
+        connection.execute(
+            "INSERT INTO meta(key, value) VALUES('simplified_workflow_v1', ?)",
+            (datetime.now().astimezone().isoformat(timespec="seconds"),),
+        )
+
+    stage_metadata_migrated = connection.execute(
+        "SELECT value FROM meta WHERE key = 'simplified_workflow_stage_metadata_v1'"
+    ).fetchone()
+    if stage_metadata_migrated:
+        return
+    active_stage_ids = [row["id"] for row in schema.DEFAULT_WORKFLOW_STAGES]
+    placeholders = ", ".join("?" for _ in active_stage_ids)
+    connection.execute(
+        f"UPDATE workflow_stages SET is_active = '' WHERE id NOT IN ({placeholders})",
+        active_stage_ids,
+    )
+    for row in schema.DEFAULT_WORKFLOW_STAGES:
+        connection.execute(
+            "UPDATE workflow_stages SET label = ?, sort_order = ?, is_terminal = ?, is_active = '1' WHERE id = ?",
+            (row["label"], row["sort_order"], row["is_terminal"], row["id"]),
+        )
+    connection.execute(
+        "INSERT INTO meta(key, value) VALUES('simplified_workflow_stage_metadata_v1', ?)",
+        (datetime.now().astimezone().isoformat(timespec="seconds"),),
+    )
+
+
 def initialize():
     for directory in paths.WORKSPACE_DIRS:
         (paths.ROOT / directory).mkdir(parents=True, exist_ok=True)
@@ -498,6 +553,10 @@ def initialize():
             "company_fit_score TEXT NOT NULL DEFAULT '', "
             "company_fit_summary TEXT NOT NULL DEFAULT '', "
             "company_fit_checked_at TEXT NOT NULL DEFAULT '', "
+            "company_evaluation_status TEXT NOT NULL DEFAULT '', "
+            "company_evaluation_version TEXT NOT NULL DEFAULT '', "
+            "company_evaluation_checked_at TEXT NOT NULL DEFAULT '', "
+            "company_evaluation_error TEXT NOT NULL DEFAULT '', "
             "notes TEXT NOT NULL DEFAULT '', "
             "last_checked_at TEXT NOT NULL DEFAULT '', "
             "last_check_status TEXT NOT NULL DEFAULT ''"
@@ -576,6 +635,7 @@ def initialize():
             "location TEXT NOT NULL DEFAULT '', "
             "remote_location TEXT NOT NULL DEFAULT '', "
             "lanes_json TEXT NOT NULL DEFAULT '', "
+            "role_family_ids_json TEXT NOT NULL DEFAULT '', "
             "excluded_terms_json TEXT NOT NULL DEFAULT '', "
             "created_at TEXT NOT NULL DEFAULT '', "
             "updated_at TEXT NOT NULL DEFAULT '', "
@@ -589,8 +649,9 @@ def initialize():
         connection.execute(discovery_candidates_table_sql())
         ensure_text_columns(connection, "discovery_candidates", schema.DISCOVERY_CANDIDATE_FIELDS)
         migrate_discovery_candidates_schema(connection)
+        migrate_simplified_workflow(connection)
         connection.execute(
-            "INSERT INTO meta(key, value) VALUES('schema_version', '18') "
+            "INSERT INTO meta(key, value) VALUES('schema_version', '20') "
             "ON CONFLICT(key) DO UPDATE SET value=excluded.value"
         )
 
@@ -733,6 +794,41 @@ def read_applications():
 
 def write_applications(rows):
     write_table("applications", rows)
+
+
+def delete_unmodified_discovery_application(application_id):
+    initialize()
+    wanted = storage.clean(application_id).upper()
+    with connect() as connection:
+        application = connection.execute(
+            "SELECT id, stage, source, posting_file FROM applications WHERE upper(id) = ?",
+            (wanted,),
+        ).fetchone()
+        if not application:
+            return False
+        if storage.clean(application["stage"]) != schema.DEFAULT_STAGE:
+            raise ValueError("This posting has moved beyond Considering and can no longer be undone here.")
+        if not storage.clean(application["source"]).lower().startswith("discovery"):
+            raise ValueError("Only postings created by Discovery can be undone here.")
+        if storage.clean(application["posting_file"]):
+            raise ValueError("This posting now has a saved posting file and can no longer be undone here.")
+        related_checks = (
+            ("actions", "application_id"),
+            ("interviews", "application_id"),
+            ("application_contacts", "application_id"),
+            ("resume_versions", "application_id"),
+        )
+        for table, field in related_checks:
+            related = connection.execute(
+                f"SELECT 1 FROM {table} WHERE upper({field}) = ? LIMIT 1",
+                (wanted,),
+            ).fetchone()
+            if related:
+                raise ValueError("This posting has related activity and can no longer be undone here.")
+        connection.execute("DELETE FROM posting_snapshots WHERE upper(application_id) = ?", (wanted,))
+        connection.execute("DELETE FROM posting_notes WHERE upper(application_id) = ?", (wanted,))
+        cursor = connection.execute("DELETE FROM applications WHERE upper(id) = ?", (wanted,))
+        return cursor.rowcount > 0
 
 
 def read_actions():

@@ -3,7 +3,7 @@
 import json
 import os
 import ssl
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from . import api_usage, mcp_server, settings as settings_store, storage
@@ -57,8 +57,8 @@ request is clear. When updating a posting, include only the fields the user
 intended to change. Do not send empty strings for unchanged fields. If the user
 asks to associate a posting with a company, update that posting's company field
 directly. If the user says they submitted or applied to a posting, set stage to
-application-submitted and date_applied to today unless they provide a specific
-date. Closed postings use stage=closed plus an outcome such as rejected,
+applied and date_applied to today unless they provide a specific date. Closed
+postings use stage=closed plus an outcome such as rejected,
 withdrawn, accepted, declined, archived, or closed-posting.
 Companies are local records with two distinct tracking states. Discovery
 companies were encountered while finding roles; tracked companies were
@@ -115,6 +115,9 @@ def _request_json(url, token, payload):
     except HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")
         raise RuntimeError(f"OpenAI request failed with HTTP {exc.code}: {body}") from exc
+    except (TimeoutError, URLError, OSError) as exc:
+        reason = getattr(exc, "reason", None) or str(exc) or exc.__class__.__name__
+        raise RuntimeError(f"OpenAI request could not be completed: {reason}") from exc
 
 
 def _certifi_ca_file():
@@ -211,11 +214,11 @@ def _tool_receipt(name, arguments):
     if name == "hunter_update_application":
         return f'Updated {arguments.get("id", "the posting")} in your local tracker.'
     if name == "hunter_ingest_posting":
-        return "Ingested the posting into your local tracker."
+        return "Added the posting to your local tracker."
     if name == "hunter_update_company_candidate":
         return f'Updated {arguments.get("id", "the candidate")} to {arguments.get("status", "the requested status")}.'
     if name == "hunter_ingest_company_candidate":
-        return f'Ingested {arguments.get("id", "the candidate")} as a tracked posting.'
+        return f'Pursued {arguments.get("id", "the candidate")} as a tracked posting.'
     if name == "hunter_check_company_postings":
         return f'Checked the careers page for {arguments.get("id", "the company")}.'
     if name == "hunter_research_company":

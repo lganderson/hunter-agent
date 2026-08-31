@@ -113,10 +113,14 @@ export type Company = {
   company_fit_score: string;
   company_fit_summary: string;
   company_fit_checked_at: string;
+  company_evaluation_status: string;
+  company_evaluation_version: string;
+  company_evaluation_checked_at: string;
+  company_evaluation_error: string;
   discovery_role_count: number;
   recommended_discovery_role_count: number;
   ignored_role_count: number;
-  ingested_role_count: number;
+  pursued_role_count: number;
   tracking_recommendation: string;
   decision_recommendation: string;
   notes: string;
@@ -165,6 +169,7 @@ export type CompanyDiscoveryRunResult = {
 
 export type CompanyDiscoveryJob = {
   id: string;
+  job_type?: "company-discovery" | "company-evaluation";
   status: "queued" | "running" | "completed" | "failed";
   phase: string;
   message: string;
@@ -176,14 +181,72 @@ export type CompanyDiscoveryJob = {
   completed_at: string;
   error: string;
   request: {
-    focus: string;
-    sizes: string[];
-    sources: string[];
-    locations: string[];
-    remote_region: string;
-    metro_area: string;
+    focus?: string;
+    sizes?: string[];
+    sources?: string[];
+    locations?: string[];
+    remote_region?: string;
+    metro_area?: string;
+    company_ids?: string[];
+    tracking_status?: string;
+    force?: boolean;
+    reason?: string;
+    profile?: CompanyEvaluationProfile;
   };
-  result: CompanyDiscoveryRunResult | null;
+  result: CompanyDiscoveryRunResult | CompanyEvaluationRunResult | null;
+};
+
+export type CandidateEnrichmentResult = {
+  target_count: number;
+  processed_count: number;
+  changed_count: number;
+  ready_count: number;
+  needs_input_count: number;
+  remaining_count: number;
+  state_counts: Record<DiscoveryDetailState, number>;
+  errors: string[];
+};
+
+export type CandidateEnrichmentJob = {
+  id: string;
+  job_type: "candidate-enrichment" | "candidate-discovery";
+  status: "queued" | "running" | "completed" | "failed";
+  phase: string;
+  message: string;
+  completed_steps: number;
+  total_steps: number;
+  source: string;
+  started_at: string;
+  updated_at: string;
+  completed_at: string;
+  error: string;
+  request: {
+    search_id?: string;
+    limit?: number;
+    use_browser_fallback?: boolean;
+    enrichment_limit?: number;
+  };
+  result: CandidateEnrichmentResult | DiscoveryRunResult | null;
+};
+
+export type CompanyEvaluationProfile = {
+  focus: string;
+  sizes: string[];
+  locations: string[];
+  remote_region: string;
+  metro_area: string;
+};
+
+export type CompanyEvaluationRunResult = {
+  target_count: number;
+  evaluated_count: number;
+  ready_count: number;
+  needs_verification_count: number;
+  failed_count: number;
+  company_ids: string[];
+  evaluation_version: string;
+  profile: CompanyEvaluationProfile;
+  errors: string[];
 };
 
 export type ApplicationContact = {
@@ -256,6 +319,7 @@ export type DiscoverySearch = {
   id: string;
   name: string;
   keywords: string;
+  role_family_ids: string[];
   lanes: DiscoverySearchLaneDefinition[];
   excluded_terms: string[];
   created_at: string;
@@ -278,6 +342,7 @@ export type DiscoveryPreferenceSuggestion = {
 export type DiscoveryLastRunSummary = {
   evaluated_count?: number;
   known_count?: number;
+  associated_count?: number;
   qualified_count?: number;
   screened_count?: number;
   skip_reasons?: Record<string, number>;
@@ -293,6 +358,7 @@ export type DiscoveryLastRunSummary = {
   enriched_count?: number;
   company_researched_count?: number;
   company_suggestion_count?: number;
+  role_family_counts?: Record<string, number>;
   sources?: DiscoverySourceRun[];
   errors?: string[];
   enrichment?: DiscoveryEnrichmentResult;
@@ -301,6 +367,8 @@ export type DiscoveryLastRunSummary = {
 export type DiscoveryCandidate = {
   id: string;
   search_id: string;
+  search_ids: string[];
+  search_ids_json: string;
   company_id: string;
   company?: string;
   title: string;
@@ -313,6 +381,12 @@ export type DiscoveryCandidate = {
   last_seen_at: string;
   status: string;
   processing_status: string;
+  detail_attempt_count: string;
+  detail_last_attempt_at: string;
+  detail_last_error: string;
+  detail_state: DiscoveryDetailState;
+  detail_gaps: DiscoveryDetailGap[];
+  detail_next_action: string;
   fit_score: string;
   fit_summary: string;
   fit_checked_at: string;
@@ -333,8 +407,19 @@ export type DiscoveryCandidate = {
   is_direct_employer_source: boolean;
   recommendation_eligible: boolean;
   lane_match: string;
+  role_family_id: string;
+  role_family: string;
+  responsibility_signals: string[];
   ingested_application_id: string;
   notes: string;
+};
+
+export type DiscoveryDetailState = "ready" | "pending-enrichment" | "source-verification" | "needs-input";
+
+export type DiscoveryDetailGap = {
+  id: "missing-identity" | "missing-description" | "missing-location" | "source-verification";
+  label: string;
+  automatic: boolean;
 };
 
 export type DiscoverySearchLaneDefinition = {
@@ -366,6 +451,7 @@ export type DiscoveryRunResult = {
   captured: DiscoveryCandidate[];
   evaluated_count: number;
   known_count: number;
+  associated_count: number;
   qualified_count: number;
   screened_count: number;
   skip_reasons: Record<string, number>;
@@ -381,6 +467,7 @@ export type DiscoveryRunResult = {
   enriched_count: number;
   company_researched_count: number;
   company_suggestion_count: number;
+  role_family_counts: Record<string, number>;
   sources: DiscoverySourceRun[];
   errors: string[];
   enrichment?: DiscoveryEnrichmentResult;
@@ -450,6 +537,7 @@ export type SettingsStatus = {
   search_goals: string;
   fit_signals: FitSignals;
   token_configured: boolean;
+  adzuna_configured: boolean;
   resume: ResumeStatus;
   api_usage: ApiUsageSummary;
 };
@@ -568,7 +656,7 @@ export type ContactUpdates = Partial<Omit<Contact, "id">>;
 
 export type CompanyUpdates = Partial<Omit<Company, "id" | "last_checked_at" | "last_check_status">>;
 
-export type DiscoverySearchUpdates = Pick<DiscoverySearch, "name" | "keywords" | "lanes" | "excluded_terms">;
+export type DiscoverySearchUpdates = Pick<DiscoverySearch, "name" | "keywords" | "role_family_ids" | "lanes" | "excluded_terms">;
 
 export type DiscoveryCandidateDetails = Partial<
   Pick<

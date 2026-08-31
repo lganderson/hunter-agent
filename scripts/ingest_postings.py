@@ -28,7 +28,7 @@ except ImportError:  # pragma: no cover - only used on minimal Python installs.
 ROOT = Path(__file__).resolve().parents[1]
 
 DEFAULT_NEXT_ACTION = "Review fit and tailor resume"
-DEFAULT_STAGE = "posting-review"
+DEFAULT_STAGE = "considering"
 DEFAULT_OUTCOME = ""
 DEFAULT_TAGS = ""
 

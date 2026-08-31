@@ -28,6 +28,12 @@ def write_applications(rows):
     storage.write_rows(paths.APPLICATIONS, schema.APPLICATION_FIELDS, rows)
 
 
+def delete_unmodified_discovery_application(application_id):
+    if using_sqlite():
+        return sqlite_store.delete_unmodified_discovery_application(application_id)
+    raise ValueError("Undo Pursue requires the local SQLite store.")
+
+
 def read_actions():
     if using_sqlite():
         return sqlite_store.read_actions()

@@ -106,6 +106,7 @@ def validate_stage(stage, allow_inactive=False):
     stage_id = slugify(stage)
     if not stage_id:
         stage_id = schema.DEFAULT_STAGE
+    stage_id = schema.WORKFLOW_STAGE_ALIASES.get(stage_id, stage_id)
     for row in read_workflow()["stages"]:
         if row["id"] == stage_id and (allow_inactive or row.get("is_active") == "1"):
             return stage_id

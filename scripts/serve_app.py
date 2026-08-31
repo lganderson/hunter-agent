@@ -26,6 +26,7 @@ from hunter import company_discovery as company_discovery_store
 from hunter import company_discovery_jobs
 from hunter import contacts as contact_store
 from hunter import discovery as discovery_store
+from hunter import discovery_jobs
 from hunter import settings as settings_store
 from hunter import suggestions as suggestion_store
 from hunter import workflow as workflow_store
@@ -173,6 +174,12 @@ class AppHandler(SimpleHTTPRequestHandler):
         if path == "/api/companies/discovery-jobs/current":
             self.send_json({"job": company_discovery_jobs.current_job()})
             return
+        if path == "/api/discovery/enrichment-jobs/current":
+            self.send_json({"job": discovery_jobs.current_job()})
+            return
+        if path == "/api/discovery/jobs/current":
+            self.send_json({"job": discovery_jobs.current_job()})
+            return
         if path == "/api/settings":
             self.send_json(action_engine.settings_status())
             return
@@ -198,6 +205,8 @@ class AppHandler(SimpleHTTPRequestHandler):
                 token=payload.get("api_token"),
                 search_goals=payload.get("search_goals"),
                 fit_signals=payload.get("fit_signals"),
+                adzuna_app_id=payload.get("adzuna_app_id"),
+                adzuna_app_key=payload.get("adzuna_app_key"),
             )
             self.send_json(status)
             return
@@ -617,6 +626,16 @@ class AppHandler(SimpleHTTPRequestHandler):
             self.send_json({"job": job}, status=202)
             return
 
+        if path == "/api/companies/evaluation-jobs":
+            payload = self.read_json()
+            try:
+                job = company_discovery_jobs.start_evaluation_job(payload)
+            except ValueError as exc:
+                self.send_json({"error": str(exc), "job": company_discovery_jobs.current_job()}, status=409)
+                return
+            self.send_json({"job": job}, status=202)
+            return
+
         if path == "/api/companies/check":
             payload = self.read_json()
             try:
@@ -697,10 +716,10 @@ class AppHandler(SimpleHTTPRequestHandler):
             self.send_json(result)
             return
 
-        if path == "/api/companies/candidates/ingest":
+        if path in {"/api/companies/candidates/pursue", "/api/companies/candidates/ingest"}:
             payload = self.read_json()
             try:
-                result = company_store.ingest_candidate(payload.get("id", ""))
+                result = company_store.pursue_candidate(payload.get("id", ""))
             except ValueError as exc:
                 self.send_json({"error": str(exc)}, status=400)
                 return
@@ -761,6 +780,8 @@ class AppHandler(SimpleHTTPRequestHandler):
             except RuntimeError as exc:
                 self.send_json({"error": str(exc)}, status=502)
                 return
+            company_discovery_jobs.enqueue_pending_evaluation()
+            discovery_jobs.start_job({"search_id": payload.get("id", "")})
             self.send_json(result)
             return
 
@@ -777,7 +798,35 @@ class AppHandler(SimpleHTTPRequestHandler):
             except RuntimeError as exc:
                 self.send_json({"error": str(exc)}, status=502)
                 return
+            company_discovery_jobs.enqueue_pending_evaluation()
+            discovery_jobs.start_job({"search_id": payload.get("id", "")})
             self.send_json(result)
+            return
+
+        if path == "/api/discovery/search-jobs":
+            payload = self.read_json()
+            try:
+                job = discovery_jobs.start_search_job(
+                    {
+                        "search_id": payload.get("id", payload.get("search_id", "")),
+                        "use_browser_fallback": payload.get("use_browser_fallback", False),
+                        "enrichment_limit": payload.get("enrichment_limit", 100),
+                    }
+                )
+            except (TypeError, ValueError) as exc:
+                self.send_json({"error": str(exc), "job": discovery_jobs.current_job()}, status=400)
+                return
+            self.send_json({"job": job}, status=202)
+            return
+
+        if path == "/api/discovery/enrichment-jobs":
+            payload = self.read_json()
+            try:
+                job = discovery_jobs.start_job(payload)
+            except (TypeError, ValueError) as exc:
+                self.send_json({"error": str(exc), "job": discovery_jobs.current_job()}, status=400)
+                return
+            self.send_json({"job": job}, status=202)
             return
 
         if path == "/api/discovery/candidates/capture":
@@ -791,6 +840,8 @@ class AppHandler(SimpleHTTPRequestHandler):
             except ValueError as exc:
                 self.send_json({"error": str(exc)}, status=400)
                 return
+            company_discovery_jobs.enqueue_pending_evaluation()
+            discovery_jobs.start_job({"search_id": payload.get("search_id", "")})
             self.send_json(result)
             return
 
@@ -850,10 +901,25 @@ class AppHandler(SimpleHTTPRequestHandler):
             self.send_json(result)
             return
 
-        if path == "/api/discovery/candidates/ingest":
+        if path in {"/api/discovery/candidates/pursue", "/api/discovery/candidates/ingest"}:
             payload = self.read_json()
             try:
-                result = discovery_store.ingest_candidate(payload.get("id", ""))
+                result = discovery_store.pursue_candidate(payload.get("id", ""))
+            except ValueError as exc:
+                self.send_json({"error": str(exc)}, status=400)
+                return
+            self.send_json(result)
+            return
+
+        if path == "/api/discovery/candidates/undo-decision":
+            payload = self.read_json()
+            try:
+                result = discovery_store.undo_candidate_decision(
+                    candidate_id=payload.get("id", ""),
+                    decision=payload.get("decision", ""),
+                    application_id=payload.get("application_id", ""),
+                    remove_posting=bool(payload.get("remove_posting", False)),
+                )
             except ValueError as exc:
                 self.send_json({"error": str(exc)}, status=400)
                 return

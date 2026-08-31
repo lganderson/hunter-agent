@@ -600,7 +600,7 @@ def tool_unlink_company_contact(args):
 
 
 def tool_ingest_company_candidate(args):
-    result = company_store.ingest_candidate(args.get("id", ""))
+    result = company_store.pursue_candidate(args.get("id", ""))
     return text_result(
         {
             "candidate": compact_company_candidate(result["candidate"]),
@@ -1057,7 +1057,7 @@ TOOLS = {
         "handler": tool_unlink_company_contact,
     },
     "hunter_ingest_company_candidate": {
-        "description": "Ingest a reviewed company posting candidate through Hunter's existing posting ingest path.",
+        "description": "Pursue a reviewed company posting candidate and add it to Postings in Considering.",
         "inputSchema": {
             "type": "object",
             "properties": {"id": {"type": "string", "description": "Company posting candidate id."}},

@@ -88,7 +88,7 @@ export function agentExperience(context: AgentContext, data: AppState): AgentExp
         description: "Open roles, fit, and next steps.",
         starters: [
           { label: "Check careers", prompt: "Check this company's careers page and summarize what changed." },
-          { label: "Show recommended roles", prompt: "Show me the recommended candidates for this company and explain the strongest fits." },
+          { label: "Review roles", prompt: "Show me the candidates from this company that still need a decision and explain the strongest fits." },
           { label: "Recommend a next step", prompt: "What should I do next with this company?" }
         ]
       };
@@ -100,7 +100,7 @@ export function agentExperience(context: AgentContext, data: AppState): AgentExp
           starters: [
             { label: "Review strongest fits", prompt: "Review my strongest new Discovery results and explain the evidence behind each fit." },
             { label: "Find missing details", prompt: "Which Discovery results need more information before I can evaluate them?" },
-            { label: "Choose roles to ingest", prompt: "Which Discovery results should I ingest into my posting pipeline, and why?" }
+            { label: "Choose roles to pursue", prompt: "Which Discovery results should I pursue into my posting pipeline, and why?" }
           ]
         };
       }
@@ -108,7 +108,7 @@ export function agentExperience(context: AgentContext, data: AppState): AgentExp
         title: "Candidate review",
         description: "Compare fit and clear the review queue.",
         starters: [
-          { label: "Show strongest fits", prompt: "Show me the strongest recommended candidates and explain why they stand out." },
+          { label: "Show strongest fits", prompt: "Show me the strongest candidates that still need a decision and explain why they stand out." },
           { label: "Compare top candidates", prompt: "Compare the top candidates by fit, evidence, and urgency." },
           { label: "Prioritize my review", prompt: "Which candidate reviews should I clear first?" }
         ]

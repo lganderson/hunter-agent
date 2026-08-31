@@ -14,6 +14,7 @@ DEFAULT_FOCUS = (
 )
 DEFAULT_SIZES = ["51–200 employees", "201–500 employees"]
 DEFAULT_SOURCES = [
+    "direct-employers",
     "startup-directories",
     "venture-portfolios",
     "linkedin-companies",
@@ -21,11 +22,12 @@ DEFAULT_SOURCES = [
 DEFAULT_LOCATION_PREFERENCES = ["us-remote", "metro-area"]
 DEFAULT_REMOTE_REGION = "United States"
 DEFAULT_METRO_AREA = "Minneapolis-Saint Paul metro"
-MAX_RESULTS = 20
+MAX_RESULTS = 40
 MAX_RESEARCH = 12
-MAX_PER_FOCUS_LANE = 2
-MAX_SOURCE_RESULTS = 12
-MAX_WEB_SEARCH_CALLS = 2
+MAX_FOCUS_LANES = 6
+MAX_PER_FOCUS_LANE = 4
+MAX_SOURCE_RESULTS = 24
+MAX_WEB_SEARCH_CALLS = 5
 LOCATION_RESEARCH_BATCH_SIZE = 5
 MAX_LOCATION_RESEARCH_TOOL_CALLS = 10
 DISCOVERY_MODEL = "gpt-5.6-luna"
@@ -48,6 +50,12 @@ LOCATION_DEFINITIONS = {
 }
 
 SOURCE_DEFINITIONS = {
+    "direct-employers": {
+        "label": "Direct employer sites",
+        "engine": "google",
+        "domains": [],
+        "query": '("careers" OR "jobs" OR "join our team")',
+    },
     "startup-directories": {
         "label": "Startup directory",
         "engine": "google",
@@ -74,6 +82,20 @@ SOURCE_DEFINITIONS = {
         "domains": ["linkedin.com"],
         "query": "",
     },
+}
+
+FOCUS_LANES_RESPONSE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "focus_lanes": {
+            "type": "array",
+            "minItems": 3,
+            "maxItems": MAX_FOCUS_LANES,
+            "items": {"type": "string"},
+        }
+    },
+    "required": ["focus_lanes"],
+    "additionalProperties": False,
 }
 
 DISCOVERY_RESPONSE_SCHEMA = {
@@ -196,6 +218,21 @@ SOURCE_HOSTS = {
     "linkedin-companies": {"linkedin.com", "www.linkedin.com"},
 }
 
+DIRECT_SOURCE_BLOCKED_HOSTS = {
+    "bing.com",
+    "facebook.com",
+    "glassdoor.com",
+    "google.com",
+    "indeed.com",
+    "instagram.com",
+    "linkedin.com",
+    "wellfound.com",
+    "x.com",
+    "yahoo.com",
+    "ycombinator.com",
+    "ziprecruiter.com",
+}
+
 NON_COMPANY_WEBSITE_HOSTS = {
     "ashbyhq.com",
     "facebook.com",
@@ -240,7 +277,70 @@ def normalized_focus_terms(value):
         cleaned = storage.clean(str(value or "")).lower()
         if cleaned and cleaned not in terms:
             terms.append(cleaned)
-    return terms[:8]
+    return terms[:MAX_FOCUS_LANES]
+
+
+def normalized_planned_focus_terms(values):
+    terms = []
+    for value in values or []:
+        cleaned = storage.clean(str(value or "")).lower()
+        if (
+            cleaned
+            and len(cleaned) <= 80
+            and len(cleaned.split()) <= 10
+            and cleaned not in terms
+        ):
+            terms.append(cleaned)
+    return terms[:MAX_FOCUS_LANES]
+
+
+def openai_focus_lane_search(config, focus_terms):
+    prompt = (
+        "Turn the employer-search focus below into distinct company-market search lanes. "
+        "The goal is broad recall without drifting away from the user's intent. Expand broad phrases "
+        "such as AI into different kinds of products, platforms, infrastructure, workflows, and "
+        "technical services where the same interest could apply. Keep lanes broad enough to identify "
+        "many employers. Do not use job titles, company names, locations, employee counts, or near-duplicate "
+        "wording. Return between 3 and 6 concise lanes, each 2 to 8 words.\n\n"
+        "User focus:\n- " + "\n- ".join(focus_terms)
+    )
+    payload = {
+        "model": DISCOVERY_MODEL,
+        "input": prompt,
+        "text": {
+            "format": {
+                "type": "json_schema",
+                "name": "hunter_company_focus_lanes",
+                "strict": True,
+                "schema": FOCUS_LANES_RESPONSE_SCHEMA,
+            }
+        },
+        "max_output_tokens": 800,
+        "reasoning": {"effort": "low"},
+        "store": False,
+        "metadata": {"feature": "company-discovery", "source": "focus-planning"},
+    }
+    response = agent._request_json(
+        f"{config['api_base']}/responses",
+        config["token"],
+        payload,
+    )
+    api_usage.log_usage(
+        "company-discovery",
+        response.get("model") or DISCOVERY_MODEL,
+        response,
+        operation="focus-planning",
+    )
+    try:
+        result = json.loads(agent._output_text(response))
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise RuntimeError("OpenAI returned unreadable company search lanes.") from exc
+    lanes = normalized_planned_focus_terms(
+        result.get("focus_lanes", []) if isinstance(result, dict) else []
+    )
+    if len(lanes) < 3:
+        raise RuntimeError("OpenAI did not return enough distinct company search lanes.")
+    return lanes
 
 
 def normalized_sizes(values):
@@ -370,18 +470,27 @@ def openai_source_search(
         f"{location_definition(item, remote_region, metro_area)['prompt']}"
         for item in selected_locations
     )
+    source_scope = (
+        "Use only company profile pages from the allowed domains."
+        if source["domains"]
+        else (
+            "Use official company websites, official careers pages, or direct employer ATS pages. "
+            "Do not use search-result pages, staffing agencies, job aggregators, social media, or news articles."
+        )
+    )
     prompt = (
         "Find smaller companies that could be good employer targets. Search every focus lane "
         "independently and keep the results balanced; do not let one lane consume another lane's quota. "
         "Return no more than the stated number for each lane and no more than "
-        f"{MAX_SOURCE_RESULTS} companies total. Use only company profile pages from the allowed domains. "
+        f"{MAX_SOURCE_RESULTS} companies total. {source_scope} "
         "Prefer current, specific evidence. Do not invent employee counts: use an empty string when the "
         "size is not supported by a source. Return the direct profile URL as source_url and the "
         "company's official public homepage as website. Website must not be a directory, social-media, "
         "job-board, or ATS URL; leave it empty unless the official site is supported by the source. A company may "
-        "appear only once. Every returned company must match at least one location eligibility option "
-        "below with current evidence from the source. Set location_fit to unknown and leave "
-        "location_evidence empty when the source does not support a match; do not guess.\n\n"
+        "appear only once. Prefer companies with evidence for at least one location eligibility option "
+        "below, but do not discard an otherwise strong employer solely because this source does not prove "
+        "location eligibility. In that case set location_fit to unknown and leave location_evidence empty; "
+        "do not guess.\n\n"
         f"Focus lanes:\n{lanes}\n\n"
         f"Location eligibility (match any):\n{location_requirements}\n\n"
         f"Target company sizes: {', '.join(selected_sizes)}\n"
@@ -390,13 +499,11 @@ def openai_source_search(
     payload = {
         "model": DISCOVERY_MODEL,
         "input": prompt,
-        "tools": [
-            {
-                "type": "web_search",
-                "search_context_size": "low",
-                "filters": {"allowed_domains": source["domains"]},
-            }
-        ],
+        "tools": [{
+            "type": "web_search",
+            "search_context_size": "medium",
+            **({"filters": {"allowed_domains": source["domains"]}} if source["domains"] else {}),
+        }],
         "tool_choice": "required",
         "max_tool_calls": MAX_WEB_SEARCH_CALLS,
         "include": ["web_search_call.action.sources"],
@@ -408,7 +515,7 @@ def openai_source_search(
                 "schema": DISCOVERY_RESPONSE_SCHEMA,
             }
         },
-        "max_output_tokens": 2_500,
+        "max_output_tokens": 8_000,
         "reasoning": {"effort": "low"},
         "store": False,
         "metadata": {"feature": "company-discovery", "source": source_id},
@@ -468,7 +575,7 @@ def openai_company_website_search(config, candidates):
                 "schema": WEBSITE_RESPONSE_SCHEMA,
             }
         },
-        "max_output_tokens": 1_500,
+        "max_output_tokens": 3_000,
         "reasoning": {"effort": "low"},
         "store": False,
         "metadata": {"feature": "company-discovery", "source": "website-lookup"},
@@ -579,6 +686,14 @@ def likely_company_profile(source_id, url):
     parsed = urlparse(companies.normalize_url(url))
     host = parsed.netloc.lower()
     path = parsed.path.lower()
+    if source_id == "direct-employers":
+        normalized_host = host.removeprefix("www.")
+        if not normalized_host:
+            return False
+        return not any(
+            normalized_host == blocked or normalized_host.endswith(f".{blocked}")
+            for blocked in DIRECT_SOURCE_BLOCKED_HOSTS
+        )
     if host not in SOURCE_HOSTS[source_id]:
         return False
     if source_id == "linkedin-companies":
@@ -607,6 +722,20 @@ def company_name_from_result(result, source_id):
     ):
         return ""
     return title
+
+
+def balanced_candidate_batch(candidates, source_ids, limit=MAX_RESULTS):
+    queues = {
+        source_id: [item for item in candidates if item.get("source_id") == source_id]
+        for source_id in source_ids
+    }
+    batch = []
+    while len(batch) < limit and any(queues.values()):
+        for source_id in source_ids:
+            queue = queues.get(source_id, [])
+            if queue and len(batch) < limit:
+                batch.append(queue.pop(0))
+    return batch
 
 
 def size_bounds(value):
@@ -876,6 +1005,8 @@ def run_company_discovery(
     researcher=None,
     progress=None,
 ):
+    from . import company_evaluation
+
     focus_terms = normalized_focus_terms(focus)
     if not focus_terms:
         raise ValueError("Add at least one company search focus.")
@@ -884,22 +1015,43 @@ def run_company_discovery(
     selected_locations = normalized_location_preferences(locations)
     remote_region = storage.clean(remote_region) or DEFAULT_REMOTE_REGION
     metro_area = storage.clean(metro_area) or DEFAULT_METRO_AREA
+    evaluation_profile = company_evaluation.save_profile(
+        {
+            "focus": focus,
+            "sizes": selected_sizes,
+            "locations": selected_locations,
+            "remote_region": remote_region,
+            "metro_area": metro_area,
+        }
+    )
     timestamp = now_iso()
-    total_steps = len(selected_sources) + 1
+    total_steps = len(selected_sources) + 2
     emit_progress(progress, "preparing", "Preparing company discovery…", 0, total_steps)
     openai_config = None
+    errors = []
+    search_focus_terms = list(focus_terms)
     if searcher is None:
         openai_config = agent._settings()
+        emit_progress(
+            progress,
+            "planning",
+            "Expanding the search into company market lanes…",
+            0,
+            total_steps,
+        )
+        try:
+            search_focus_terms = openai_focus_lane_search(openai_config, focus_terms)
+        except RuntimeError as exc:
+            errors.append(f"Search planning: {storage.clean(str(exc))}")
 
     candidates = []
     seen = set()
     source_runs = []
-    errors = []
     for source_index, source_id in enumerate(selected_sources):
         source = SOURCE_DEFINITIONS[source_id]
         query = source_query(
             source_id,
-            focus_terms,
+            search_focus_terms,
             selected_locations,
             remote_region,
             metro_area,
@@ -908,7 +1060,7 @@ def run_company_discovery(
             progress,
             "searching",
             f"Searching {source['label'].lower()} ({source_index + 1} of {len(selected_sources)})…",
-            source_index,
+            source_index + 1,
             total_steps,
             source_id,
         )
@@ -917,7 +1069,7 @@ def run_company_discovery(
                 items = openai_source_search(
                     openai_config,
                     source_id,
-                    focus_terms,
+                    search_focus_terms,
                     selected_sizes,
                     selected_locations,
                     remote_region,
@@ -942,7 +1094,7 @@ def run_company_discovery(
             if not name or not key or key in seen:
                 continue
             focus_lane = storage.clean((item or {}).get("focus_lane", "")).lower()
-            if focus_lane not in focus_terms:
+            if focus_lane not in search_focus_terms:
                 lane_text = " ".join(
                     [
                         focus_lane,
@@ -950,7 +1102,7 @@ def run_company_discovery(
                         storage.clean((item or {}).get("description", "")).lower(),
                     ]
                 )
-                focus_lane = next((term for term in focus_terms if term in lane_text), "")
+                focus_lane = next((term for term in search_focus_terms if term in lane_text), "")
             if openai_config is not None and not focus_lane:
                 continue
             location_fit = normalized_location_fit((item or {}).get("location_fit", ""))
@@ -1009,7 +1161,7 @@ def run_company_discovery(
             progress,
             "source-complete",
             f"Finished {source['label'].lower()}: {kept} candidate{'s' if kept != 1 else ''} found.",
-            source_index + 1,
+            source_index + 2,
             total_steps,
             source_id,
         )
@@ -1023,7 +1175,7 @@ def run_company_discovery(
     already_tracked_count = 0
     research_count = 0
     research_errors = []
-    candidate_batch = candidates[:MAX_RESULTS]
+    candidate_batch = balanced_candidate_batch(candidates, selected_sources)
     missing_website_candidates = [
         candidate for candidate in candidate_batch if not official_company_website(candidate.get("website", ""))
     ]
@@ -1032,7 +1184,7 @@ def run_company_discovery(
             progress,
             "websites",
             f"Finding official websites for {len(missing_website_candidates)} candidate{'s' if len(missing_website_candidates) != 1 else ''}…",
-            len(selected_sources),
+            len(selected_sources) + 1,
             total_steps,
         )
         try:
@@ -1048,15 +1200,17 @@ def run_company_discovery(
         progress,
         "reviewing",
         f"Checking evidence for {len(candidate_batch)} candidate{'s' if len(candidate_batch) != 1 else ''}…",
-        len(selected_sources),
+        len(selected_sources) + 1,
         total_steps,
     )
+    evaluation_payloads = {}
+    evaluation_company_ids = []
     for candidate_index, candidate in enumerate(candidate_batch):
         emit_progress(
             progress,
             "reviewing",
             f"Checking {candidate['company']} ({candidate_index + 1} of {len(candidate_batch)})…",
-            len(selected_sources),
+            len(selected_sources) + 1,
             total_steps,
         )
         existing = companies.matching_company_record(
@@ -1095,14 +1249,24 @@ def run_company_discovery(
             skipped_size_count += 1
             continue
         candidate_location_fit = normalized_location_fit(
-            candidate.get("location_fit", "") or metadata.get("company_location_fit", "")
+            candidate.get("location_fit", "")
+            or metadata.get("company_location_fit", "")
+            or (existing or {}).get("company_location_fit", "")
         )
-        candidate_location = candidate.get("location", "") or metadata.get("company_location", "")
+        candidate_location = (
+            candidate.get("location", "")
+            or metadata.get("company_location", "")
+            or (existing or {}).get("company_location", "")
+        )
         candidate_remote_policy = (
-            candidate.get("remote_policy", "") or metadata.get("company_remote_policy", "")
+            candidate.get("remote_policy", "")
+            or metadata.get("company_remote_policy", "")
+            or (existing or {}).get("company_remote_policy", "")
         )
         candidate_location_evidence = (
-            candidate.get("location_evidence", "") or metadata.get("company_location_evidence", "")
+            candidate.get("location_evidence", "")
+            or metadata.get("company_location_evidence", "")
+            or (existing or {}).get("company_location_evidence", "")
         )
         company = companies.record_discovered_company(metadata, seen_at=timestamp)
         if company is None:
@@ -1134,6 +1298,25 @@ def run_company_discovery(
                 "company_fit_checked_at": timestamp,
             },
         )
+        evaluation_company_ids.append(company["id"])
+        evaluation_payloads[company["id"]] = {
+            "company_id": company["id"],
+            "name": company["name"],
+            "website": metadata.get("website", ""),
+            "careers_url": metadata.get("careers_url", ""),
+            "industry": metadata.get("company_industry", "") or metadata.get("industry", ""),
+            "company_size": metadata.get("company_size", ""),
+            "description": metadata.get("company_description", ""),
+            "location_fit": candidate_location_fit or "unknown",
+            "location": candidate_location,
+            "remote_policy": candidate_remote_policy,
+            "location_evidence": candidate_location_evidence,
+            "source_urls": [
+                value
+                for value in [candidate.get("source_url", ""), metadata.get("website", "")]
+                if storage.clean(value)
+            ],
+        }
         if existing is None:
             new_count += 1
         else:
@@ -1145,6 +1328,32 @@ def run_company_discovery(
                 discovered.append(company)
             else:
                 location_verification.append(company)
+
+    if evaluation_company_ids:
+        def source_evaluator(batch, _profile, _batch_number):
+            return [
+                evaluation_payloads[row.get("id", "")]
+                for row in batch
+                if row.get("id", "") in evaluation_payloads
+            ]
+
+        company_evaluation.evaluate_companies(
+            company_ids=evaluation_company_ids,
+            tracking_status="",
+            profile=evaluation_profile,
+            force=True,
+            evaluator=source_evaluator,
+            reason="company-search",
+        )
+        refreshed = {
+            row.get("id", ""): row
+            for row in repository.read_companies()
+        }
+        discovered = [refreshed.get(row.get("id", ""), row) for row in discovered]
+        location_verification = [
+            refreshed.get(row.get("id", ""), row)
+            for row in location_verification
+        ]
 
     discovered.sort(
         key=lambda item: (
@@ -1167,6 +1376,7 @@ def run_company_discovery(
     )
     return {
         "focus": ", ".join(focus_terms),
+        "focus_lanes": search_focus_terms,
         "sizes": selected_sizes,
         "sources": selected_sources,
         "locations": selected_locations,

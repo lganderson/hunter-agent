@@ -1,17 +1,18 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Link, useSearchParams } from "react-router-dom";
+import { Link } from "react-router-dom";
 import { BriefcaseIcon, ExternalIcon, FilterIcon, SearchIcon, XIcon } from "../components/Icons";
 import { SortableHeader } from "../components/Primitives";
 import {
   checkCompanyPostings,
-  ingestCompanyCandidate,
+  pursueCompanyCandidate,
   updateCompanyCandidate,
   updateCompanyCandidates
 } from "../core/api";
 import { dateOnlyLabel, titleCase } from "../core/format";
 import { routes } from "../core/routes";
 import { compareNumber, compareText, nextSortState, type SortDirection, type SortState } from "../core/tableSort";
-import type { AppState, Company, CompanyPostingCandidate } from "../core/types";
+import type { AppState, Application, CandidateEnrichmentJob, Company, CompanyPostingCandidate, DiscoveryCandidate } from "../core/types";
+import { selectionFromParam, selectionParamValue, sortFromParams, usePersistentViewParams } from "../core/viewState";
 import {
   CANDIDATE_FILTERS,
   RECOMMENDED_FIT_SCORE,
@@ -30,6 +31,10 @@ type CandidateReviewPageProps = {
   data: AppState;
   refresh: () => Promise<AppState>;
   applyCompanyCandidateUpdates: (candidates: CompanyPostingCandidate[]) => void;
+  applyDiscoveryCandidateUpdate: (candidate: DiscoveryCandidate, posting?: Application | null, removePostingId?: string) => void;
+  enrichmentJob?: CandidateEnrichmentJob | null;
+  startDiscoveryJob?: (payload: CandidateEnrichmentJob["request"]) => Promise<CandidateEnrichmentJob>;
+  startEnrichmentJob?: (payload: CandidateEnrichmentJob["request"]) => Promise<CandidateEnrichmentJob>;
 };
 
 type CandidateRow = {
@@ -43,17 +48,14 @@ const INTEREST_VALUES = ["interested", "neutral", "archived"];
 const FIT_VALUES = ["all", "strong", "recommended", "low"];
 const MAX_BULK_INGEST = 25;
 type CandidateSortKey = "title" | "company" | "fit" | "status" | "last_seen";
+const CANDIDATE_SORT_KEYS: CandidateSortKey[] = ["title", "company", "fit", "status", "last_seen"];
 
-export function CandidatesPage({ data, refresh, applyCompanyCandidateUpdates }: CandidateReviewPageProps) {
-  const [searchParams, setSearchParams] = useSearchParams();
-  const mode = searchParams.get("mode") === "discovery" ? "discovery" : "companies";
-  const [search, setSearch] = useState("");
-  const [candidateFilter, setCandidateFilter] = useState<CandidateFilter>(() => candidateFilterFromQuery(searchParams.get("status")));
-  const [interestStatuses, setInterestStatuses] = useState<string[]>(INTEREST_VALUES);
-  const [companyIds, setCompanyIds] = useState<string[]>(() => querySelection(searchParams.get("companies"), companyOptionsFromData(data), companyOptionsFromData(data)));
-  const [fitFilter, setFitFilter] = useState("all");
-  const [latestOnly, setLatestOnly] = useState(() => searchParams.get("latest") === "true");
-  const [sort, setSort] = useState<SortState<CandidateSortKey>>({ key: "fit", direction: "desc" });
+export function CandidatesPage({ data, refresh, applyCompanyCandidateUpdates, applyDiscoveryCandidateUpdate, enrichmentJob = null, startDiscoveryJob, startEnrichmentJob }: CandidateReviewPageProps) {
+  const { params: viewParams, updateParams: updateViewParams } = usePersistentViewParams("candidates");
+  const mode = viewParams.get("mode") === "discovery" ? "discovery" : "companies";
+  const search = viewParams.get("q") || "";
+  const candidateFilter = candidateFilterFromQuery(viewParams.get("status"));
+  const interestStatuses = selectionFromParam(viewParams.get("interest"), INTEREST_VALUES, INTEREST_VALUES);
   const [operationStatus, setOperationStatus] = useState("");
   const [operationPending, setOperationPending] = useState(false);
   const [ingestedPostingId, setIngestedPostingId] = useState("");
@@ -75,24 +77,11 @@ export function CandidatesPage({ data, refresh, applyCompanyCandidateUpdates }: 
       .sort((a, b) => a.name.localeCompare(b.name)),
     [data.companies, data.company_posting_candidates]
   );
-
-  const queryKey = searchParams.toString();
-
-  useEffect(() => {
-    setCompanyIds(previous => {
-      const validIds = new Set(companyOptions.map(company => company.id));
-      const selected = previous.filter(id => validIds.has(id));
-      return selected.length ? selected : companyOptions.map(company => company.id);
-    });
-  }, [companyOptions]);
-
-  useEffect(() => {
-    const params = new URLSearchParams(queryKey);
-    const optionIds = companyOptions.map(company => company.id);
-    setCompanyIds(querySelection(params.get("companies"), optionIds, optionIds));
-    setCandidateFilter(candidateFilterFromQuery(params.get("status")));
-    setLatestOnly(params.get("latest") === "true");
-  }, [companyOptions, queryKey]);
+  const companyOptionIds = companyOptions.map(company => company.id);
+  const companyIds = selectionFromParam(viewParams.get("companies"), companyOptionIds, companyOptionIds);
+  const fitFilter = FIT_VALUES.includes(viewParams.get("fit") || "") ? viewParams.get("fit") || "all" : "all";
+  const latestOnly = viewParams.get("latest") === "true";
+  const sort = sortFromParams(viewParams, "sort", "direction", CANDIDATE_SORT_KEYS, { key: "fit", direction: "desc" });
 
   const allRows = useMemo<CandidateRow[]>(
     () => data.company_posting_candidates.map(candidate => {
@@ -147,12 +136,9 @@ export function CandidatesPage({ data, refresh, applyCompanyCandidateUpdates }: 
 
   const candidateCounts = useMemo(
     () => ({
-      recommended: rowsBeforeStatus.filter(row => isRecommendedCandidate(row.candidate, row.latestCheckAt)).length,
-      new: rowsBeforeStatus.filter(row => isCurrentNewCandidate(row.candidate, row.latestCheckAt)).length,
-      all: rowsBeforeStatus.length,
+      "needs-decision": rowsBeforeStatus.filter(row => row.candidate.status === "new").length,
       ignored: rowsBeforeStatus.filter(row => row.candidate.status === "ignored").length,
-      ingested: rowsBeforeStatus.filter(row => row.candidate.status === "ingested").length,
-      unavailable: rowsBeforeStatus.filter(row => row.candidate.status === "unavailable").length
+      pursued: rowsBeforeStatus.filter(row => row.candidate.status === "pursued").length
     }),
     [rowsBeforeStatus]
   );
@@ -165,7 +151,11 @@ export function CandidatesPage({ data, refresh, applyCompanyCandidateUpdates }: 
   );
 
   function changeSort(key: CandidateSortKey, initialDirection: SortDirection) {
-    setSort(current => nextSortState(current, key, initialDirection));
+    const next = nextSortState(sort, key, initialDirection);
+    updateViewParams({
+      sort: next.key === "fit" ? null : next.key,
+      direction: next.direction === "desc" ? null : next.direction
+    });
   }
   const visibleCandidateIds = useMemo(
     () => rows.map(row => row.candidate.id),
@@ -176,7 +166,7 @@ export function CandidatesPage({ data, refresh, applyCompanyCandidateUpdates }: 
     [rows, selectedCandidateIds]
   );
   const selectedIngestCandidates = selectedRows.filter(
-    row => !["ingested", "unavailable"].includes(row.candidate.status)
+    row => !["pursued", "unavailable"].includes(row.candidate.status)
   );
   const selectedIgnoreCandidates = selectedRows.filter(row => row.candidate.status === "new");
   const selectedRestoreCandidates = selectedRows.filter(row => row.candidate.status === "ignored");
@@ -200,7 +190,7 @@ export function CandidatesPage({ data, refresh, applyCompanyCandidateUpdates }: 
     try {
       const result = await updateCompanyCandidate(candidateId, status);
       applyCompanyCandidateUpdates([result.candidate]);
-      setOperationStatus(status === "ignored" ? "Candidate ignored." : "Candidate returned to New.");
+      setOperationStatus(status === "ignored" ? "Candidate ignored." : "Candidate returned to Needs decision.");
     } catch (error) {
       setOperationStatus(`Could not update candidate. ${error instanceof Error ? error.message : String(error)}`);
     } finally {
@@ -208,44 +198,44 @@ export function CandidatesPage({ data, refresh, applyCompanyCandidateUpdates }: 
     }
   }
 
-  async function ingestCandidate(candidateId: string) {
+  async function pursueCandidate(candidateId: string) {
     setCheckProgress(null);
     setIngestedPostingId("");
     setOperationPending(true);
-    setOperationStatus("Ingesting candidate...");
+    setOperationStatus("Adding role to Considering...");
     try {
-      const result = await ingestCompanyCandidate(candidateId);
+      const result = await pursueCompanyCandidate(candidateId);
       await refresh();
       setIngestedPostingId(result.posting?.id || "");
-      setOperationStatus("Candidate ingested.");
+      setOperationStatus("Role pursued and added to Considering.");
     } catch (error) {
-      setOperationStatus(`Could not ingest candidate. ${error instanceof Error ? error.message : String(error)}`);
+      setOperationStatus(`Could not pursue role. ${error instanceof Error ? error.message : String(error)}`);
     } finally {
       setOperationPending(false);
     }
   }
 
-  async function runBulkCandidateAction(action: "ingest" | "ignored" | "new") {
-    const eligibleRows = action === "ingest"
+  async function runBulkCandidateAction(action: "pursue" | "ignored" | "new") {
+    const eligibleRows = action === "pursue"
       ? selectedIngestCandidates
       : action === "ignored"
         ? selectedIgnoreCandidates
         : selectedRestoreCandidates;
     if (!eligibleRows.length) return;
-    if (action === "ingest" && eligibleRows.length > MAX_BULK_INGEST) return;
+    if (action === "pursue" && eligibleRows.length > MAX_BULK_INGEST) return;
 
     setCheckProgress(null);
     setIngestedPostingId("");
     setOperationPending(true);
     try {
-      if (action === "ingest") {
+      if (action === "pursue") {
         let successCount = 0;
         let failureCount = 0;
         let postingId = "";
         for (const [index, row] of eligibleRows.entries()) {
-          setOperationStatus(`Ingesting ${index + 1} of ${eligibleRows.length} selected candidates...`);
+          setOperationStatus(`Pursuing ${index + 1} of ${eligibleRows.length} selected candidates...`);
           try {
-            const result = await ingestCompanyCandidate(row.candidate.id);
+            const result = await pursueCompanyCandidate(row.candidate.id);
             successCount += 1;
             postingId = result.posting?.id || postingId;
           } catch {
@@ -255,15 +245,15 @@ export function CandidatesPage({ data, refresh, applyCompanyCandidateUpdates }: 
         await refresh();
         setIngestedPostingId(successCount === 1 ? postingId : "");
         setOperationStatus(
-          `${successCount} candidate${successCount === 1 ? "" : "s"} ingested.`
-          + (failureCount ? ` ${failureCount} could not be ingested.` : "")
+          `${successCount} candidate${successCount === 1 ? "" : "s"} pursued.`
+          + (failureCount ? ` ${failureCount} could not be pursued.` : "")
         );
       } else {
         const status = action === "ignored" ? "ignored" : "new";
         setOperationStatus(
           action === "ignored"
             ? `Ignoring ${eligibleRows.length} selected candidates...`
-            : `Returning ${eligibleRows.length} selected candidates to New...`
+            : `Returning ${eligibleRows.length} selected candidates to Needs decision...`
         );
         const result = await updateCompanyCandidates(
           eligibleRows.map(row => row.candidate.id),
@@ -273,7 +263,7 @@ export function CandidatesPage({ data, refresh, applyCompanyCandidateUpdates }: 
         setOperationStatus(
           action === "ignored"
             ? `${eligibleRows.length} candidates ignored.`
-            : `${eligibleRows.length} candidates returned to New.`
+            : `${eligibleRows.length} candidates returned to Needs decision.`
         );
       }
       setSelectedCandidateIds(new Set());
@@ -374,18 +364,20 @@ export function CandidatesPage({ data, refresh, applyCompanyCandidateUpdates }: 
   }
 
   function clearFilters() {
-    setSearch("");
-    setCandidateFilter("recommended");
-    setInterestStatuses(INTEREST_VALUES);
-    setCompanyIds(companyOptions.map(company => company.id));
-    setFitFilter("all");
-    setLatestOnly(false);
-    setSort({ key: "fit", direction: "desc" });
-    setSearchParams({});
+    updateViewParams({
+      q: null,
+      status: null,
+      interest: null,
+      companies: null,
+      fit: null,
+      latest: null,
+      sort: null,
+      direction: null
+    });
   }
 
   function chooseMode(nextMode: "companies" | "discovery") {
-    setSearchParams(nextMode === "discovery" ? { mode: "discovery" } : {});
+    updateViewParams({ mode: nextMode === "discovery" ? "discovery" : null });
   }
 
   if (mode === "discovery") {
@@ -393,7 +385,7 @@ export function CandidatesPage({ data, refresh, applyCompanyCandidateUpdates }: 
       <section className="view-section" id="candidates-view" aria-label="Discovery candidates">
         <article className="panel">
           <CandidateModeSwitch mode={mode} chooseMode={chooseMode} />
-          <DiscoveryMode data={data} refresh={refresh} />
+          <DiscoveryMode data={data} refresh={refresh} applyDiscoveryCandidateUpdate={applyDiscoveryCandidateUpdate} enrichmentJob={enrichmentJob} startDiscoveryJob={startDiscoveryJob} startEnrichmentJob={startEnrichmentJob} />
         </article>
       </section>
     );
@@ -407,14 +399,14 @@ export function CandidatesPage({ data, refresh, applyCompanyCandidateUpdates }: 
           <label className="search">
             <span className="sr-only">Search posting candidates</span>
             <SearchIcon />
-            <input value={search} onChange={event => setSearch(event.target.value)} type="search" placeholder="Search candidates, locations, companies, fit notes..." />
+            <input value={search} onChange={event => updateViewParams({ q: event.target.value || null })} type="search" placeholder="Search candidates, locations, companies, fit notes..." />
           </label>
-          <MultiFilter label="Interest" values={INTEREST_VALUES} selected={interestStatuses} onChange={setInterestStatuses} />
-          <MultiFilter label="Company" values={companyOptions.map(company => company.id)} selected={companyIds} onChange={setCompanyIds} labelForValue={id => companyById.get(id)?.name || id} />
-          <label className="filter">Fit <select value={fitFilter} onChange={event => setFitFilter(event.target.value)}>
+          <MultiFilter label="Interest" values={INTEREST_VALUES} selected={interestStatuses} onChange={values => updateViewParams({ interest: selectionParamValue(values, INTEREST_VALUES, INTEREST_VALUES) })} />
+          <MultiFilter label="Company" values={companyOptionIds} selected={companyIds} onChange={values => updateViewParams({ companies: selectionParamValue(values, companyOptionIds, companyOptionIds) })} labelForValue={id => companyById.get(id)?.name || id} />
+          <label className="filter">Fit <select value={fitFilter} onChange={event => updateViewParams({ fit: event.target.value === "all" ? null : event.target.value })}>
             {FIT_VALUES.map(value => <option key={value} value={value}>{fitFilterLabel(value)}</option>)}
           </select></label>
-          <label className="toggle"><input checked={latestOnly} onChange={event => setLatestOnly(event.target.checked)} type="checkbox" /> Latest scan</label>
+          <label className="toggle"><input checked={latestOnly} onChange={event => updateViewParams({ latest: event.target.checked ? "true" : null })} type="checkbox" /> Latest scan</label>
           <button className="button" type="button" onClick={clearFilters}><FilterIcon size={16} /> Clear</button>
           <button className="button primary" type="button" disabled={checkingAll} onClick={checkAllCompanies}>
             {checkingAll ? "Checking..." : "Check All Careers"}
@@ -427,7 +419,7 @@ export function CandidatesPage({ data, refresh, applyCompanyCandidateUpdates }: 
               className={candidateFilter === filter.id ? "candidate-filter active" : "candidate-filter"}
               key={filter.id}
               type="button"
-              onClick={() => setCandidateFilter(filter.id)}
+              onClick={() => updateViewParams({ status: filter.id === "needs-decision" ? null : filter.id })}
             >
               {filter.label}
               <span>{candidateCounts[filter.id]}</span>
@@ -477,14 +469,14 @@ export function CandidatesPage({ data, refresh, applyCompanyCandidateUpdates }: 
             clear={() => setSelectedCandidateIds(new Set())}
             actions={[
               {
-                id: "ingest",
-                label: `Ingest ${selectedIngestCandidates.length}`,
+                id: "pursue",
+                label: `Pursue ${selectedIngestCandidates.length}`,
                 primary: true,
                 disabled: !selectedIngestCandidates.length || selectedIngestCandidates.length > MAX_BULK_INGEST,
                 title: selectedIngestCandidates.length > MAX_BULK_INGEST
-                  ? `Select ${MAX_BULK_INGEST} or fewer candidates to ingest at once`
-                  : "Ingest selected candidates",
-                run: () => void runBulkCandidateAction("ingest")
+                  ? `Select ${MAX_BULK_INGEST} or fewer candidates to pursue at once`
+                  : "Pursue selected candidates",
+                run: () => void runBulkCandidateAction("pursue")
               },
               {
                 id: "ignore",
@@ -494,7 +486,7 @@ export function CandidatesPage({ data, refresh, applyCompanyCandidateUpdates }: 
               },
               {
                 id: "restore",
-                label: `Mark New ${selectedRestoreCandidates.length}`,
+                label: `Needs decision ${selectedRestoreCandidates.length}`,
                 disabled: !selectedRestoreCandidates.length,
                 run: () => void runBulkCandidateAction("new")
               }
@@ -557,10 +549,10 @@ export function CandidatesPage({ data, refresh, applyCompanyCandidateUpdates }: 
                   <td>
                     <div className="table-actions">
                       <a className="button compact" href={candidate.url} target="_blank" rel="noreferrer"><ExternalIcon size={15} /> Open</a>
-                      <button className="button compact" type="button" disabled={candidate.status === "ingested" || operationPending} onClick={() => ingestCandidate(candidate.id)}>Ingest</button>
+                      <button className="button compact" type="button" disabled={candidate.status === "pursued" || operationPending} onClick={() => pursueCandidate(candidate.id)}>Pursue</button>
                       {candidate.status === "ignored"
-                        ? <button className="button compact" type="button" disabled={operationPending} onClick={() => setCandidateStatus(candidate.id, "new")}>Mark New</button>
-                        : <button className="button compact" type="button" disabled={candidate.status === "ingested" || operationPending} onClick={() => setCandidateStatus(candidate.id, "ignored")}>Ignore</button>}
+                        ? <button className="button compact" type="button" disabled={operationPending} onClick={() => setCandidateStatus(candidate.id, "new")}>Needs decision</button>
+                        : <button className="button compact" type="button" disabled={candidate.status === "pursued" || operationPending} onClick={() => setCandidateStatus(candidate.id, "ignored")}>Ignore</button>}
                     </div>
                   </td>
                 </tr>
@@ -662,24 +654,9 @@ function matchesSelection(value: string, selected: string[], values: string[]) {
   return selected.includes(value);
 }
 
-function companyOptionsFromData(data: AppState) {
-  return data.companies
-    .filter(company => (
-      company.tracking_status === "tracked"
-      && data.company_posting_candidates.some(candidate => candidate.company_id === company.id)
-    ))
-    .map(company => company.id);
-}
-
 function candidateFilterFromQuery(value: string | null): CandidateFilter {
-  return CANDIDATE_FILTERS.some(filter => filter.id === value) ? value as CandidateFilter : "recommended";
-}
-
-function querySelection(value: string | null, options: string[], fallback: string[]) {
-  if (!value) return fallback;
-  if (value === "all") return options;
-  const requested = value.split(",").filter(item => options.includes(item));
-  return requested.length ? requested : fallback;
+  const normalized = value === "recommended" || value === "new" || value === "all" ? "needs-decision" : value === "ingested" ? "pursued" : value;
+  return CANDIDATE_FILTERS.some(filter => filter.id === normalized) ? normalized as CandidateFilter : "needs-decision";
 }
 
 function matchesFitFilter(score: number, filter: string) {

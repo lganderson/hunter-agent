@@ -5,18 +5,15 @@ export const STRONG_FIT_SCORE = 70;
 export const RECOMMENDED_CANDIDATE_LIMIT = 25;
 
 export const CANDIDATE_FILTERS = [
-  { id: "recommended", label: "Recommended" },
-  { id: "new", label: "New" },
-  { id: "all", label: "All" },
+  { id: "needs-decision", label: "Needs decision" },
+  { id: "pursued", label: "Pursued" },
   { id: "ignored", label: "Ignored" },
-  { id: "ingested", label: "Ingested" },
-  { id: "unavailable", label: "Unavailable" }
 ] as const;
 
 export type CandidateFilter = typeof CANDIDATE_FILTERS[number]["id"];
 
 export function candidateRank(status: string) {
-  const ranks: Record<string, number> = { new: 0, unavailable: 1, ignored: 2, ingested: 3 };
+  const ranks: Record<string, number> = { new: 0, unavailable: 1, ignored: 2, pursued: 3 };
   return ranks[status] ?? 3;
 }
 
@@ -30,16 +27,13 @@ export function isCurrentNewCandidate(candidate: CompanyPostingCandidate, latest
 }
 
 export function candidateMatchesFilter(candidate: CompanyPostingCandidate, filter: CandidateFilter, latestCheckAt: string) {
-  if (filter === "recommended") return isRecommendedCandidate(candidate, latestCheckAt);
-  if (filter === "new") return isCurrentNewCandidate(candidate, latestCheckAt);
-  if (filter === "all") return true;
+  if (filter === "needs-decision") return candidate.status === "new";
   return candidate.status === filter;
 }
 
 export function candidateEmptyMessage(filter: CandidateFilter, totalCount: number) {
   if (!totalCount) return "No posting candidates have been recorded.";
-  if (filter === "recommended") return "No recommended matches yet. Use New or All to review the full scan.";
-  if (filter === "new") return "No new candidates were found in the latest scan.";
+  if (filter === "needs-decision") return "No roles need a decision.";
   return "No posting candidates match this filter.";
 }
 

@@ -7,6 +7,7 @@ import re
 import ssl
 import subprocess
 import sys
+import unicodedata
 from datetime import datetime
 from pathlib import Path
 from urllib.error import HTTPError, URLError
@@ -54,6 +55,10 @@ GOOGLE_CAREERS_RESULTS_PATH = "/about/careers/applications/jobs/results"
 OPENAI_CAREERS_HOST = "openai.com"
 OPENAI_ASHBY_BOARD_URL = "https://jobs.ashbyhq.com/openai"
 AMAZON_JOBS_HOST = "amazon.jobs"
+TARGET_CAREERS_HOST = "corporate.target.com"
+TARGET_JOB_SEARCH_PATH = "/careers/job-search"
+TARGET_JOB_API_PATH = "/api/jobsearch"
+SHOPIFY_CAREERS_HOST = "www.shopify.com"
 AVATURE_HOST_MARKER = "avature.net"
 GREENHOUSE_BOARD_HOSTS = {"job-boards.greenhouse.io", "boards.greenhouse.io"}
 GREENHOUSE_TOKEN_PROBE_LIMIT = 6
@@ -68,6 +73,7 @@ JIBE_API_LIMIT = 10
 FIT_RECOMMENDATION_THRESHOLD = 45
 RECOMMENDED_CANDIDATE_LIMIT = 25
 CANDIDATE_DETAIL_VERIFY_LIMIT = 25
+CAREER_SEARCH_MODEL = "gpt-5.6-luna"
 SEARCH_ROLE_TERM_MIN_WEIGHT = 20
 SEARCH_SENIORITY_TERM_MIN_WEIGHT = 5
 SEARCH_EXPANSION_BASE_LIMIT = 6
@@ -238,6 +244,7 @@ def validate_tracking_status(value):
 
 def validate_candidate_status(value):
     status = storage.clean(value).lower() or "new"
+    status = schema.CANDIDATE_STATUS_ALIASES.get(status, status)
     if status not in schema.COMPANY_POSTING_CANDIDATE_STATUSES:
         raise ValueError(f"Unsupported company posting candidate status: {status}")
     return status
@@ -421,6 +428,78 @@ def company_domain(value):
     return host
 
 
+SHARED_JOB_BOARD_HOSTS = {
+    "boards.greenhouse.io": "greenhouse",
+    "job-boards.greenhouse.io": "greenhouse",
+    "jobs.ashbyhq.com": "ashby",
+    "jobs.lever.co": "lever",
+    "jobs.eu.lever.co": "lever",
+    "jobs.smartrecruiters.com": "smartrecruiters",
+}
+
+
+def compact_company_identity(value):
+    ascii_value = unicodedata.normalize("NFKD", storage.clean(value)).encode("ascii", "ignore").decode()
+    return re.sub(r"[^a-z0-9]+", "", ascii_value.lower())
+
+
+def shared_job_board_identity(value):
+    """Return the ATS family and employer tenant encoded in a shared job-board URL."""
+    parsed = urlparse(normalize_url(value))
+    family = SHARED_JOB_BOARD_HOSTS.get(parsed.netloc.lower().removeprefix("www."), "")
+    parts = [part for part in parsed.path.split("/") if part]
+    if not family or not parts:
+        return None
+    return family, parts[0].lower()
+
+
+def job_board_tenant_keys(value):
+    cleaned = storage.clean(value).lower()
+    keys = {compact_company_identity(cleaned)}
+    if "." in cleaned:
+        stem, suffix = cleaned.rsplit(".", 1)
+        if suffix in {"ai", "com", "io", "tech"}:
+            keys.add(compact_company_identity(stem))
+    return {key for key in keys if key}
+
+
+def shared_job_board_identities_match(left, right):
+    return bool(
+        left
+        and right
+        and left[0] == right[0]
+        and job_board_tenant_keys(left[1]) & job_board_tenant_keys(right[1])
+    )
+
+
+def company_matches_shared_job_board_identity(company, identity):
+    if not identity:
+        return False
+    for field in ["website", "careers_url"]:
+        known_identity = shared_job_board_identity(company.get(field, ""))
+        if shared_job_board_identities_match(identity, known_identity):
+            return True
+    tenant_keys = job_board_tenant_keys(identity[1])
+    names = [company.get("name", ""), *split_aliases(company.get("aliases", ""))]
+    return any(compact_company_identity(name) in tenant_keys for name in names if storage.clean(name))
+
+
+def company_shared_job_board_url_conflicts(company, value):
+    """Identify a definite mismatch between a company and a shared ATS tenant."""
+    identity = shared_job_board_identity(value)
+    if not identity:
+        return False
+    known_identities = [
+        known_identity
+        for field in ["website", "careers_url"]
+        if (known_identity := shared_job_board_identity(company.get(field, "")))
+    ]
+    return bool(
+        known_identities
+        and not any(shared_job_board_identities_match(identity, known) for known in known_identities)
+    )
+
+
 def matching_company_record(name="", profile_url="", website=""):
     wanted_name = normalized_key(name)
     wanted_profile = normalize_company_profile_url(profile_url)
@@ -445,6 +524,14 @@ def matching_company_record_from_url(value):
         return None
 
     rows = repository.read_companies()
+    shared_identity = shared_job_board_identity(value)
+    if shared_identity:
+        for company in rows:
+            if company_matches_shared_job_board_identity(company, shared_identity):
+                return company
+        # A shared ATS hostname identifies the vendor, not the employer.
+        return None
+
     for company in rows:
         for field in ["website", "careers_url"]:
             known_host = company_domain(company.get(field, ""))
@@ -1779,6 +1866,27 @@ def is_amazon_jobs_url(url):
     parsed = urlparse(url)
     host = parsed.netloc.lower().removeprefix("www.")
     return host == AMAZON_JOBS_HOST
+
+
+def is_target_careers_url(url):
+    parsed = urlparse(url)
+    return (
+        parsed.netloc.lower().removeprefix("www.") == TARGET_CAREERS_HOST
+        and parsed.path.rstrip("/") == TARGET_JOB_SEARCH_PATH
+    )
+
+
+def is_target_job_url(url):
+    parsed = urlparse(url)
+    return (
+        parsed.netloc.lower().removeprefix("www.") == TARGET_CAREERS_HOST
+        and bool(re.fullmatch(r"/jobs/w\d+/\d+/[^/]+/?", parsed.path, re.I))
+    )
+
+
+def target_job_api_url(careers_url):
+    parsed = urlparse(careers_url)
+    return urlunparse(parsed._replace(path=TARGET_JOB_API_PATH, query="", fragment=""))
 
 
 def is_avature_url(url):
@@ -3704,6 +3812,17 @@ def is_ashby_jobs_url(url):
     return parsed.netloc.lower() == "jobs.ashbyhq.com" and bool(parsed.path.strip("/"))
 
 
+def ashby_board_url_from_html(page_html):
+    matches = re.findall(
+        r"https://jobs\.ashbyhq\.com/([a-z0-9_-]+)(?:/(?:embed|[0-9a-f-]{16,}))?",
+        html.unescape(page_html or ""),
+        re.I,
+    )
+    if not matches:
+        return ""
+    return f"https://jobs.ashbyhq.com/{matches[0]}"
+
+
 def ashby_board_url(careers_url):
     if is_openai_careers_url(careers_url):
         return OPENAI_ASHBY_BOARD_URL
@@ -3713,6 +3832,86 @@ def ashby_board_url(careers_url):
         if path_parts:
             return urlunparse(parsed._replace(path=f"/{path_parts[0]}", query="", fragment=""))
     return ""
+
+
+def is_lever_jobs_url(url):
+    parsed = urlparse(url)
+    return parsed.netloc.lower() in {"jobs.lever.co", "jobs.eu.lever.co"} and bool(parsed.path.strip("/"))
+
+
+def lever_board_url(careers_url):
+    if not is_lever_jobs_url(careers_url):
+        return ""
+    parsed = urlparse(careers_url)
+    board_token = parsed.path.strip("/").split("/", 1)[0]
+    return urlunparse(parsed._replace(path=f"/{board_token}", query="", fragment=""))
+
+
+def lever_postings_api_url(careers_url):
+    board_url = lever_board_url(careers_url)
+    if not board_url:
+        return ""
+    parsed = urlparse(board_url)
+    api_host = "api.eu.lever.co" if parsed.netloc.lower() == "jobs.eu.lever.co" else "api.lever.co"
+    board_token = parsed.path.strip("/")
+    return urlunparse(parsed._replace(netloc=api_host, path=f"/v0/postings/{board_token}", query="mode=json"))
+
+
+def extract_lever_candidates(payload):
+    try:
+        postings = json.loads(payload or "[]")
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(postings, list):
+        return []
+    resume_text = fit_context_text()
+    candidates = []
+    for posting in postings:
+        if not isinstance(posting, dict):
+            continue
+        title = storage.clean(str(posting.get("text", "") or ""))
+        url = normalize_url(posting.get("hostedUrl", ""))
+        categories = posting.get("categories") or {}
+        if not isinstance(categories, dict):
+            categories = {}
+        location = storage.clean(str(categories.get("location", "") or ""))
+        workplace_type = storage.clean(str(posting.get("workplaceType", "") or ""))
+        category = ", ".join(
+            dict.fromkeys(
+                storage.clean(str(categories.get(field, "") or ""))
+                for field in ["team", "department", "commitment"]
+                if storage.clean(str(categories.get(field, "") or ""))
+            )
+        )
+        description = " ".join(
+            storage.clean(str(posting.get(field, "") or ""))
+            for field in ["descriptionPlain", "additionalPlain"]
+            if storage.clean(str(posting.get(field, "") or ""))
+        )
+        candidate = {
+            "title": title,
+            "url": url,
+            "location": location,
+            "work_mode": workplace_type,
+            "category": category,
+            "description": description,
+            "source_job_id": storage.clean(str(posting.get("id", "") or "")),
+        }
+        if not title or not url or not candidate_matches_resume_role(candidate, resume_text):
+            continue
+        candidates.append(candidate)
+    return candidates
+
+
+def fetch_lever_candidates(careers_url, fetch, config=None):
+    config = config or {}
+    api_url = storage.clean(str(config.get("api_url", "") or "")) or lever_postings_api_url(careers_url)
+    if not api_url:
+        return [], 0, ["Lever config is missing api_url"]
+    fetched = fetch_with_optional_headers(fetch, api_url, headers={"Accept": "application/json"})
+    if fetched.get("error") or not fetched.get("html"):
+        return [], 0, [f"{api_url}: {fetched.get('error') or 'empty response'}"]
+    return extract_lever_candidates(fetched.get("html", "")), 1, []
 
 
 def extract_ashby_app_data(page_html):
@@ -4009,6 +4208,192 @@ def fetch_phenom_candidates(careers_url, fetch, config=None):
         fetch,
         lambda page_html, final_url: extract_phenom_candidates(page_html, final_url),
     )
+
+
+def cdpr_jobs_data(page_html):
+    match = re.search(r"window\.cdpData\.jobsData\s*=\s*", page_html or "")
+    if not match:
+        return []
+    try:
+        value, _ = json.JSONDecoder().raw_decode((page_html or "")[match.end() :].lstrip())
+    except json.JSONDecodeError:
+        return []
+    return value if isinstance(value, list) else []
+
+
+def is_cdpr_jobs_page(page_html):
+    return bool(cdpr_jobs_data(page_html))
+
+
+def extract_cdpr_jobs_candidates(page_html):
+    resume_text = fit_context_text()
+    candidates = []
+    for job in cdpr_jobs_data(page_html):
+        if not isinstance(job, dict):
+            continue
+        title = storage.clean(str(job.get("name", "") or ""))
+        url = normalize_url(job.get("applyUrl", ""))
+        location = job.get("location") or {}
+        category = job.get("category") or {}
+        project = job.get("project") or {}
+        candidate = {
+            "title": title,
+            "url": url,
+            "location": storage.clean(str(location.get("name", "") if isinstance(location, dict) else location)),
+            "work_mode": "Remote" if job.get("remote") else "On-site",
+            "category": ", ".join(
+                dict.fromkeys(
+                    storage.clean(str(value.get("name", "") if isinstance(value, dict) else value))
+                    for value in [category, project]
+                    if storage.clean(str(value.get("name", "") if isinstance(value, dict) else value))
+                )
+            ),
+            "source_job_id": storage.clean(str(job.get("id", "") or "")),
+        }
+        if not title or not url or not candidate_matches_resume_role(candidate, resume_text):
+            continue
+        candidates.append(candidate)
+    return candidates
+
+
+def fetch_cdpr_embedded_jobs_candidates(careers_url, fetch, config=None):
+    del config
+    fetched = fetch(careers_url)
+    if fetched.get("error") or not fetched.get("html"):
+        return [], 0, [f"{careers_url}: {fetched.get('error') or 'empty response'}"]
+    return extract_cdpr_jobs_candidates(fetched.get("html", "")), 1, []
+
+
+def react_router_enqueued_payloads(page_html):
+    payloads = []
+    pattern = re.compile(
+        r'window\.__reactRouterContext\.streamController\.enqueue\(("(?:\\.|[^"\\])*")\)',
+        re.S,
+    )
+    for match in pattern.finditer(page_html or ""):
+        try:
+            flattened = json.loads(json.loads(match.group(1)))
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if not isinstance(flattened, list):
+            continue
+        memo = {}
+
+        def hydrate(index):
+            if not isinstance(index, int) or index < 0 or index >= len(flattened):
+                return None
+            if index in memo:
+                return memo[index]
+            value = flattened[index]
+            if isinstance(value, list):
+                hydrated = []
+                memo[index] = hydrated
+                hydrated.extend(hydrate(item) for item in value)
+                return hydrated
+            if isinstance(value, dict):
+                hydrated = {}
+                memo[index] = hydrated
+                for key_ref, value_ref in value.items():
+                    if not isinstance(key_ref, str) or not re.fullmatch(r"_\d+", key_ref):
+                        continue
+                    key = hydrate(int(key_ref[1:]))
+                    if key is not None:
+                        hydrated[str(key)] = hydrate(value_ref)
+                return hydrated
+            memo[index] = value
+            return value
+
+        payload = hydrate(0)
+        if isinstance(payload, dict):
+            payloads.append(payload)
+    return payloads
+
+
+def shopify_job_rows(page_html):
+    for payload in react_router_enqueued_payloads(page_html):
+        loader_data = payload.get("loaderData") or {}
+        if not isinstance(loader_data, dict):
+            continue
+        for route_data in loader_data.values():
+            if not isinstance(route_data, dict):
+                continue
+            rows = route_data.get("jobPostingsWithJobs")
+            if isinstance(rows, list):
+                return [row for row in rows if isinstance(row, dict)]
+    return []
+
+
+def is_shopify_careers_url(url):
+    parsed = urlparse(url)
+    return parsed.netloc.lower() == SHOPIFY_CAREERS_HOST and parsed.path.rstrip("/") == "/careers"
+
+
+def shopify_job_url(careers_url, posting):
+    title_slug = re.sub(r"[^a-z0-9]+", "-", storage.clean(posting.get("title", "")).lower()).strip("-")
+    posting_id = storage.clean(str(posting.get("id", "") or ""))
+    parsed = urlparse(careers_url)
+    return normalize_url(
+        urlunparse(parsed._replace(path=f"/careers/{title_slug}_{posting_id}", query="", fragment=""))
+    )
+
+
+def extract_shopify_candidates(page_html, careers_url):
+    resume_text = fit_context_text()
+    candidates = []
+    for row in shopify_job_rows(page_html):
+        posting = row.get("jobPosting") if isinstance(row.get("jobPosting"), dict) else {}
+        job = row.get("job") if isinstance(row.get("job"), dict) else {}
+        title = storage.clean(str(posting.get("title", "") or ""))
+        if (
+            not title
+            or storage.clean(posting.get("status", "")).lower() != "published"
+            or posting.get("isListed") is False
+            or storage.clean(job.get("status", "")).lower() not in {"", "open"}
+        ):
+            continue
+        custom_fields = job.get("customFields") if isinstance(job.get("customFields"), list) else []
+        category = ", ".join(
+            dict.fromkeys(
+                storage.clean(str(value or ""))
+                for value in [
+                    posting.get("teamName"),
+                    *[
+                        field.get("valueLabel") or field.get("value")
+                        for field in custom_fields
+                        if isinstance(field, dict)
+                        and storage.clean(field.get("title", "")).lower() in {"discipline", "subdiscipline", "track"}
+                    ],
+                ]
+                if storage.clean(str(value or ""))
+            )
+        )
+        candidate = {
+            "title": title,
+            "url": shopify_job_url(careers_url, posting),
+            "location": storage.clean(
+                str(posting.get("locationExternalName", "") or posting.get("locationName", "") or "")
+            ),
+            "work_mode": storage.clean(str(posting.get("workplaceType", "") or "")),
+            "category": category,
+            "source_job_id": storage.clean(str(posting.get("id", "") or "")),
+            "search_text": " ".join(
+                storage.clean(str(value or ""))
+                for value in [job.get("title"), category, posting.get("publishedDate")]
+                if storage.clean(str(value or ""))
+            ),
+        }
+        if candidate_matches_resume_role(candidate, resume_text):
+            candidates.append(candidate)
+    return candidates
+
+
+def fetch_shopify_embedded_jobs_candidates(careers_url, fetch, config=None):
+    del config
+    fetched = fetch(careers_url)
+    if fetched.get("error") or not fetched.get("html"):
+        return [], 0, [f"{careers_url}: {fetched.get('error') or 'empty response'}"]
+    final_url = fetched.get("final_url") or careers_url
+    return extract_shopify_candidates(fetched.get("html", ""), final_url), 1, []
 
 
 def embedded_json_payloads(page_html):
@@ -4707,9 +5092,144 @@ def fetch_eightfold_smartapply_candidates(careers_url, fetch, config=None):
     )
 
 
-def fetch_avature_waf_blocked_candidates(careers_url, fetch, config=None):
-    del fetch, config
-    return [], 0, [avature_blocked_message(careers_url)]
+def blocked_career_message(careers_url, config=None):
+    reason = storage.clean((config or {}).get("reason", ""))
+    if reason == "aws_waf_javascript_challenge" or is_avature_url(careers_url):
+        return avature_blocked_message(careers_url)
+    return (
+        f"{careers_url}: the official careers site returned a browser verification challenge. "
+        "The direct non-browser careers checker cannot access its posting search."
+    )
+
+
+def fetch_official_web_search_candidates(careers_url, fetch, config=None):
+    del fetch
+    config = config or {}
+    from . import agent, api_usage
+
+    search_terms = resume_search_terms("")
+    if not search_terms:
+        return [], 0, [blocked_career_message(careers_url, config)]
+    schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "jobs": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "title": {"type": "string"},
+                        "url": {"type": "string"},
+                        "location": {"type": "string"},
+                        "work_mode": {"type": "string"},
+                        "source_job_id": {"type": "string"},
+                        "freshness_evidence": {"type": "string"},
+                    },
+                    "required": [
+                        "title",
+                        "url",
+                        "location",
+                        "work_mode",
+                        "source_job_id",
+                        "freshness_evidence",
+                    ],
+                },
+            }
+        },
+        "required": ["jobs"],
+    }
+    prompt = (
+        "Find current open jobs for the employer represented by this official careers site: "
+        f"{careers_url}. Match any of these role families: {', '.join(search_terms)}. Search current public web "
+        "evidence, including reputable job indexes when the official careers site is blocked, but return only direct "
+        f"official job-detail URLs on {urlparse(careers_url).netloc}. The URL must be a specific job detail, not a "
+        "search page. A role is current only when it is linked from the current official search-results page, or an "
+        "authoritative source shows it was posted within the last 180 days. A detail page that merely still resolves "
+        "or shows an Apply button is not enough. Exclude roles older than 180 days, expired, closed, cached-only, and "
+        "third-party application URLs. Return no more than 25 jobs. Leave unknown location or work mode blank. "
+        "source_job_id must be the job or requisition identifier from the official URL. freshness_evidence must briefly "
+        "state the current official listing or recent posted date used; return no job without freshness evidence."
+    )
+    payload = {
+        "model": CAREER_SEARCH_MODEL,
+        "input": prompt,
+        "tools": [{"type": "web_search", "search_context_size": "low"}],
+        "tool_choice": "required",
+        "max_tool_calls": 5,
+        "include": ["web_search_call.action.sources"],
+        "text": {
+            "format": {
+                "type": "json_schema",
+                "name": "hunter_official_career_search",
+                "strict": True,
+                "schema": schema,
+            }
+        },
+        "max_output_tokens": 3_000,
+        "reasoning": {"effort": "low"},
+        "store": False,
+        "metadata": {"feature": "career-search", "source": "official-site-waf-fallback"},
+    }
+    try:
+        openai_config = agent._settings()
+        response = agent._request_json(
+            f"{openai_config['api_base']}/responses",
+            openai_config["token"],
+            payload,
+        )
+        api_usage.log_usage(
+            "career-search",
+            response.get("model") or CAREER_SEARCH_MODEL,
+            response,
+            operation="official-site-waf-fallback",
+        )
+        result = json.loads(agent._output_text(response))
+    except (ValueError, RuntimeError, URLError, TypeError, json.JSONDecodeError) as exc:
+        return [], 0, [f"{blocked_career_message(careers_url, config)} OpenAI fallback unavailable: {exc}"]
+
+    expected_host = urlparse(careers_url).netloc.lower()
+    candidates = []
+    seen = set()
+    for item in result.get("jobs", []) if isinstance(result, dict) else []:
+        if not isinstance(item, dict):
+            continue
+        url = normalize_url(item.get("url", ""))
+        parsed = urlparse(url)
+        query = dict(parse_qsl(parsed.query, keep_blank_values=False))
+        source_job_id = storage.clean(
+            str(item.get("source_job_id", "") or query.get("jobId", "") or candidate_source_job_id(url))
+        )
+        if (
+            not storage.clean(item.get("title", ""))
+            or parsed.netloc.lower() != expected_host
+            or not JOB_URL_PATTERN.search(f"{parsed.path}?{parsed.query}")
+            or not source_job_id
+            or not storage.clean(item.get("freshness_evidence", ""))
+            or url in seen
+        ):
+            continue
+        seen.add(url)
+        candidates.append(
+            {
+                "title": storage.clean(item.get("title", "")),
+                "url": url,
+                "location": storage.clean(item.get("location", "")),
+                "work_mode": storage.clean(item.get("work_mode", "")),
+                "source_job_id": source_job_id,
+                "matched_queries": ", ".join(search_terms),
+            }
+        )
+    if not candidates:
+        return [], 0, [f"{blocked_career_message(careers_url, config)} OpenAI fallback found no verified current jobs."]
+    return candidates, 1, []
+
+
+# Keep previously saved Avature sources executable while they are migrated by
+# current_company_career_source on their next check.
+fetch_avature_waf_blocked_candidates = fetch_official_web_search_candidates
+fetch_avature_web_search_candidates = fetch_official_web_search_candidates
 
 
 def fetch_next_static_jobs_candidates(careers_url, fetch, config=None):
@@ -4856,6 +5376,111 @@ def fetch_jibe_candidates_from_source(careers_url, fetch, config=None):
     return extracted, searched, errors
 
 
+def target_candidate_location(document):
+    job_address = storage.clean(str(document.get("jobaddress", "") or ""))
+    if job_address:
+        return job_address
+    return ", ".join(
+        dict.fromkeys(
+            storage.clean(str(value or ""))
+            for value in [
+                document.get("city"),
+                document.get("stateabbreviated") or document.get("state"),
+                document.get("country"),
+            ]
+            if storage.clean(str(value or ""))
+        )
+    )
+
+
+def extract_target_jobsearch_candidates(payload, careers_url):
+    try:
+        data = json.loads(payload or "{}")
+    except json.JSONDecodeError:
+        return []
+    results = data.get("results") or []
+    if not isinstance(results, list):
+        return []
+
+    candidates = []
+    for result in results:
+        document = result.get("document") if isinstance(result, dict) else None
+        if not isinstance(document, dict):
+            continue
+        title = storage.clean(str(document.get("title", "") or ""))
+        url = normalize_url(urljoin(careers_url, storage.clean(str(document.get("url", "") or ""))))
+        if not title or not is_target_job_url(url):
+            continue
+        remote_type = storage.clean(str(document.get("remotetype", "") or ""))
+        categories = document.get("jobcategories") or []
+        if not isinstance(categories, list):
+            categories = [categories]
+        category = ", ".join(
+            dict.fromkeys(
+                storage.clean(str(value or ""))
+                for value in [document.get("jobarea"), document.get("jobfamily"), *categories]
+                if storage.clean(str(value or ""))
+            )
+        )
+        skills = document.get("jobskills") or []
+        if not isinstance(skills, list):
+            skills = [skills]
+        description = " ".join(
+            value
+            for value in [category, " ".join(storage.clean(str(skill or "")) for skill in skills)]
+            if value
+        )
+        candidates.append(
+            {
+                "title": title,
+                "url": url,
+                "location": target_candidate_location(document),
+                "work_mode": remote_type,
+                "category": category,
+                "description": description,
+                "source_job_id": storage.clean(
+                    str(document.get("requisitionid", "") or document.get("postingid", "") or "")
+                ),
+            }
+        )
+    return candidates
+
+
+def fetch_target_jobsearch_candidates(careers_url, fetch, config=None):
+    config = config or {}
+    api_url = storage.clean(str(config.get("api_url", "") or "")) or target_job_api_url(careers_url)
+    queries = [
+        storage.clean(str(query))
+        for query in [*(config.get("queries") or []), *resume_search_terms(fit_context_text())]
+        if storage.clean(str(query))
+    ]
+    queries = list(dict.fromkeys(queries))[:CAREERS_SEARCH_MAX_TERMS]
+    if not queries:
+        queries = ["technical program manager", "program manager"]
+
+    extracted = []
+    searched = 0
+    errors = []
+    resume_text = fit_context_text()
+    headers = {
+        "Accept": "application/json, text/plain, */*",
+        "Content-Type": "application/x-www-form-urlencoded",
+    }
+    for query in queries:
+        request_data = urlencode({"currentPage": 1, "q": query, "culture": "en-us"}).encode("utf-8")
+        fetched = fetch_with_options(fetch, api_url, headers=headers, method="POST", data=request_data)
+        if fetched.get("error") or not fetched.get("html"):
+            errors.append(f"{api_url}: {fetched.get('error') or 'empty response'}")
+            continue
+        searched += 1
+        for candidate in extract_target_jobsearch_candidates(fetched.get("html", ""), careers_url):
+            if not candidate_matches_resume_role(candidate, resume_text):
+                continue
+            candidate["matched_queries"] = query
+            extracted.append(candidate)
+    return extracted, searched, errors
+
+
 def fetch_generic_html_candidates(careers_url, fetch, config=None):
     del config
     fetched = fetch(careers_url)
@@ -4886,24 +5511,40 @@ CAREER_PLATFORM_EXECUTORS = {
     "eightfold_pcs": fetch_eightfold_pcs_candidates,
     "eightfold_smartapply": fetch_eightfold_smartapply_candidates,
     "avature_waf_blocked": fetch_avature_waf_blocked_candidates,
+    "avature_web_search": fetch_avature_web_search_candidates,
+    "official_web_search": fetch_official_web_search_candidates,
     "next_static_jobs": fetch_next_static_jobs_candidates,
     "greenhouse_board": fetch_greenhouse_board_candidates,
     "custom_workday": fetch_custom_workday_api_candidates,
     "workday_cxs": fetch_workday_cxs_candidates,
     "servicenow_portal": fetch_servicenow_portal_candidates,
     "ashby": fetch_ashby_candidates,
+    "lever": fetch_lever_candidates,
     "icims_jibe": fetch_jibe_candidates_from_source,
     "phenom": fetch_phenom_candidates,
+    "cdpr_embedded_jobs": fetch_cdpr_embedded_jobs_candidates,
+    "shopify_embedded_jobs": fetch_shopify_embedded_jobs_candidates,
     "embedded_json_jobs": fetch_embedded_json_jobs_candidates,
     "endpoint_json_jobs": fetch_endpoint_json_jobs_candidates,
     "static_json_careers": fetch_static_json_careers_candidates,
     "algolia_jobs": fetch_algolia_jobs_candidates,
+    "target_jobsearch": fetch_target_jobsearch_candidates,
     "generic_html": fetch_generic_html_candidates,
 }
 
 
 def discover_company_career_source(company, fetch):
     careers_url = storage.clean(company.get("careers_url", ""))
+    if is_target_careers_url(careers_url):
+        return save_company_career_source(
+            company.get("id", ""),
+            careers_url,
+            "target_jobsearch",
+            {"api_url": target_job_api_url(careers_url)},
+            ["Recognized Target's structured corporate careers search API."],
+            status="discovered",
+        )
+
     if is_google_careers_results_url(careers_url):
         return save_company_career_source(
             company.get("id", ""),
@@ -4929,6 +5570,17 @@ def discover_company_career_source(company, fetch):
             "amazon_jobs",
             config,
             ["Recognized Amazon Jobs search platform."],
+            status="discovered",
+        )
+
+    lever_url = lever_board_url(careers_url)
+    if lever_url:
+        return save_company_career_source(
+            company.get("id", ""),
+            careers_url,
+            "lever",
+            {"board_url": lever_url, "api_url": lever_postings_api_url(lever_url)},
+            ["Recognized Lever careers platform and public postings API."],
             status="discovered",
         )
 
@@ -4959,15 +5611,45 @@ def discover_company_career_source(company, fetch):
         return save_company_career_source(
             company.get("id", ""),
             careers_url,
-            "avature_waf_blocked",
-            {"reason": "aws_waf_javascript_challenge"},
+            "avature_web_search",
+            {
+                "reason": "aws_waf_javascript_challenge",
+                "fallback": "openai_web_search",
+            },
             [
                 "Detected Avature careers portal.",
                 "Avature returned an AWS WAF JavaScript challenge to the non-browser checker.",
-                "No public sitemap or HTML job list was available from this fetch path.",
+                "OpenAI web search is used as a fallback; only direct official Avature job-detail URLs are accepted.",
             ],
-            status="blocked",
-            notes="Requires browser-backed checking or another public feed.",
+            status="discovered",
+            notes="Uses OpenAI web search because direct Avature fetching is WAF-blocked.",
+        )
+
+    if is_shopify_careers_url(final_url) and shopify_job_rows(fetched.get("html", "")):
+        return save_company_career_source(
+            company.get("id", ""),
+            careers_url,
+            "shopify_embedded_jobs",
+            {},
+            ["Detected Shopify's serialized current careers listings in the official careers page."],
+            status="verified",
+        )
+
+    if is_cloudflare_challenge(fetched):
+        return save_company_career_source(
+            company.get("id", ""),
+            careers_url,
+            "official_web_search",
+            {
+                "reason": "cloudflare_browser_verification_challenge",
+                "fallback": "openai_web_search",
+            },
+            [
+                "The official careers site returned a Cloudflare browser verification challenge.",
+                "OpenAI web search is used as a fallback; only direct job-detail URLs on the official host are accepted.",
+            ],
+            status="discovered",
+            notes="Uses OpenAI web search because direct careers-site fetching is Cloudflare-blocked.",
         )
 
     if fetched.get("error") or not fetched.get("html"):
@@ -4993,8 +5675,9 @@ def discover_company_career_source(company, fetch):
         if source:
             return source
 
-    if is_ashby_jobs_url(final_url) or extract_ashby_app_data(fetched.get("html", "")):
-        board_url = ashby_board_url(final_url) or final_url
+    branded_ashby_url = ashby_board_url_from_html(fetched.get("html", ""))
+    if is_ashby_jobs_url(final_url) or extract_ashby_app_data(fetched.get("html", "")) or branded_ashby_url:
+        board_url = ashby_board_url(final_url) or branded_ashby_url or final_url
         return save_company_career_source(
             company.get("id", ""),
             careers_url,
@@ -5042,6 +5725,16 @@ def discover_company_career_source(company, fetch):
             "phenom",
             {"search_param": "keywords", "page_size": CAREERS_SEARCH_RESULT_LIMIT},
             ["Detected Phenom People search page with eagerLoadRefineSearch job data."],
+            status="verified",
+        )
+
+    if is_cdpr_jobs_page(fetched.get("html", "")):
+        return save_company_career_source(
+            company.get("id", ""),
+            careers_url,
+            "cdpr_embedded_jobs",
+            {},
+            ["Detected CD PROJEKT RED's embedded cdpData.jobsData job feed."],
             status="verified",
         )
 
@@ -5096,9 +5789,14 @@ def current_company_career_source(company, fetch):
         and normalize_url(source.get("source_url", "")) == careers_url
         and source.get("platform_type", "") in CAREER_PLATFORM_EXECUTORS
     ):
-        if source.get("platform_type", "") == "generic_html":
+        if source.get("platform_type", "") in {
+            "generic_html",
+            "avature_waf_blocked",
+            "avature_web_search",
+            "official_web_search",
+        }:
             discovered = discover_company_career_source(company, fetch)
-            if discovered.get("platform_type") != "generic_html":
+            if discovered.get("platform_type") != source.get("platform_type", ""):
                 return discovered
         return source
     return discover_company_career_source(company, fetch)
@@ -5225,7 +5923,7 @@ def check_company_postings(company_id, fetcher=None):
             existing["last_seen_at"] = checked_at
             existing["scan_state"] = "current"
             if candidate_is_tracked(item, tracked):
-                existing["status"] = "ingested"
+                existing["status"] = "pursued"
             elif existing.get("status") in {"new", "unavailable"}:
                 existing["status"] = "new"
                 existing.update(score_candidate_fit({**existing, **item}, resume_text, checked_at))
@@ -5275,13 +5973,17 @@ def check_company_postings(company_id, fetcher=None):
     for candidate in company_candidates:
         if candidate.get("status", "new") != "new" or candidate_seen_in_scan(candidate, seen_urls, seen_identity_keys):
             continue
+        invalid_for_source = (
+            source.get("platform_type", "") == "target_jobsearch"
+            and not is_target_job_url(candidate.get("url", ""))
+        )
         is_navigation_title = normalized_key(candidate.get("title", "")) in {
             "career",
             "careers",
             "job alert",
             "create a job alert",
         }
-        if not is_navigation_title and looks_like_job_link(
+        if not invalid_for_source and not is_navigation_title and looks_like_job_link(
             candidate.get("title", ""), candidate.get("url", ""), careers_url
         ):
             continue
@@ -5456,7 +6158,7 @@ def update_candidate_statuses(candidate_ids, status):
     return {"candidates": updated, "count": len(updated)}
 
 
-def ingest_candidate(candidate_id):
+def pursue_candidate(candidate_id):
     candidate = next(
         (row for row in repository.read_company_posting_candidates() if row.get("id", "").upper() == storage.clean(candidate_id).upper()),
         None,
@@ -5492,8 +6194,13 @@ def ingest_candidate(candidate_id):
     )
     if app:
         app = associate_application(company.get("id", ""), app.get("id", "")).get("posting")
-    candidate = update_candidate_status(candidate.get("id", ""), "ingested")
+    candidate = update_candidate_status(candidate.get("id", ""), "pursued")
     return {"candidate": candidate, "posting": app, "stdout": result.stdout.strip()}
+
+
+def ingest_candidate(candidate_id):
+    """Compatibility alias for callers created before Pursue replaced Ingest."""
+    return pursue_candidate(candidate_id)
 
 
 def build_company_export_payload(company_id=""):

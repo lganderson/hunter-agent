@@ -74,9 +74,11 @@ const seniorityImpactOptions: ImpactOption[] = [
 ];
 
 export function SettingsPage({ refresh }: { refresh: () => Promise<AppState> }) {
-  const [settings, setSettings] = useState<SettingsStatus>({ provider: "openai", model: "", api_base: "", search_goals: "", fit_signals: emptyFitSignals, token_configured: false, resume: emptyResume, api_usage: emptyApiUsage });
+  const [settings, setSettings] = useState<SettingsStatus>({ provider: "openai", model: "", api_base: "", search_goals: "", fit_signals: emptyFitSignals, token_configured: false, adzuna_configured: false, resume: emptyResume, api_usage: emptyApiUsage });
   const [workflow, setWorkflow] = useState<Workflow>(emptyWorkflow);
   const [token, setToken] = useState("");
+  const [adzunaAppId, setAdzunaAppId] = useState("");
+  const [adzunaAppKey, setAdzunaAppKey] = useState("");
   const [resumeFile, setResumeFile] = useState<File | null>(null);
   const [resumeText, setResumeText] = useState<ResumeText | null>(null);
   const [status, setStatus] = useState("");
@@ -102,10 +104,14 @@ export function SettingsPage({ refresh }: { refresh: () => Promise<AppState> }) 
         api_base: settings.api_base,
         search_goals: settings.search_goals,
         fit_signals: settings.fit_signals,
-        api_token: token
+        api_token: token,
+        adzuna_app_id: adzunaAppId,
+        adzuna_app_key: adzunaAppKey
       });
       setSettings(next);
       setToken("");
+      setAdzunaAppId("");
+      setAdzunaAppKey("");
       setStatus(next.token_configured ? "Settings saved locally. Token is configured." : "Settings saved locally. No token is configured.");
     } catch (error) {
       setStatus(`Could not save settings. Run make serve-app. ${error instanceof Error ? error.message : String(error)}`);
@@ -206,6 +212,17 @@ export function SettingsPage({ refresh }: { refresh: () => Promise<AppState> }) 
               <span>API Token</span>
               <input value={token} onChange={event => setToken(event.target.value)} type="password" autoComplete="off" placeholder="Stored only in data/settings.local.json" />
             </label>
+            <label className="settings-field">
+              <span>Adzuna App ID</span>
+              <input value={adzunaAppId} onChange={event => setAdzunaAppId(event.target.value)} type="password" autoComplete="off" placeholder={settings.adzuna_configured ? "Configured — leave blank to keep" : "Register at developer.adzuna.com"} />
+            </label>
+            <label className="settings-field">
+              <span>Adzuna App Key</span>
+              <input value={adzunaAppKey} onChange={event => setAdzunaAppKey(event.target.value)} type="password" autoComplete="off" placeholder={settings.adzuna_configured ? "Configured — leave blank to keep" : "Required for Adzuna results"} />
+            </label>
+            <p className="settings-helper full">
+              Adzuna is optional. Its standard developer access has limited request allowances and requires source attribution. <a href="https://developer.adzuna.com/signup" target="_blank" rel="noreferrer">Register for credentials</a>.
+            </p>
           </div>
           <div className="detail-actions">
             <button className="button primary" type="button" onClick={save}><FilterIcon size={16} /> Save Settings</button>

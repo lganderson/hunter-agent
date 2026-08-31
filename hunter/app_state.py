@@ -73,14 +73,14 @@ def enrich_companies(company_rows, discovery_candidates, company_candidates=None
             continue
         summary = counts.setdefault(
             company_id,
-            {"roles": 0, "recommended": 0, "ignored": 0, "ingested": 0},
+            {"roles": 0, "recommended": 0, "ignored": 0, "pursued": 0},
         )
         summary["roles"] += 1
         status = candidate.get("status", "")
         if status == "ignored":
             summary["ignored"] += 1
-        elif status == "ingested":
-            summary["ingested"] += 1
+        elif status == "pursued":
+            summary["pursued"] += 1
         try:
             fit_score = int(candidate.get("fit_score", "") or 0)
         except (TypeError, ValueError):
@@ -98,25 +98,25 @@ def enrich_companies(company_rows, discovery_candidates, company_candidates=None
             continue
         summary = counts.setdefault(
             company_id,
-            {"roles": 0, "recommended": 0, "ignored": 0, "ingested": 0},
+            {"roles": 0, "recommended": 0, "ignored": 0, "pursued": 0},
         )
         status = candidate.get("status", "")
         if status == "ignored":
             summary["ignored"] += 1
-        elif status == "ingested":
-            summary["ingested"] += 1
+        elif status == "pursued":
+            summary["pursued"] += 1
 
     enriched = []
     for company in company_rows:
         row = dict(company)
         summary = counts.get(
             row.get("id", ""),
-            {"roles": 0, "recommended": 0, "ignored": 0, "ingested": 0},
+            {"roles": 0, "recommended": 0, "ignored": 0, "pursued": 0},
         )
         row["discovery_role_count"] = summary["roles"]
         row["recommended_discovery_role_count"] = summary["recommended"]
         row["ignored_role_count"] = summary["ignored"]
-        row["ingested_role_count"] = summary["ingested"]
+        row["pursued_role_count"] = summary["pursued"]
         row["tracking_recommendation"] = ""
         row["decision_recommendation"] = ""
         if row.get("tracking_status", "") == "discovered":
@@ -137,7 +137,7 @@ def enrich_companies(company_rows, discovery_candidates, company_candidates=None
         if (
             row.get("interest_status", "").lower() == "neutral"
             and summary["ignored"] >= 2
-            and summary["ingested"] == 0
+            and summary["pursued"] == 0
         ):
             row["decision_recommendation"] = (
                 f"You ignored {summary['ignored']} roles from this company and have not kept any. "
@@ -171,6 +171,6 @@ def build_payload():
         "company_career_scans": repository.read_company_career_scans(limit=200),
         "discovery_searches": discovery_store.list_searches(),
         "discovery_candidates": discovery_candidates,
-        "discovery_preference_suggestions": discovery_store.preference_suggestions(),
+        "discovery_preference_suggestions": discovery_store.preference_suggestions(discovery_candidates),
         "dismissed_suggestion_ids": sorted(suggestions.dismissed_ids()),
     }

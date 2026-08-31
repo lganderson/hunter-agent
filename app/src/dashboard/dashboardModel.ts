@@ -51,12 +51,12 @@ function attentionFor(application: Application, referenceDate: string): Attentio
     reasons.push("High priority");
     score += 3;
   }
-  if (normalize(application.stage).toLowerCase() === "posting-review") {
-    reasons.push("Needs review");
+  if (normalize(application.stage).toLowerCase() === "considering") {
+    reasons.push("Considering");
     score += 2;
   }
   const age = daysBetween(application.date_applied, referenceDate);
-  if (normalize(application.stage).toLowerCase() === "application-submitted" && age !== null && age >= 7) {
+  if (normalize(application.stage).toLowerCase() === "applied" && age !== null && age >= 7) {
     reasons.push(`Submitted ${age}d ago`);
     score += 1;
   }

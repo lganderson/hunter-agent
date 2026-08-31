@@ -1,13 +1,15 @@
-import { useEffect, useMemo, useState } from "react";
-import { useNavigate, useSearchParams } from "react-router-dom";
+import { useMemo } from "react";
+import { useNavigate } from "react-router-dom";
 import { FilterIcon, PlusIcon, SearchIcon } from "../components/Icons";
 import { Priority, SortableHeader, TagList } from "../components/Primitives";
 import { DATA_QUALITY_TAGS, dueLabel, normalize, tagList, titleCase } from "../core/format";
 import { isWithinPastDays } from "../core/date";
 import { compareNumber, compareText, nextSortState, type SortDirection, type SortState } from "../core/tableSort";
 import type { AppState, Application } from "../core/types";
+import { selectionFromParam, selectionParamValue, sortFromParams, usePersistentViewParams } from "../core/viewState";
 
 type PostingSortKey = "posting" | "stage" | "company" | "tags" | "priority" | "next_action";
+const POSTING_SORT_KEYS: PostingSortKey[] = ["posting", "stage", "company", "tags", "priority", "next_action"];
 
 function unique(applications: Application[], field: keyof Application) {
   return [...new Set(applications.map(app => String(app[field] || "").trim()).filter(Boolean))].sort((a, b) => a.localeCompare(b));
@@ -15,8 +17,8 @@ function unique(applications: Application[], field: keyof Application) {
 
 export function PostingsPage({ data }: { data: AppState }) {
   const navigate = useNavigate();
-  const [searchParams, setSearchParams] = useSearchParams();
-  const [search, setSearch] = useState("");
+  const { params: viewParams, updateParams: updateViewParams, clearParams: clearViewParams } = usePersistentViewParams("postings");
+  const search = viewParams.get("q") || "";
   const stageValues = useMemo(() => orderedStages(data), [data]);
   const defaultStages = useMemo(() => stageValues.filter(stage => stage !== "closed"), [stageValues]);
   const outcomeValues = useMemo(() => unique(data.applications, "outcome"), [data.applications]);
@@ -24,34 +26,16 @@ export function PostingsPage({ data }: { data: AppState }) {
   const priorityValues = useMemo(() => unique(data.applications, "priority"), [data.applications]);
   const companyValues = useMemo(() => unique(data.applications, "company"), [data.applications]);
   const sourceValues = useMemo(() => unique(data.applications, "source"), [data.applications]);
-  const [stages, setStages] = useState<string[]>(() => querySelection(searchParams.get("stages"), stageValues, defaultStages));
-  const [outcomes, setOutcomes] = useState<string[]>(() => querySelection(searchParams.get("outcomes"), outcomeValues, outcomeValues));
-  const [tags, setTags] = useState<string[]>(() => querySelection(searchParams.get("tags"), tagValues, tagValues));
-  const [priorities, setPriorities] = useState<string[]>(priorityValues);
-  const [companies, setCompanies] = useState<string[]>(() => querySelection(searchParams.get("companies"), companyValues, companyValues));
-  const [sources, setSources] = useState<string[]>(sourceValues);
-  const [dueOnly, setDueOnly] = useState(false);
-  const [attention, setAttention] = useState(() => searchParams.get("attention") || "");
-  const [applied, setApplied] = useState(() => searchParams.get("applied") || "");
-  const [sort, setSort] = useState<SortState<PostingSortKey>>({ key: "next_action", direction: "asc" });
-
-  const queryKey = searchParams.toString();
-
-  useEffect(() => setStages(previous => reconcileSelection(previous, stageValues, defaultStages)), [stageValues, defaultStages]);
-  useEffect(() => setOutcomes(previous => reconcileSelection(previous, outcomeValues, outcomeValues)), [outcomeValues]);
-  useEffect(() => setTags(previous => reconcileSelection(previous, tagValues, tagValues)), [tagValues]);
-  useEffect(() => setPriorities(previous => reconcileSelection(previous, priorityValues, priorityValues)), [priorityValues]);
-  useEffect(() => setCompanies(previous => reconcileSelection(previous, companyValues, companyValues)), [companyValues]);
-  useEffect(() => setSources(previous => reconcileSelection(previous, sourceValues, sourceValues)), [sourceValues]);
-  useEffect(() => {
-    const params = new URLSearchParams(queryKey);
-    setStages(querySelection(params.get("stages"), stageValues, defaultStages));
-    setOutcomes(querySelection(params.get("outcomes"), outcomeValues, outcomeValues));
-    setTags(querySelection(params.get("tags"), tagValues, tagValues));
-    setCompanies(querySelection(params.get("companies"), companyValues, companyValues));
-    setAttention(params.get("attention") || "");
-    setApplied(params.get("applied") || "");
-  }, [queryKey, stageValues, defaultStages, outcomeValues, tagValues, companyValues]);
+  const stages = selectionFromParam(viewParams.get("stages"), stageValues, defaultStages);
+  const outcomes = selectionFromParam(viewParams.get("outcomes"), outcomeValues, outcomeValues);
+  const tags = selectionFromParam(viewParams.get("tags"), tagValues, tagValues);
+  const priorities = selectionFromParam(viewParams.get("priorities"), priorityValues, priorityValues);
+  const companies = selectionFromParam(viewParams.get("companies"), companyValues, companyValues);
+  const sources = selectionFromParam(viewParams.get("sources"), sourceValues, sourceValues);
+  const dueOnly = viewParams.get("due") === "true";
+  const attention = viewParams.get("attention") || "";
+  const applied = viewParams.get("applied") || "";
+  const sort = sortFromParams(viewParams, "sort", "direction", POSTING_SORT_KEYS, { key: "next_action", direction: "asc" });
 
   const rows = data.applications
     .filter(app => {
@@ -87,21 +71,15 @@ export function PostingsPage({ data }: { data: AppState }) {
     .sort((a, b) => comparePostingRows(a, b, sort));
 
   function changeSort(key: PostingSortKey, initialDirection: SortDirection) {
-    setSort(current => nextSortState(current, key, initialDirection));
+    const next = nextSortState(sort, key, initialDirection);
+    updateViewParams({
+      sort: next.key === "next_action" ? null : next.key,
+      direction: next.direction === "asc" ? null : next.direction
+    });
   }
 
   function clearFilters() {
-    setSearch("");
-    setStages(defaultStages);
-    setOutcomes(outcomeValues);
-    setTags(tagValues);
-    setPriorities(priorityValues);
-    setCompanies(companyValues);
-    setSources(sourceValues);
-    setDueOnly(false);
-    setAttention("");
-    setApplied("");
-    setSearchParams({});
+    clearViewParams();
   }
 
   return (
@@ -115,15 +93,15 @@ export function PostingsPage({ data }: { data: AppState }) {
           <label className="search">
             <span className="sr-only">Search postings</span>
             <SearchIcon />
-            <input value={search} onChange={event => setSearch(event.target.value)} type="search" placeholder="Search postings, companies, notes..." />
+            <input value={search} onChange={event => updateViewParams({ q: event.target.value || null })} type="search" placeholder="Search postings, companies, notes..." />
           </label>
-          <MultiFilter label="Stage" values={stageValues} selected={stages} onChange={setStages} />
-          <MultiFilter label="Outcome" values={outcomeValues} selected={outcomes} onChange={setOutcomes} />
-          <MultiFilter label="Tag" values={tagValues} selected={tags} onChange={setTags} />
-          <MultiFilter label="Priority" values={priorityValues} selected={priorities} onChange={setPriorities} />
-          <MultiFilter label="Company" values={companyValues} selected={companies} onChange={setCompanies} />
-          <MultiFilter label="Source" values={sourceValues} selected={sources} onChange={setSources} />
-          <label className="toggle"><input checked={dueOnly} onChange={event => setDueOnly(event.target.checked)} type="checkbox" /> Due soon</label>
+          <MultiFilter label="Stage" values={stageValues} selected={stages} onChange={values => updateViewParams({ stages: selectionParamValue(values, stageValues, defaultStages) })} />
+          <MultiFilter label="Outcome" values={outcomeValues} selected={outcomes} onChange={values => updateViewParams({ outcomes: selectionParamValue(values, outcomeValues, outcomeValues) })} />
+          <MultiFilter label="Tag" values={tagValues} selected={tags} onChange={values => updateViewParams({ tags: selectionParamValue(values, tagValues, tagValues) })} />
+          <MultiFilter label="Priority" values={priorityValues} selected={priorities} onChange={values => updateViewParams({ priorities: selectionParamValue(values, priorityValues, priorityValues) })} />
+          <MultiFilter label="Company" values={companyValues} selected={companies} onChange={values => updateViewParams({ companies: selectionParamValue(values, companyValues, companyValues) })} />
+          <MultiFilter label="Source" values={sourceValues} selected={sources} onChange={values => updateViewParams({ sources: selectionParamValue(values, sourceValues, sourceValues) })} />
+          <label className="toggle"><input checked={dueOnly} onChange={event => updateViewParams({ due: event.target.checked ? "true" : null })} type="checkbox" /> Due soon</label>
           <button className="button" type="button" onClick={clearFilters}><FilterIcon size={16} /> Clear</button>
           {attention ? <span className="active-filter">Attention: {attention === "missing-next" ? "Missing next action" : "Data cleanup"}</span> : null}
           {applied ? <span className="active-filter">Applied: Last 7 days</span> : null}
@@ -240,18 +218,6 @@ function orderedStages(data: AppState) {
     ...workflowStages.filter(stage => existing.includes(stage)),
     ...existing.filter(stage => !workflowStages.includes(stage))
   ];
-}
-
-function reconcileSelection(previous: string[], values: string[], fallback: string[]) {
-  const selected = previous.filter(value => values.includes(value));
-  return selected.length ? selected : fallback;
-}
-
-function querySelection(value: string | null, options: string[], fallback: string[]) {
-  if (!value) return fallback;
-  if (value === "all") return options;
-  const requested = value.split(",").filter(item => options.includes(item));
-  return requested.length ? requested : fallback;
 }
 
 function matchesSelection(value: string, selected: string[], values: string[]) {

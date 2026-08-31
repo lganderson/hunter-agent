@@ -13,6 +13,7 @@ import type {
   CompanyDiscoveryRunResult,
   CompanyDiscoveryJob,
   CompanyPostingCandidate,
+  CandidateEnrichmentJob,
   CompanyUpdates,
   Contact,
   ContactUpdates,
@@ -126,6 +127,8 @@ export function saveSettings(payload: {
   search_goals: string;
   fit_signals: SettingsStatus["fit_signals"];
   api_token: string;
+  adzuna_app_id: string;
+  adzuna_app_key: string;
 }): Promise<SettingsStatus> {
   return postJson<SettingsStatus>("/api/settings", payload);
 }
@@ -283,6 +286,19 @@ export function startCompanyDiscovery(payload: {
   return postJson<{ job: CompanyDiscoveryJob }>("/api/companies/discovery-jobs", payload);
 }
 
+export function startCompanyEvaluation(payload: {
+  focus: string;
+  sizes: string[];
+  locations: string[];
+  remote_region: string;
+  metro_area: string;
+  tracking_status?: string;
+  force?: boolean;
+  reason?: string;
+}): Promise<{ job: CompanyDiscoveryJob }> {
+  return postJson<{ job: CompanyDiscoveryJob }>("/api/companies/evaluation-jobs", payload);
+}
+
 export async function getCompanyDiscoveryJob(): Promise<{ job: CompanyDiscoveryJob | null }> {
   return readJson<{ job: CompanyDiscoveryJob | null }>(
     await fetch("/api/companies/discovery-jobs/current", { cache: "no-store" })
@@ -375,6 +391,27 @@ export function continueDiscovery(id: string, enrichmentLimit = 10): Promise<Dis
   });
 }
 
+export async function getCandidateEnrichmentJob(): Promise<{ job: CandidateEnrichmentJob | null }> {
+  return readJson<{ job: CandidateEnrichmentJob | null }>(
+    await fetch("/api/discovery/jobs/current", { cache: "no-store" })
+  );
+}
+
+export function startCandidateDiscovery(payload: {
+  search_id: string;
+  use_browser_fallback?: boolean;
+  enrichment_limit?: number;
+}): Promise<{ job: CandidateEnrichmentJob }> {
+  return postJson<{ job: CandidateEnrichmentJob }>("/api/discovery/search-jobs", payload);
+}
+
+export function startCandidateEnrichment(payload: {
+  search_id?: string;
+  limit?: number;
+} = {}): Promise<{ job: CandidateEnrichmentJob }> {
+  return postJson<{ job: CandidateEnrichmentJob }>("/api/discovery/enrichment-jobs", payload);
+}
+
 export function captureDiscoveryCandidates(
   searchId: string,
   captureText: string,
@@ -435,12 +472,24 @@ export function markDiscoveryCandidateDuplicate(
   );
 }
 
-export function ingestDiscoveryCandidate(
+export function pursueDiscoveryCandidate(
   id: string
 ): Promise<{ candidate: DiscoveryCandidate; posting: Application; created: boolean }> {
   return postJson<{ candidate: DiscoveryCandidate; posting: Application; created: boolean }>(
-    "/api/discovery/candidates/ingest",
+    "/api/discovery/candidates/pursue",
     { id }
+  );
+}
+
+export function undoDiscoveryCandidateDecision(
+  id: string,
+  decision: "ignored" | "pursued",
+  applicationId = "",
+  removePosting = false
+): Promise<{ candidate: DiscoveryCandidate; posting_removed: boolean }> {
+  return postJson<{ candidate: DiscoveryCandidate; posting_removed: boolean }>(
+    "/api/discovery/candidates/undo-decision",
+    { id, decision, application_id: applicationId, remove_posting: removePosting }
   );
 }
 
@@ -482,8 +531,8 @@ export function updateCompanyCandidates(
   );
 }
 
-export function ingestCompanyCandidate(id: string): Promise<{ candidate: CompanyPostingCandidate; posting: Application | null; stdout: string }> {
-  return postJson<{ candidate: CompanyPostingCandidate; posting: Application | null; stdout: string }>("/api/companies/candidates/ingest", { id });
+export function pursueCompanyCandidate(id: string): Promise<{ candidate: CompanyPostingCandidate; posting: Application | null; stdout: string }> {
+  return postJson<{ candidate: CompanyPostingCandidate; posting: Application | null; stdout: string }>("/api/companies/candidates/pursue", { id });
 }
 
 export async function getAgentChatHistory(): Promise<AgentChatHistoryMessage[]> {

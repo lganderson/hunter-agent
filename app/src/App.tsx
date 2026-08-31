@@ -8,14 +8,14 @@ import { CandidatesPage } from "./candidates/CandidatesPage";
 import { BriefcaseIcon, CalendarIcon, ChevronLeftIcon, ChevronRightIcon, GearIcon, HomeIcon, ListIcon, PeopleIcon, SearchIcon } from "./components/Icons";
 import { CompaniesPage, CompanyDetailPage } from "./companies/CompaniesPage";
 import { ContactsPage } from "./contacts/ContactsPage";
-import type { AppState, CompanyPostingCandidate } from "./core/types";
+import type { AppState, Application, CompanyPostingCandidate, DiscoveryCandidate } from "./core/types";
 import { routes } from "./core/routes";
 import { DashboardPage } from "./dashboard/DashboardPage";
 import { PostingDetailPage } from "./postings/PostingDetailPage";
 import { PostingsPage } from "./postings/PostingsPage";
 import { SettingsPage } from "./settings/SettingsPage";
-import { getCompanyDiscoveryJob, startCompanyDiscovery } from "./core/api";
-import type { CompanyDiscoveryJob } from "./core/types";
+import { getCandidateEnrichmentJob, getCompanyDiscoveryJob, startCandidateDiscovery, startCandidateEnrichment, startCompanyDiscovery, startCompanyEvaluation } from "./core/api";
+import type { CandidateEnrichmentJob, CompanyDiscoveryJob } from "./core/types";
 import type { ActionUpdateResult } from "./core/useHunterData";
 
 type AppProps = {
@@ -24,6 +24,7 @@ type AppProps = {
   applyActionUpdate: (result: ActionUpdateResult) => void;
   applyApplicationUpdate: (application: AppState["applications"][number]) => void;
   applyCompanyCandidateUpdates: (candidates: CompanyPostingCandidate[]) => void;
+  applyDiscoveryCandidateUpdate: (candidate: DiscoveryCandidate, posting?: Application | null, removePostingId?: string) => void;
 };
 
 const navItems = [
@@ -38,6 +39,8 @@ const navItems = [
 
 const AGENT_PANEL_WIDTH_KEY = "hunter-agent-panel-width-v1";
 const NAV_COLLAPSED_KEY = "hunter-nav-collapsed-v1";
+const DISMISSED_COMPANY_DISCOVERY_JOB_KEY = "hunter-dismissed-company-discovery-job-v1";
+const DISMISSED_CANDIDATE_ENRICHMENT_JOB_KEY = "hunter-dismissed-candidate-enrichment-job-v1";
 const DEFAULT_AGENT_PANEL_WIDTH = 400;
 
 type AppShellStyle = CSSProperties & { "--agent-panel-width": string };
@@ -47,6 +50,14 @@ function storedBoolean(key: string): boolean {
     return window.localStorage.getItem(key) === "true";
   } catch {
     return false;
+  }
+}
+
+function storedString(key: string): string {
+  try {
+    return window.localStorage.getItem(key) || "";
+  } catch {
+    return "";
   }
 }
 
@@ -81,7 +92,7 @@ function AppNav({ collapsed = false, mobile = false }: { collapsed?: boolean; mo
   return <ul className={className}>{links.map((link, index) => <li key={navItems[index].to}>{link}</li>)}</ul>;
 }
 
-export function App({ data, refresh, applyActionUpdate, applyApplicationUpdate, applyCompanyCandidateUpdates }: AppProps) {
+export function App({ data, refresh, applyActionUpdate, applyApplicationUpdate, applyCompanyCandidateUpdates, applyDiscoveryCandidateUpdate }: AppProps) {
   const closed = data.applications.filter(app => app.is_closed).length;
   const location = useLocation();
   const [agentOpen, setAgentOpen] = useState(false);
@@ -89,7 +100,9 @@ export function App({ data, refresh, applyActionUpdate, applyApplicationUpdate, 
   const [navCollapsed, setNavCollapsed] = useState(() => storedBoolean(NAV_COLLAPSED_KEY));
   const shellRef = useRef<HTMLDivElement | null>(null);
   const [companyDiscoveryJob, setCompanyDiscoveryJob] = useState<CompanyDiscoveryJob | null>(null);
+  const [candidateEnrichmentJob, setCandidateEnrichmentJob] = useState<CandidateEnrichmentJob | null>(null);
   const lastRefreshedDiscoveryJob = useRef("");
+  const lastRefreshedEnrichmentJob = useRef("");
   const agentContext = useMemo(
     () => buildAgentContext(location.pathname, location.search, data),
     [data, location.pathname, location.search]
@@ -132,9 +145,73 @@ export function App({ data, refresh, applyActionUpdate, applyApplicationUpdate, 
     };
   }, [refresh]);
 
+  useEffect(() => {
+    let active = true;
+    async function pollEnrichmentJob() {
+      try {
+        const response = await getCandidateEnrichmentJob();
+        if (!active) return;
+        setCandidateEnrichmentJob(response.job);
+        if (
+          response.job?.status === "completed"
+          && lastRefreshedEnrichmentJob.current !== response.job.id
+        ) {
+          lastRefreshedEnrichmentJob.current = response.job.id;
+          await refresh();
+        }
+      } catch {
+        // The rest of Hunter remains usable while the local job endpoint reconnects.
+      }
+    }
+    void pollEnrichmentJob();
+    const interval = window.setInterval(() => void pollEnrichmentJob(), 1_000);
+    return () => {
+      active = false;
+      window.clearInterval(interval);
+    };
+  }, [refresh]);
+
   const beginCompanyDiscovery = useCallback(async (payload: CompanyDiscoveryJob["request"]) => {
-    const response = await startCompanyDiscovery(payload);
+    const response = await startCompanyDiscovery({
+      focus: payload.focus || "",
+      sizes: payload.sizes || [],
+      sources: payload.sources || [],
+      locations: payload.locations || [],
+      remote_region: payload.remote_region || "",
+      metro_area: payload.metro_area || ""
+    });
     setCompanyDiscoveryJob(response.job);
+    return response.job;
+  }, []);
+
+  const beginCompanyEvaluation = useCallback(async (payload: CompanyDiscoveryJob["request"]) => {
+    const response = await startCompanyEvaluation({
+      focus: payload.focus || "",
+      sizes: payload.sizes || [],
+      locations: payload.locations || [],
+      remote_region: payload.remote_region || "",
+      metro_area: payload.metro_area || "",
+      tracking_status: payload.tracking_status || "discovered",
+      force: payload.force,
+      reason: payload.reason
+    });
+    setCompanyDiscoveryJob(response.job);
+    return response.job;
+  }, []);
+
+  const beginCandidateEnrichment = useCallback(async (payload: CandidateEnrichmentJob["request"]) => {
+    const response = await startCandidateEnrichment(payload);
+    setCandidateEnrichmentJob(response.job);
+    return response.job;
+  }, []);
+
+  const beginCandidateDiscovery = useCallback(async (payload: CandidateEnrichmentJob["request"]) => {
+    const response = await startCandidateDiscovery({
+      search_id: payload.search_id || "",
+      use_browser_fallback: payload.use_browser_fallback,
+      enrichment_limit: payload.enrichment_limit
+    });
+    setCandidateEnrichmentJob(response.job);
     return response.job;
   }, []);
 
@@ -173,7 +250,7 @@ export function App({ data, refresh, applyActionUpdate, applyApplicationUpdate, 
         </div>
         <AppNav collapsed={navCollapsed} />
         <div className="sidebar-label">Views</div>
-        <Link className="sidebar-stat" to={routes.postingsFiltered({ stages: "posting-review" })}><span>Review</span><strong>{data.applications.filter(app => app.stage === "posting-review").length}</strong></Link>
+        <Link className="sidebar-stat" to={routes.postingsFiltered({ stages: "considering" })}><span>Considering</span><strong>{data.applications.filter(app => app.stage === "considering").length}</strong></Link>
         <Link className="sidebar-stat" to={routes.actionsFiltered({ status: "open" })}><span>Open actions</span><strong>{data.actions.filter(action => action.is_open).length}</strong></Link>
         <Link className="sidebar-stat" to={routes.postingsFiltered({ stages: "closed" })}><span>Closed</span><strong>{closed}</strong></Link>
       </aside>
@@ -182,16 +259,17 @@ export function App({ data, refresh, applyActionUpdate, applyApplicationUpdate, 
         <AppNav mobile />
 
         <CompanyDiscoveryJobBanner job={companyDiscoveryJob} />
+        <CandidateEnrichmentJobBanner job={candidateEnrichmentJob} />
 
         <Routes>
           <Route path="/" element={<DashboardPage data={data} refresh={refresh} />} />
           <Route path="/postings" element={<PostingsPage data={data} />} />
           <Route path="/postings/new" element={<PostingDetailPage data={data} refresh={refresh} createNew />} />
           <Route path="/postings/:id" element={<PostingDetailPage data={data} refresh={refresh} applyActionUpdate={applyActionUpdate} applyApplicationUpdate={applyApplicationUpdate} />} />
-          <Route path="/companies" element={<CompaniesPage data={data} refresh={refresh} discoveryJob={companyDiscoveryJob} startDiscoveryJob={beginCompanyDiscovery} />} />
+          <Route path="/companies" element={<CompaniesPage data={data} refresh={refresh} discoveryJob={companyDiscoveryJob} startDiscoveryJob={beginCompanyDiscovery} startEvaluationJob={beginCompanyEvaluation} />} />
           <Route path="/companies/new" element={<CompanyDetailPage data={data} refresh={refresh} applyCompanyCandidateUpdates={applyCompanyCandidateUpdates} createNew />} />
           <Route path="/companies/:id" element={<CompanyDetailPage data={data} refresh={refresh} applyCompanyCandidateUpdates={applyCompanyCandidateUpdates} />} />
-          <Route path="/candidates" element={<CandidatesPage data={data} refresh={refresh} applyCompanyCandidateUpdates={applyCompanyCandidateUpdates} />} />
+          <Route path="/candidates" element={<CandidatesPage data={data} refresh={refresh} applyCompanyCandidateUpdates={applyCompanyCandidateUpdates} applyDiscoveryCandidateUpdate={applyDiscoveryCandidateUpdate} enrichmentJob={candidateEnrichmentJob} startDiscoveryJob={beginCandidateDiscovery} startEnrichmentJob={beginCandidateEnrichment} />} />
           <Route path="/actions" element={<ActionsPage data={data} refresh={refresh} />} />
           <Route path="/contacts" element={<ContactsPage data={data} refresh={refresh} />} />
           <Route path="/settings" element={<SettingsPage refresh={refresh} />} />
@@ -211,24 +289,78 @@ export function App({ data, refresh, applyActionUpdate, applyApplicationUpdate, 
   );
 }
 
-function CompanyDiscoveryJobBanner({ job }: { job: CompanyDiscoveryJob | null }) {
-  const [dismissedJobId, setDismissedJobId] = useState("");
-  if (!job || (job.status === "completed" && dismissedJobId === job.id)) return null;
+function CandidateEnrichmentJobBanner({ job }: { job: CandidateEnrichmentJob | null }) {
+  const [dismissedJobId, setDismissedJobId] = useState(() => storedString(DISMISSED_CANDIDATE_ENRICHMENT_JOB_KEY));
+  if (!job) return null;
   const active = job.status === "queued" || job.status === "running";
+  const discovering = job.job_type === "candidate-discovery";
+  if (job.status === "completed") return null;
+  if (!active && dismissedJobId === job.id) return null;
+  const jobId = job.id;
   const maximum = Math.max(1, job.total_steps || 1);
   const value = Math.min(maximum, Math.max(0, job.completed_steps || 0));
+
+  function dismissJob() {
+    setDismissedJobId(jobId);
+    try {
+      window.localStorage.setItem(DISMISSED_CANDIDATE_ENRICHMENT_JOB_KEY, jobId);
+    } catch {
+      // The banner still dismisses for this session when local storage is unavailable.
+    }
+  }
+
   return (
-    <aside className={`global-job-status ${job.status}`} aria-live="polite" aria-label="Company discovery status">
+    <aside className={`global-job-status ${job.status}`} aria-live="polite" aria-label={discovering ? "Candidate Discovery status" : "Candidate enrichment status"}>
       <div className="global-job-status-copy">
-        <strong>{active ? "Company discovery running" : job.status === "completed" ? "Company discovery complete" : "Company discovery needs attention"}</strong>
+        <strong>{active
+          ? discovering ? "Candidate Discovery is running" : "Candidate details are being resolved"
+          : discovering ? "Candidate Discovery needs attention" : "Candidate enrichment needs attention"}</strong>
         <span>{job.message}</span>
       </div>
       <div className="global-job-status-progress">
-        <progress value={value} max={maximum} aria-label="Company discovery progress" />
+        <progress value={value} max={maximum} aria-label="Candidate enrichment progress" />
+        <span>{Math.round((value / maximum) * 100)}%</span>
+      </div>
+      <Link className="button compact" to="/candidates?mode=discovery&discovery_status=needs-decision">View roles</Link>
+      {!active ? <button className="button compact secondary" type="button" onClick={dismissJob}>Dismiss</button> : null}
+    </aside>
+  );
+}
+
+function CompanyDiscoveryJobBanner({ job }: { job: CompanyDiscoveryJob | null }) {
+  const [dismissedJobId, setDismissedJobId] = useState(() => storedString(DISMISSED_COMPANY_DISCOVERY_JOB_KEY));
+  if (!job) return null;
+  const active = job.status === "queued" || job.status === "running";
+  if (job.status === "completed") return null;
+  if (!active && dismissedJobId === job.id) return null;
+  const jobId = job.id;
+  const evaluating = job.job_type === "company-evaluation";
+  const maximum = Math.max(1, job.total_steps || 1);
+  const value = Math.min(maximum, Math.max(0, job.completed_steps || 0));
+
+  function dismissJob() {
+    setDismissedJobId(jobId);
+    try {
+      window.localStorage.setItem(DISMISSED_COMPANY_DISCOVERY_JOB_KEY, jobId);
+    } catch {
+      // The banner still dismisses for this session when local storage is unavailable.
+    }
+  }
+
+  return (
+    <aside className={`global-job-status ${job.status}`} aria-live="polite" aria-label={evaluating ? "Company evaluation status" : "Company discovery status"}>
+      <div className="global-job-status-copy">
+        <strong>{active
+          ? evaluating ? "Company evaluation running" : "Company discovery running"
+          : evaluating ? "Company evaluation needs attention" : "Company discovery needs attention"}</strong>
+        <span>{job.message}</span>
+      </div>
+      <div className="global-job-status-progress">
+        <progress value={value} max={maximum} aria-label={evaluating ? "Company evaluation progress" : "Company discovery progress"} />
         <span>{Math.round((value / maximum) * 100)}%</span>
       </div>
       <Link className="button compact" to="/companies">View companies</Link>
-      {!active ? <button className="button compact secondary" type="button" onClick={() => setDismissedJobId(job.id)}>Dismiss</button> : null}
+      {!active ? <button className="button compact secondary" type="button" onClick={dismissJob}>Dismiss</button> : null}
     </aside>
   );
 }

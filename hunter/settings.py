@@ -160,12 +160,25 @@ def settings_status():
         "search_goals": read_search_goals(settings),
         "fit_signals": read_fit_signals(settings),
         "token_configured": bool(settings.get("api_token")),
+        "adzuna_configured": bool(
+            (settings.get("adzuna_app_id") or os.environ.get("ADZUNA_APP_ID"))
+            and (settings.get("adzuna_app_key") or os.environ.get("ADZUNA_APP_KEY"))
+        ),
         "resume": resume_status(settings),
         "api_usage": api_usage.usage_summary(),
     }
 
 
-def save_settings(provider, model, api_base, token, search_goals=None, fit_signals=None):
+def save_settings(
+    provider,
+    model,
+    api_base,
+    token,
+    search_goals=None,
+    fit_signals=None,
+    adzuna_app_id=None,
+    adzuna_app_key=None,
+):
     paths.SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
     settings = load_settings()
     if provider is not None:
@@ -180,8 +193,26 @@ def save_settings(provider, model, api_base, token, search_goals=None, fit_signa
         settings["fit_signals"] = normalize_fit_signals(fit_signals)
     if token:
         settings["api_token"] = token
+    if adzuna_app_id:
+        settings["adzuna_app_id"] = clean_settings_text(adzuna_app_id, 500)
+    if adzuna_app_key:
+        settings["adzuna_app_key"] = clean_settings_text(adzuna_app_key, 500)
     write_settings(settings)
     return settings_status()
+
+
+def adzuna_credentials(settings=None):
+    configured = settings or load_settings()
+    return {
+        "app_id": clean_settings_text(
+            configured.get("adzuna_app_id") or os.environ.get("ADZUNA_APP_ID", ""),
+            500,
+        ),
+        "app_key": clean_settings_text(
+            configured.get("adzuna_app_key") or os.environ.get("ADZUNA_APP_KEY", ""),
+            500,
+        ),
+    }
 
 
 def resume_status(settings=None):

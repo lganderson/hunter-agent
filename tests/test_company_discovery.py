@@ -202,16 +202,90 @@ class HunterCompanyDiscoveryTest(unittest.TestCase):
         self.assertEqual(captured["token"], "private")
         self.assertEqual(captured["payload"]["tools"][0]["type"], "web_search")
         self.assertEqual(captured["payload"]["model"], "gpt-5.6-luna")
-        self.assertEqual(captured["payload"]["max_tool_calls"], 2)
+        self.assertEqual(captured["payload"]["max_tool_calls"], 5)
         self.assertEqual(captured["payload"]["reasoning"], {"effort": "low"})
-        self.assertEqual(captured["payload"]["tools"][0]["search_context_size"], "low")
+        self.assertEqual(captured["payload"]["tools"][0]["search_context_size"], "medium")
         self.assertIn("wellfound.com", captured["payload"]["tools"][0]["filters"]["allowed_domains"])
-        self.assertIn("- games: at most 2", captured["payload"]["input"])
+        self.assertIn("- games: at most 4", captured["payload"]["input"])
         self.assertIn("Remote in Canada", captured["payload"]["input"])
         self.assertIn("Denver metro", captured["payload"]["input"])
         usage = json.loads((paths.DATA_DIR / "agent_usage.jsonl").read_text(encoding="utf-8"))
         self.assertEqual(usage["feature"], "company-discovery")
         self.assertEqual(usage["operation"], "startup-directories")
+
+    def test_openai_focus_planning_expands_broad_input_and_logs_usage(self):
+        captured = {}
+
+        def fake_request(url, token, payload):
+            captured.update({"url": url, "token": token, "payload": payload})
+            return {
+                "model": "gpt-test",
+                "output_text": json.dumps(
+                    {
+                        "focus_lanes": [
+                            "AI product platforms",
+                            "AI infrastructure and tooling",
+                            "Intelligent enterprise workflows",
+                            "Automation and decision systems",
+                        ]
+                    }
+                ),
+                "usage": {"input_tokens": 70, "output_tokens": 30, "total_tokens": 100},
+            }
+
+        with patch("hunter.company_discovery.agent._request_json", side_effect=fake_request):
+            lanes = company_discovery.openai_focus_lane_search(
+                {"api_base": "https://example.test/v1", "token": "private"},
+                ["ai"],
+            )
+
+        self.assertEqual(len(lanes), 4)
+        self.assertEqual(lanes[0], "ai product platforms")
+        self.assertNotIn("tools", captured["payload"])
+        self.assertEqual(captured["payload"]["metadata"]["source"], "focus-planning")
+        usage = json.loads((paths.DATA_DIR / "agent_usage.jsonl").read_text(encoding="utf-8"))
+        self.assertEqual(usage["feature"], "company-discovery")
+        self.assertEqual(usage["operation"], "focus-planning")
+
+    def test_direct_employer_source_accepts_official_and_ats_pages(self):
+        self.assertTrue(
+            company_discovery.likely_company_profile(
+                "direct-employers",
+                "https://example.com/careers",
+            )
+        )
+        self.assertTrue(
+            company_discovery.likely_company_profile(
+                "direct-employers",
+                "https://jobs.ashbyhq.com/example/role-id",
+            )
+        )
+        self.assertFalse(
+            company_discovery.likely_company_profile(
+                "direct-employers",
+                "https://www.indeed.com/jobs?q=ai",
+            )
+        )
+
+    def test_candidate_batch_round_robins_sources_before_global_limit(self):
+        candidates = [
+            {"company": f"Direct {index}", "source_id": "direct-employers"}
+            for index in range(5)
+        ] + [
+            {"company": f"Startup {index}", "source_id": "startup-directories"}
+            for index in range(5)
+        ]
+
+        batch = company_discovery.balanced_candidate_batch(
+            candidates,
+            ["direct-employers", "startup-directories"],
+            limit=4,
+        )
+
+        self.assertEqual(
+            [item["company"] for item in batch],
+            ["Direct 0", "Startup 0", "Direct 1", "Startup 1"],
+        )
 
     def test_openai_website_lookup_keeps_only_official_company_sites(self):
         captured = {}
@@ -404,6 +478,9 @@ class HunterCompanyDiscoveryTest(unittest.TestCase):
         with patch(
             "hunter.company_discovery.agent._settings",
             return_value={"api_base": "https://example.test/v1", "token": "private", "model": "gpt-test"},
+        ), patch(
+            "hunter.company_discovery.openai_focus_lane_search",
+            return_value=["builder productivity", "developer workflows", "technical collaboration"],
         ), patch("hunter.company_discovery.openai_source_search", return_value=api_rows), patch(
             "hunter.company_discovery.openai_company_website_search",
             return_value={companies.company_merge_key("Unknown Place"): "https://unknown-place.example/"},

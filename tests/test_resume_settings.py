@@ -73,6 +73,23 @@ class ResumeSettingsTest(unittest.TestCase):
         self.assertIn("Developer productivity workflows", settings.search_goals_context())
         self.assertIn("game systems producer", settings.search_goals_context())
 
+    def test_adzuna_credentials_are_stored_locally_and_only_report_configuration(self):
+        status = settings.save_settings(
+            "openai",
+            "gpt-5.5",
+            "",
+            "",
+            adzuna_app_id="test-app-id",
+            adzuna_app_key="test-app-key",
+        )
+
+        self.assertTrue(status["adzuna_configured"])
+        self.assertNotIn("test-app-key", json.dumps(status))
+        self.assertEqual(
+            settings.adzuna_credentials(),
+            {"app_id": "test-app-id", "app_key": "test-app-key"},
+        )
+
     def test_mcp_settings_tools_update_search_goals_and_merge_fit_signals(self):
         settings.save_settings(
             "openai",

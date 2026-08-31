@@ -6,8 +6,8 @@ import {
   archiveCompany,
   checkCompanyPostings,
   dismissSuggestion,
-  ingestDiscoveryCandidate,
-  ingestCompanyCandidate,
+  pursueDiscoveryCandidate,
+  pursueCompanyCandidate,
   linkCompanyContact,
   mergeCompanies,
   researchCompany,
@@ -25,11 +25,10 @@ import { routes } from "../core/routes";
 import { dateOnlyLabel, titleCase } from "../core/format";
 import { compareNumber, compareText, nextSortState, type SortDirection, type SortState } from "../core/tableSort";
 import type { AppState, Company, CompanyCareerSource, CompanyDiscoveryJob, CompanyDiscoveryRunResult, CompanyMergeSuggestion, CompanyPostingCandidate, DiscoveryCandidate } from "../core/types";
+import { selectionFromParam, selectionParamValue, sortFromParams, usePersistentViewParams } from "../core/viewState";
 import {
-  RECOMMENDED_CANDIDATE_LIMIT,
   candidateFitScore,
   candidateRank,
-  isRecommendedCandidate
 } from "./candidateUtils";
 
 type CompaniesPageProps = {
@@ -37,6 +36,7 @@ type CompaniesPageProps = {
   refresh: () => Promise<AppState>;
   discoveryJob?: CompanyDiscoveryJob | null;
   startDiscoveryJob?: (payload: CompanyDiscoveryJob["request"]) => Promise<CompanyDiscoveryJob>;
+  startEvaluationJob?: (payload: CompanyDiscoveryJob["request"]) => Promise<CompanyDiscoveryJob>;
 };
 
 type CompanyDetailPageProps = CompaniesPageProps & {
@@ -70,6 +70,7 @@ const COMPANY_SIZE_OPTIONS = [
 const DISCOVERY_SIZE_FILTERS = ["2–10 employees", ...COMPANY_SIZE_OPTIONS, "unknown"];
 const DEFAULT_COMPANY_SIZES = ["51–200 employees", "201–500 employees"];
 const COMPANY_DISCOVERY_SOURCES = [
+  { id: "direct-employers", label: "Direct employer sites" },
   { id: "startup-directories", label: "Startup directories" },
   { id: "venture-portfolios", label: "Venture portfolios" },
   { id: "linkedin-companies", label: "Public company profiles" }
@@ -85,16 +86,19 @@ const COMPANY_METRO_AREA_KEY = "hunter-company-discovery-metro-area-v1";
 type CompanySortKey = "company" | "interest" | "careers_url" | "location" | "last_check";
 type CompanyDiscoverySortKey = "company" | "fit" | "size" | "location";
 type CompanyMode = "tracked" | "discovery";
+const COMPANY_SORT_KEYS: CompanySortKey[] = ["company", "interest", "careers_url", "location", "last_check"];
+const COMPANY_DISCOVERY_SORT_KEYS: CompanyDiscoverySortKey[] = ["company", "fit", "size", "location"];
 
-export function CompaniesPage({ data, refresh, discoveryJob = null, startDiscoveryJob }: CompaniesPageProps) {
-  const [mode, setMode] = useState<CompanyMode>("tracked");
+export function CompaniesPage({ data, refresh, discoveryJob = null, startDiscoveryJob, startEvaluationJob }: CompaniesPageProps) {
+  const { params: viewParams, updateParams: updateViewParams } = usePersistentViewParams("companies");
+  const mode: CompanyMode = viewParams.get("mode") === "discovery" ? "discovery" : "tracked";
   const [discoveryModalOpen, setDiscoveryModalOpen] = useState(false);
-  const [search, setSearch] = useState("");
-  const [interestStatuses, setInterestStatuses] = useState<string[]>(DEFAULT_INTEREST_STATUSES);
-  const [trackedLocationFitStates, setTrackedLocationFitStates] = useState<string[]>(DISCOVERY_LOCATION_FIT_STATES);
-  const [discoveryReviewStates, setDiscoveryReviewStates] = useState<string[]>(DISCOVERY_REVIEW_STATES);
-  const [discoverySizeFilters, setDiscoverySizeFilters] = useState<string[]>(DISCOVERY_SIZE_FILTERS);
-  const [discoveryLocationFitStates, setDiscoveryLocationFitStates] = useState<string[]>(DISCOVERY_LOCATION_FIT_STATES);
+  const search = viewParams.get("q") || "";
+  const interestStatuses = selectionFromParam(viewParams.get("interest"), INTEREST_STATUSES, DEFAULT_INTEREST_STATUSES);
+  const trackedLocationFitStates = selectionFromParam(viewParams.get("tracked_location"), DISCOVERY_LOCATION_FIT_STATES, DISCOVERY_LOCATION_FIT_STATES);
+  const discoveryReviewStates = selectionFromParam(viewParams.get("review"), DISCOVERY_REVIEW_STATES, DISCOVERY_REVIEW_STATES);
+  const discoverySizeFilters = selectionFromParam(viewParams.get("size"), DISCOVERY_SIZE_FILTERS, DISCOVERY_SIZE_FILTERS);
+  const discoveryLocationFitStates = selectionFromParam(viewParams.get("location"), DISCOVERY_LOCATION_FIT_STATES, DISCOVERY_LOCATION_FIT_STATES);
   const [checkingCompanyId, setCheckingCompanyId] = useState("");
   const [pendingUntrackCompany, setPendingUntrackCompany] = useState<Company | null>(null);
   const [operationStatus, setOperationStatus] = useState("");
@@ -104,10 +108,12 @@ export function CompaniesPage({ data, refresh, discoveryJob = null, startDiscove
   const [discoveryLocations, setDiscoveryLocations] = useState<string[]>(DEFAULT_COMPANY_LOCATIONS);
   const [remoteRegion, setRemoteRegion] = useState(() => storedDiscoveryPreference(COMPANY_REMOTE_REGION_KEY, "United States"));
   const [metroArea, setMetroArea] = useState(() => storedDiscoveryPreference(COMPANY_METRO_AREA_KEY, "Minneapolis-Saint Paul metro"));
-  const [sort, setSort] = useState<SortState<CompanySortKey>>({ key: "company", direction: "asc" });
-  const [discoverySort, setDiscoverySort] = useState<SortState<CompanyDiscoverySortKey>>({ key: "fit", direction: "desc" });
+  const sort = sortFromParams(viewParams, "sort", "direction", COMPANY_SORT_KEYS, { key: "company", direction: "asc" });
+  const discoverySort = sortFromParams(viewParams, "discovery_sort", "discovery_direction", COMPANY_DISCOVERY_SORT_KEYS, { key: "fit", direction: "desc" });
   const isDiscovering = discoveryJob?.status === "queued" || discoveryJob?.status === "running";
-  const lastDiscoveryRun = discoveryJob?.result || null;
+  const lastDiscoveryRun = discoveryJob?.job_type !== "company-evaluation"
+    ? discoveryJob?.result as CompanyDiscoveryRunResult | null
+    : null;
 
   useEffect(() => {
     storeDiscoveryPreference(COMPANY_REMOTE_REGION_KEY, remoteRegion);
@@ -181,22 +187,34 @@ export function CompaniesPage({ data, refresh, discoveryJob = null, startDiscove
   }, [allDiscoveryRows, discoveryLocationFitStates, discoveryReviewStates, discoverySizeFilters, discoverySort, search]);
 
   function changeSort(key: CompanySortKey, initialDirection: SortDirection) {
-    setSort(current => nextSortState(current, key, initialDirection));
+    const next = nextSortState(sort, key, initialDirection);
+    updateViewParams({
+      sort: next.key === "company" ? null : next.key,
+      direction: next.direction === "asc" ? null : next.direction
+    });
   }
 
   function changeDiscoverySort(key: CompanyDiscoverySortKey, initialDirection: SortDirection) {
-    setDiscoverySort(current => nextSortState(current, key, initialDirection));
+    const next = nextSortState(discoverySort, key, initialDirection);
+    updateViewParams({
+      discovery_sort: next.key === "fit" ? null : next.key,
+      discovery_direction: next.direction === "desc" ? null : next.direction
+    });
   }
 
   function clearFilters() {
-    setSearch("");
-    setInterestStatuses(DEFAULT_INTEREST_STATUSES);
-    setTrackedLocationFitStates(DISCOVERY_LOCATION_FIT_STATES);
-    setDiscoveryReviewStates(DISCOVERY_REVIEW_STATES);
-    setDiscoverySizeFilters(DISCOVERY_SIZE_FILTERS);
-    setDiscoveryLocationFitStates(DISCOVERY_LOCATION_FIT_STATES);
-    setSort({ key: "company", direction: "asc" });
-    setDiscoverySort({ key: "fit", direction: "desc" });
+    updateViewParams({
+      q: null,
+      interest: null,
+      tracked_location: null,
+      review: null,
+      size: null,
+      location: null,
+      sort: null,
+      direction: null,
+      discovery_sort: null,
+      discovery_direction: null
+    });
   }
 
   async function checkCareersFromTable(company: Company) {
@@ -266,10 +284,32 @@ export function CompaniesPage({ data, refresh, discoveryJob = null, startDiscove
         metro_area: metroArea
       });
       setOperationStatus(job.message);
-      setMode("discovery");
+      updateViewParams({ mode: "discovery" });
       setDiscoveryModalOpen(false);
     } catch (error) {
       setOperationStatus(`Could not discover companies. ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  async function evaluateDiscoveryCompanies() {
+    if (isDiscovering) return;
+    setOperationStatus("Starting evaluation for Discovery companies…");
+    try {
+      if (!startEvaluationJob) throw new Error("Background company evaluation is unavailable.");
+      const job = await startEvaluationJob({
+        focus: discoveryFocus,
+        sizes: discoverySizes,
+        locations: discoveryLocations,
+        remote_region: remoteRegion,
+        metro_area: metroArea,
+        tracking_status: "discovered",
+        force: true,
+        reason: "discovery-backfill"
+      });
+      setOperationStatus(job.message);
+      updateViewParams({ mode: "discovery" });
+    } catch (error) {
+      setOperationStatus(`Could not evaluate Discovery companies. ${error instanceof Error ? error.message : String(error)}`);
     }
   }
 
@@ -295,17 +335,17 @@ export function CompaniesPage({ data, refresh, discoveryJob = null, startDiscove
           <label className="search">
             <span className="sr-only">Search companies</span>
             <SearchIcon />
-            <input value={search} onChange={event => setSearch(event.target.value)} type="search" placeholder="Search companies, websites, fit notes..." />
+            <input value={search} onChange={event => updateViewParams({ q: event.target.value || null })} type="search" placeholder="Search companies, websites, fit notes..." />
           </label>
-          <MultiFilter label="Interest" values={INTEREST_STATUSES} selected={interestStatuses} onChange={setInterestStatuses} />
+          <MultiFilter label="Interest" values={INTEREST_STATUSES} selected={interestStatuses} onChange={values => updateViewParams({ interest: selectionParamValue(values, INTEREST_STATUSES, DEFAULT_INTEREST_STATUSES) })} />
           {mode === "tracked" ? (
-            <MultiFilter label="Location fit" values={DISCOVERY_LOCATION_FIT_STATES} valueLabels={DISCOVERY_LOCATION_FIT_LABELS} selected={trackedLocationFitStates} onChange={setTrackedLocationFitStates} />
+            <MultiFilter label="Location fit" values={DISCOVERY_LOCATION_FIT_STATES} valueLabels={DISCOVERY_LOCATION_FIT_LABELS} selected={trackedLocationFitStates} onChange={values => updateViewParams({ tracked_location: selectionParamValue(values, DISCOVERY_LOCATION_FIT_STATES, DISCOVERY_LOCATION_FIT_STATES) })} />
           ) : null}
           {mode === "discovery" ? (
             <>
-              <MultiFilter label="Review" values={DISCOVERY_REVIEW_STATES} selected={discoveryReviewStates} onChange={setDiscoveryReviewStates} />
-              <MultiFilter label="Size" values={DISCOVERY_SIZE_FILTERS} selected={discoverySizeFilters} onChange={setDiscoverySizeFilters} />
-              <MultiFilter label="Location fit" values={DISCOVERY_LOCATION_FIT_STATES} valueLabels={DISCOVERY_LOCATION_FIT_LABELS} selected={discoveryLocationFitStates} onChange={setDiscoveryLocationFitStates} />
+              <MultiFilter label="Review" values={DISCOVERY_REVIEW_STATES} selected={discoveryReviewStates} onChange={values => updateViewParams({ review: selectionParamValue(values, DISCOVERY_REVIEW_STATES, DISCOVERY_REVIEW_STATES) })} />
+              <MultiFilter label="Size" values={DISCOVERY_SIZE_FILTERS} selected={discoverySizeFilters} onChange={values => updateViewParams({ size: selectionParamValue(values, DISCOVERY_SIZE_FILTERS, DISCOVERY_SIZE_FILTERS) })} />
+              <MultiFilter label="Location fit" values={DISCOVERY_LOCATION_FIT_STATES} valueLabels={DISCOVERY_LOCATION_FIT_LABELS} selected={discoveryLocationFitStates} onChange={values => updateViewParams({ location: selectionParamValue(values, DISCOVERY_LOCATION_FIT_STATES, DISCOVERY_LOCATION_FIT_STATES) })} />
             </>
           ) : null}
           <button className="button" type="button" onClick={clearFilters}><FilterIcon size={16} /> Clear</button>
@@ -314,12 +354,17 @@ export function CompaniesPage({ data, refresh, discoveryJob = null, startDiscove
         </div>
         <div className="company-mode-row">
           <div className="candidate-mode-switch company-mode-switch" role="tablist" aria-label="Company mode">
-            <button className={mode === "tracked" ? "active" : ""} type="button" role="tab" aria-selected={mode === "tracked"} onClick={() => setMode("tracked")}>Tracked</button>
-            <button className={mode === "discovery" ? "active" : ""} type="button" role="tab" aria-selected={mode === "discovery"} onClick={() => setMode("discovery")}>Discovery</button>
+            <button className={mode === "tracked" ? "active" : ""} type="button" role="tab" aria-selected={mode === "tracked"} onClick={() => updateViewParams({ mode: null })}>Tracked</button>
+            <button className={mode === "discovery" ? "active" : ""} type="button" role="tab" aria-selected={mode === "discovery"} onClick={() => updateViewParams({ mode: "discovery" })}>Discovery</button>
           </div>
           <button className="button primary company-discovery-open" type="button" onClick={() => setDiscoveryModalOpen(true)}>
             <SearchIcon size={16} /> Find Companies
           </button>
+          {mode === "discovery" ? (
+            <button className="button company-discovery-open" type="button" disabled={isDiscovering} onClick={evaluateDiscoveryCompanies}>
+              <SearchIcon size={16} /> Evaluate Discovery
+            </button>
+          ) : null}
         </div>
         {mode === "discovery" ? (
           <div className="company-discovery-scroll">
@@ -626,7 +671,26 @@ function CompanyUntrackConfirmationModal({
 }
 
 function companyDiscoveryReviewState(company: Company) {
-  return company.website && company.company_location_fit ? "ready" : "needs-verification";
+  if (company.company_evaluation_status === "ready") return "ready";
+  if (
+    !company.company_evaluation_status
+    && company.website
+    && company.company_size
+    && company.company_location_fit
+    && company.company_fit_score
+  ) return "ready";
+  return "needs-verification";
+}
+
+function companyEvaluationStatusLabel(company: Company) {
+  const labels: Record<string, string> = {
+    pending: "Evaluation queued",
+    evaluating: "Evaluating company…",
+    ready: "Evaluation complete",
+    "needs-verification": "Evaluation complete · verification needed",
+    failed: "Evaluation failed · retry available"
+  };
+  return labels[company.company_evaluation_status] || "Not evaluated";
 }
 
 function companyDiscoverySizeFilter(value: string) {
@@ -654,9 +718,19 @@ function companyDiscoverySourceLabel(company: Company) {
 }
 
 function CompanyFitScore({ company }: { company: Company }) {
+  const evaluationLabel = companyEvaluationStatusLabel(company);
+  if (company.company_evaluation_status === "pending") {
+    return <span className="company-fit-score unknown" title={evaluationLabel}>Queued</span>;
+  }
+  if (company.company_evaluation_status === "evaluating") {
+    return <span className="company-fit-score unknown" title={evaluationLabel}>Working</span>;
+  }
+  if (company.company_evaluation_status === "failed") {
+    return <span className="company-fit-score low" title={company.company_evaluation_error || evaluationLabel}>Error</span>;
+  }
   const score = Number(company.company_fit_score || 0);
   const tone = !score ? "unknown" : score >= 70 ? "strong" : score >= 55 ? "consider" : "low";
-  return <span className={`company-fit-score ${tone}`}>{score || "—"}</span>;
+  return <span className={`company-fit-score ${tone}`} title={evaluationLabel}>{score || "—"}</span>;
 }
 
 function CompanyLocationFit({ company }: { company: Company }) {
@@ -903,10 +977,6 @@ export function CompanyDetailPage({ data, refresh, applyCompanyCandidateUpdates,
     [company?.id, data.company_merge_suggestions, data.dismissed_suggestion_ids]
   );
   const [candidateSearch, setCandidateSearch] = useState("");
-  const recommendedCount = useMemo(
-    () => Math.min(candidates.filter(candidate => isRecommendedCandidate(candidate, company?.last_checked_at || "")).length, RECOMMENDED_CANDIDATE_LIMIT),
-    [candidates, company?.last_checked_at]
-  );
   const candidateRows = useMemo<CompanyCandidateRow[]>(
     () => [
       ...discoveryRoles.map(candidate => ({ source: "discovery" as const, candidate })),
@@ -1152,30 +1222,30 @@ export function CompanyDetailPage({ data, refresh, applyCompanyCandidateUpdates,
     }
   }
 
-  async function ingestCandidate(candidateId: string) {
+  async function pursueCandidate(candidateId: string) {
     if (activeCandidateActionId) return;
     setActiveCandidateActionId(candidateId);
-    setOperationStatus("Ingesting candidate...");
+    setOperationStatus("Adding role to Considering...");
     try {
-      await ingestCompanyCandidate(candidateId);
+      await pursueCompanyCandidate(candidateId);
       await refresh();
-      setOperationStatus("Candidate ingested.");
+      setOperationStatus("Role pursued and added to Considering.");
     } catch (error) {
-      setOperationStatus(`Could not ingest candidate. ${error instanceof Error ? error.message : String(error)}`);
+      setOperationStatus(`Could not pursue role. ${error instanceof Error ? error.message : String(error)}`);
     } finally {
       setActiveCandidateActionId("");
     }
   }
 
-  async function updateDiscoveryRole(candidateId: string, action: "ignored" | "ingested") {
+  async function updateDiscoveryRole(candidateId: string, action: "ignored" | "pursued") {
     if (activeCandidateActionId) return;
     setActiveCandidateActionId(candidateId);
-    setOperationStatus(`${action === "ignored" ? "Ignoring" : "Ingesting"} Discovery role...`);
+    setOperationStatus(`${action === "ignored" ? "Ignoring" : "Pursuing"} Discovery role...`);
     try {
       if (action === "ignored") await updateDiscoveryCandidate(candidateId, "ignored");
-      else await ingestDiscoveryCandidate(candidateId);
+      else await pursueDiscoveryCandidate(candidateId);
       await refresh();
-      setOperationStatus(action === "ignored" ? "Discovery role ignored." : "Discovery role ingested.");
+      setOperationStatus(action === "ignored" ? "Discovery role ignored." : "Discovery role pursued.");
     } catch (error) {
       setOperationStatus(`Could not update Discovery role. ${error instanceof Error ? error.message : String(error)}`);
     } finally {
@@ -1284,7 +1354,7 @@ export function CompanyDetailPage({ data, refresh, applyCompanyCandidateUpdates,
           <span>Contacts</span><strong>{linkedContacts.length}</strong><small>{linkedContacts.length ? "Linked to this company" : "No relationships yet"}</small>
         </Link>
         <Link className="company-stat" to={routes.candidatesFiltered({ mode: "discovery" })} aria-label="Review Discovery inbox">
-          <span>Recommended</span><strong>{recommendedCount + (company.recommended_discovery_role_count || 0)}</strong><small>Across both role sources</small>
+          <span>Needs decision</span><strong>{candidateRows.filter(row => row.candidate.status === "new").length}</strong><small>Across both role sources</small>
         </Link>
       </div>
 
@@ -1344,11 +1414,11 @@ export function CompanyDetailPage({ data, refresh, applyCompanyCandidateUpdates,
                 const sourceUrl = row.source === "discovery" ? row.candidate.canonical_url || row.candidate.url : row.candidate.url;
                 const isActiveAction = activeCandidateActionId === candidate.id;
                 const canIngest = row.source === "discovery"
-                  ? row.candidate.status !== "ingested" && row.candidate.processing_status === "ready"
-                  : row.candidate.status !== "ingested";
+                  ? row.candidate.status !== "pursued" && row.candidate.processing_status === "ready"
+                  : row.candidate.status !== "pursued";
                 const canIgnore = row.source === "discovery"
                   ? row.candidate.status === "new"
-                  : row.candidate.status !== "ignored" && row.candidate.status !== "ingested";
+                  : row.candidate.status !== "ignored" && row.candidate.status !== "pursued";
                 return (
                   <article className="company-candidate" key={`${row.source}-${candidate.id}`}>
                     <div className="company-candidate-copy">
@@ -1370,9 +1440,9 @@ export function CompanyDetailPage({ data, refresh, applyCompanyCandidateUpdates,
                         className="button compact primary"
                         type="button"
                         disabled={!canIngest || Boolean(activeCandidateActionId)}
-                        onClick={() => isDiscovery ? updateDiscoveryRole(candidate.id, "ingested") : ingestCandidate(candidate.id)}
+                        onClick={() => isDiscovery ? updateDiscoveryRole(candidate.id, "pursued") : pursueCandidate(candidate.id)}
                       >
-                        {isActiveAction ? "Ingesting..." : candidate.status === "ingested" ? "Ingested" : "Ingest"}
+                        {isActiveAction ? "Saving..." : candidate.status === "pursued" ? "Pursued" : "Pursue"}
                       </button>
                       <button
                         className="button compact"

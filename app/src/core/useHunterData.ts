@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { getAppState } from "./api";
-import type { Action, AppState, Application, CompanyPostingCandidate } from "./types";
+import type { Action, AppState, Application, CompanyPostingCandidate, DiscoveryCandidate } from "./types";
 
 export type ActionUpdateResult = {
   action: Action;
@@ -67,11 +67,35 @@ export function useHunterData() {
     });
   }, []);
 
+  const applyDiscoveryCandidateUpdate = useCallback((
+    candidate: DiscoveryCandidate,
+    posting: Application | null = null,
+    removePostingId = ""
+  ) => {
+    setData(current => {
+      if (!current) return current;
+      const existingPosting = posting
+        ? current.applications.some(application => application.id === posting.id)
+        : false;
+      return {
+        ...current,
+        generated_at: new Date().toISOString(),
+        discovery_candidates: current.discovery_candidates.map(currentCandidate => (
+          currentCandidate.id === candidate.id ? { ...currentCandidate, ...candidate } : currentCandidate
+        )),
+        applications: current.applications
+          .filter(application => !removePostingId || application.id !== removePostingId)
+          .map(application => application.id === posting?.id ? { ...application, ...posting } : application)
+          .concat(posting && !existingPosting ? [posting] : [])
+      };
+    });
+  }, []);
+
   useEffect(() => {
     refresh().catch((err: unknown) => {
       setError(err instanceof Error ? err.message : String(err));
     });
   }, [refresh]);
 
-  return { data, error, refresh, applyActionUpdate, applyApplicationUpdate, applyCompanyCandidateUpdates };
+  return { data, error, refresh, applyActionUpdate, applyApplicationUpdate, applyCompanyCandidateUpdates, applyDiscoveryCandidateUpdate };
 }

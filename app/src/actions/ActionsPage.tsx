@@ -1,13 +1,15 @@
-import { useEffect, useState } from "react";
-import { useNavigate, useSearchParams } from "react-router-dom";
+import { useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { ActionCommand, ActionDue, Priority, SortableHeader, StatusPill } from "../components/Primitives";
 import { FilterIcon, SearchIcon } from "../components/Icons";
 import { isActionComplete, titleCase } from "../core/format";
 import { updateAction } from "../core/api";
 import { compareNumber, compareText, nextSortState, type SortDirection, type SortState } from "../core/tableSort";
 import type { Action, AppState } from "../core/types";
+import { sortFromParams, usePersistentViewParams } from "../core/viewState";
 
 type ActionSortKey = "action" | "type" | "status" | "priority" | "due_date";
+const ACTION_SORT_KEYS: ActionSortKey[] = ["action", "type", "status", "priority", "due_date"];
 
 type ActionsPageProps = {
   data: AppState;
@@ -20,21 +22,14 @@ function unique(actions: Action[], field: keyof Action) {
 
 export function ActionsPage({ data, refresh }: ActionsPageProps) {
   const navigate = useNavigate();
-  const [searchParams, setSearchParams] = useSearchParams();
-  const [search, setSearch] = useState("");
-  const [type, setType] = useState("all");
-  const [status, setStatus] = useState(() => searchParams.get("status") || "open");
-  const [priority, setPriority] = useState("all");
-  const [due, setDue] = useState(() => validDueFilter(searchParams.get("due")));
+  const { params: viewParams, updateParams: updateViewParams, clearParams: clearViewParams } = usePersistentViewParams("actions");
+  const search = viewParams.get("q") || "";
+  const type = viewParams.get("type") || "all";
+  const status = viewParams.get("status") || "open";
+  const priority = viewParams.get("priority") || "all";
+  const due = validDueFilter(viewParams.get("due"));
   const [operationStatus, setOperationStatus] = useState("");
-  const [sort, setSort] = useState<SortState<ActionSortKey>>({ key: "due_date", direction: "asc" });
-  const queryKey = searchParams.toString();
-
-  useEffect(() => {
-    const params = new URLSearchParams(queryKey);
-    setStatus(params.get("status") || "open");
-    setDue(validDueFilter(params.get("due")));
-  }, [queryKey]);
+  const sort = sortFromParams(viewParams, "sort", "direction", ACTION_SORT_KEYS, { key: "due_date", direction: "asc" });
 
   const rows = data.actions
     .filter(action => {
@@ -65,7 +60,11 @@ export function ActionsPage({ data, refresh }: ActionsPageProps) {
     .sort((a, b) => compareActionRows(a, b, sort));
 
   function changeSort(key: ActionSortKey, initialDirection: SortDirection) {
-    setSort(current => nextSortState(current, key, initialDirection));
+    const next = nextSortState(sort, key, initialDirection);
+    updateViewParams({
+      sort: next.key === "due_date" ? null : next.key,
+      direction: next.direction === "asc" ? null : next.direction
+    });
   }
 
   async function changeAction(actionId: string, nextStatus: string) {
@@ -80,12 +79,7 @@ export function ActionsPage({ data, refresh }: ActionsPageProps) {
   }
 
   function clearFilters() {
-    setSearch("");
-    setType("all");
-    setStatus("open");
-    setPriority("all");
-    setDue("all");
-    setSearchParams({});
+    clearViewParams();
   }
 
   return (
@@ -96,12 +90,12 @@ export function ActionsPage({ data, refresh }: ActionsPageProps) {
           <label className="search">
             <span className="sr-only">Search actions</span>
             <SearchIcon />
-            <input value={search} onChange={event => setSearch(event.target.value)} type="search" placeholder="Search actions, companies, notes..." />
+            <input value={search} onChange={event => updateViewParams({ q: event.target.value || null })} type="search" placeholder="Search actions, companies, notes..." />
           </label>
-          <Filter label="Type" value={type} values={unique(data.actions, "type")} onChange={setType} />
-          <Filter label="Status" value={status} values={["open", ...unique(data.actions, "status").filter(item => item !== "open")]} onChange={setStatus} />
-          <Filter label="Priority" value={priority} values={unique(data.actions, "priority")} onChange={setPriority} />
-          <Filter label="Due" value={due} values={["overdue", "upcoming"]} onChange={setDue} />
+          <Filter label="Type" value={type} values={unique(data.actions, "type")} onChange={value => updateViewParams({ type: value === "all" ? null : value })} />
+          <Filter label="Status" value={status} values={["open", ...unique(data.actions, "status").filter(item => item !== "open")]} onChange={value => updateViewParams({ status: value === "open" ? null : value })} />
+          <Filter label="Priority" value={priority} values={unique(data.actions, "priority")} onChange={value => updateViewParams({ priority: value === "all" ? null : value })} />
+          <Filter label="Due" value={due} values={["overdue", "upcoming"]} onChange={value => updateViewParams({ due: value === "all" ? null : value })} />
           <button className="button" type="button" onClick={clearFilters}><FilterIcon size={16} /> Clear</button>
         </div>
         <div className="table-scroll">

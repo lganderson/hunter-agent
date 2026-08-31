@@ -1009,9 +1009,9 @@ function blankApplication(data: AppState): Application {
     source: "",
     source_url: "",
     compensation: "",
-    stage: data.workflow.stages.find(stage => stage.id === "posting-review" && stage.is_active === "1")?.id
+    stage: data.workflow.stages.find(stage => stage.id === "considering" && stage.is_active === "1")?.id
       || data.workflow.stages.find(stage => stage.is_active === "1")?.id
-      || "posting-review",
+      || "considering",
     outcome: "",
     tags: "",
     priority: "medium",

@@ -154,7 +154,16 @@ def settings_status():
     return settings_store.settings_status()
 
 
-def save_settings(provider, model, api_base, token, search_goals=None, fit_signals=None):
+def save_settings(
+    provider,
+    model,
+    api_base,
+    token,
+    search_goals=None,
+    fit_signals=None,
+    adzuna_app_id=None,
+    adzuna_app_key=None,
+):
     return settings_store.save_settings(
         provider,
         model,
@@ -162,6 +171,8 @@ def save_settings(provider, model, api_base, token, search_goals=None, fit_signa
         token,
         search_goals=search_goals,
         fit_signals=fit_signals,
+        adzuna_app_id=adzuna_app_id,
+        adzuna_app_key=adzuna_app_key,
     )
 
 

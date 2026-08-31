@@ -77,7 +77,7 @@ class HunterWorkflowTest(unittest.TestCase):
     def test_workflow_seed_and_archive_action_type(self):
         sqlite_store.initialize()
         current = workflow.read_workflow()
-        self.assertIn("posting-review", {stage["id"] for stage in current["stages"]})
+        self.assertIn("considering", {stage["id"] for stage in current["stages"]})
         self.assertIn("review-fit", {item["id"] for item in current["action_types"]})
 
         workflow.archive_action_type("review-fit")
@@ -85,6 +85,31 @@ class HunterWorkflowTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             workflow.validate_action_type("review-fit")
         self.assertEqual(workflow.validate_action_type("review-fit", allow_inactive=True), "review-fit")
+
+    def test_simplified_workflow_migrates_existing_stages_without_losing_outcomes(self):
+        sqlite_store.initialize()
+        repository.write_applications([
+            application_row({"id": "A0001", "stage": "posting-review"}),
+            application_row({"id": "A0002", "stage": "waiting-response", "date_applied": "2026-08-01"}),
+            application_row({"id": "A0003", "stage": "first-interview"}),
+            application_row({"id": "A0004", "stage": "offer-review"}),
+            application_row({"id": "A0005", "stage": "closed", "outcome": "rejected"}),
+        ])
+        with sqlite_store.connect() as connection:
+            connection.execute("DELETE FROM meta WHERE key = 'simplified_workflow_v1'")
+
+        sqlite_store.initialize()
+
+        rows = {row["id"]: row for row in repository.read_applications()}
+        self.assertEqual(rows["A0001"]["stage"], "considering")
+        self.assertEqual(rows["A0002"]["stage"], "applied")
+        self.assertEqual(rows["A0003"]["stage"], "interviewing")
+        self.assertEqual(rows["A0004"]["stage"], "offer")
+        self.assertEqual(rows["A0005"]["outcome"], "rejected")
+        active = {row["id"] for row in workflow.read_workflow()["stages"] if row["is_active"] == "1"}
+        self.assertEqual(active, {"considering", "applied", "recruiter-screen", "interviewing", "offer", "closed"})
+        ordered = [row["id"] for row in workflow.read_workflow()["stages"] if row["is_active"] == "1"]
+        self.assertEqual(ordered, ["considering", "applied", "recruiter-screen", "interviewing", "offer", "closed"])
 
     def test_closed_posting_requires_structured_outcome(self):
         sqlite_store.initialize()

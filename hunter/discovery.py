@@ -7,7 +7,7 @@ from difflib import SequenceMatcher
 from datetime import datetime, timedelta
 from urllib.parse import parse_qs, quote_plus, unquote, urljoin, urlparse, urlunparse
 
-from . import applications, browser_discovery, companies, posting_snapshots, repository, schema, settings, storage
+from . import applications, browser_discovery, candidate_sources, companies, posting_snapshots, repository, schema, settings, storage
 
 
 URL_PATTERN = re.compile(r"https?://[^\s<>'\"]+", re.I)
@@ -31,38 +31,171 @@ DISCOVERY_RESULT_LIMIT = 50
 DETAIL_ENRICHMENT_LIMIT = 12
 COMPANY_RESEARCH_LIMIT = 3
 CONTINUE_ENRICHMENT_LIMIT = 10
+DETAIL_ENRICHMENT_BATCH_LIMIT = 100
+MAX_DETAIL_ATTEMPTS = 3
 FRESHNESS_RECHECK_DAYS = 7
 MIN_READY_DESCRIPTION_CHARS = 500
 MIN_REVIEW_FIT_SCORE = 45
 SCREENED_STATUS = "screened"
 SCREENING_WARNING_PREFIX = "Screened from New: "
 DISCOVERY_EXCLUDED_COMPANY_INTEREST_STATUSES = {"not-interested", "archived"}
-TPM_QUERY_FAMILIES = [
+ROLE_QUERY_FAMILIES = [
     {
-        "id": "exact",
-        "label": "Technical program manager",
-        "terms": ["technical program manager"],
-    },
-    {
-        "id": "senior",
-        "label": "Senior technical program leadership",
+        "id": "technical-program",
+        "label": "Technical program leadership",
         "terms": [
+            "technical program manager",
             "senior technical program manager",
             "staff technical program manager",
             "principal technical program manager",
             "lead technical program manager",
+            "ai program manager",
         ],
+        "strong_terms": ["technical program manager"],
     },
     {
-        "id": "adjacent",
-        "label": "Adjacent technical program roles",
+        "id": "engineering-delivery",
+        "label": "Engineering delivery",
         "terms": [
-            "technical project manager",
             "engineering program manager",
+            "software program manager",
+            "technical project manager",
+            "technical delivery manager",
+            "engineering delivery lead",
+            "technical program lead",
+        ],
+        "strong_terms": [
+            "engineering program manager",
+            "software program manager",
+            "technical project manager",
             "technical delivery manager",
         ],
     },
+    {
+        "id": "product-platform",
+        "label": "Product and platform strategy",
+        "terms": [
+            "senior product manager",
+            "principal product manager",
+            "staff product manager",
+            "technical product manager",
+            "platform product manager",
+            "product program manager",
+            "product strategy lead",
+            "technical product lead",
+            "product platform lead",
+            "technology product management",
+            "product lead",
+        ],
+        "strong_terms": [
+            "senior product manager",
+            "principal product manager",
+            "staff product manager",
+            "technical product manager",
+            "platform product manager",
+            "product program manager",
+        ],
+    },
+    {
+        "id": "product-operations",
+        "label": "Product systems and operations",
+        "terms": [
+            "product operations manager",
+            "product ops manager",
+            "product systems manager",
+            "product systems lead",
+            "product development operations",
+            "product enablement manager",
+            "ai performance operations",
+        ],
+        "strong_terms": [
+            "product operations manager",
+            "product ops manager",
+            "product systems manager",
+            "product systems lead",
+            "ai performance operations",
+        ],
+    },
+    {
+        "id": "technologist-prototyping",
+        "label": "Technologist and prototyping",
+        "terms": [
+            "product technologist",
+            "creative technologist",
+            "design technologist",
+            "innovation lead",
+            "prototyping lead",
+        ],
+        "strong_terms": [
+            "product technologist",
+            "creative technologist",
+            "design technologist",
+        ],
+    },
+    {
+        "id": "customer-implementation",
+        "label": "Customer implementation",
+        "terms": [
+            "solutions program manager",
+            "implementation program manager",
+            "customer engineering program manager",
+            "technical implementation manager",
+            "technical engagement manager",
+        ],
+        "strong_terms": [
+            "solutions program manager",
+            "customer engineering program manager",
+            "technical implementation manager",
+            "technical engagement manager",
+        ],
+    },
+    {
+        "id": "games-interactive",
+        "label": "Games and interactive delivery",
+        "terms": [
+            "technical producer",
+            "game producer",
+            "development director",
+            "release manager",
+        ],
+        "strong_terms": ["technical producer", "game producer"],
+        "context_query": "(game OR gaming OR interactive)",
+    },
+    {
+        "id": "systems-hardware",
+        "label": "Systems and product development",
+        "terms": [
+            "systems program manager",
+            "product development program manager",
+            "new product introduction program manager",
+            "NPI program manager",
+        ],
+        "strong_terms": [
+            "systems program manager",
+            "product development program manager",
+            "new product introduction program manager",
+            "NPI program manager",
+        ],
+    },
 ]
+ROLE_QUERY_FAMILIES_BY_ID = {family["id"]: family for family in ROLE_QUERY_FAMILIES}
+ROLE_RESPONSIBILITY_SIGNALS = [
+    ("Cross-functional leadership", ["cross-functional", "cross functional", "multiple teams", "multi-team"]),
+    ("Roadmap and requirements", ["roadmap", "requirements", "product strategy"]),
+    ("Dependencies and risk", ["dependencies", "dependency management", "risk mitigation", "manage risks"]),
+    ("Technical delivery", ["software development lifecycle", "engineering teams", "technical delivery", "architecture"]),
+    ("Launch and release", ["launch", "release readiness", "release management", "ship products"]),
+    ("Customer implementation", ["customer implementation", "customer-facing", "service delivery", "solutions delivery"]),
+    ("Operating mechanisms", ["operating cadence", "operating mechanisms", "program governance", "process improvement"]),
+]
+GENERIC_ROLE_FAMILY_TERMS = {
+    "product lead",
+    "product enablement manager",
+    "innovation lead",
+    "prototyping lead",
+    "implementation program manager",
+    "development director",
+}
 SEARCH_ENGINE_HOSTS = {
     "duckduckgo.com",
     "google.com",
@@ -73,6 +206,7 @@ SEARCH_ENGINE_HOSTS = {
     "yahoo.com",
 }
 COLLECTION_HOSTS = {
+    "adzuna.com",
     "dice.com",
     "glassdoor.com",
     "indeed.com",
@@ -102,6 +236,7 @@ LOW_TRUST_SOURCE_HOSTS = {
     "tealhq.com",
     "theladders.com",
     "usvetjobs.com",
+    "adzuna.com",
 }
 IGNORE_REASONS = {
     "wrong-role",
@@ -290,7 +425,22 @@ def search_payload(row):
         ] if isinstance(excluded_terms, list) else []
     except (TypeError, ValueError):
         payload["excluded_terms"] = []
+    raw_role_family_ids = row.get("role_family_ids_json", "")
+    try:
+        decoded_role_family_ids = json.loads(raw_role_family_ids or "[]")
+        payload["role_family_ids"] = [
+            family_id
+            for family_id in decoded_role_family_ids
+            if family_id in ROLE_QUERY_FAMILIES_BY_ID
+        ] if isinstance(decoded_role_family_ids, list) else []
+    except (TypeError, ValueError):
+        payload["role_family_ids"] = []
+    if not storage.clean(raw_role_family_ids):
+        normalized_keywords = companies.normalized_text(row.get("keywords", ""))
+        if normalized_keywords == "tpm" or "technical program manager" in normalized_keywords:
+            payload["role_family_ids"] = [family["id"] for family in ROLE_QUERY_FAMILIES]
     payload.pop("lanes_json", None)
+    payload.pop("role_family_ids_json", None)
     payload.pop("excluded_terms_json", None)
     payload.pop("location", None)
     payload.pop("remote_location", None)
@@ -344,10 +494,17 @@ def upsert_search(search_id="", updates=None):
             if term and term.lower() not in {item.lower() for item in terms}:
                 terms.append(term)
         row["excluded_terms_json"] = json.dumps(terms, ensure_ascii=False)
+    if "role_family_ids" in (updates or {}):
+        role_family_ids = []
+        for value in (updates or {}).get("role_family_ids", []):
+            family_id = storage.clean(value)
+            if family_id in ROLE_QUERY_FAMILIES_BY_ID and family_id not in role_family_ids:
+                role_family_ids.append(family_id)
+        row["role_family_ids_json"] = json.dumps(role_family_ids)
     if not row.get("name"):
         raise ValueError("Discovery search name is required.")
-    if not row.get("keywords"):
-        raise ValueError("Discovery search keywords are required.")
+    if not row.get("keywords") and not search_payload(row).get("role_family_ids"):
+        raise ValueError("Add focus keywords or select at least one role family.")
     if not search_lanes(row):
         raise ValueError("Add at least one Discovery search lane.")
     row["updated_at"] = timestamp
@@ -369,17 +526,18 @@ def apply_search_exclusions(search_id, excluded_terms=None):
     rows = repository.read_discovery_candidates()
     changed_ids = []
     for candidate in rows:
-        if candidate.get("search_id", "").upper() != search["id"].upper():
+        if not candidate_belongs_to_search(candidate, search["id"]):
             continue
         if candidate.get("status") != "new":
             continue
         matches = matching_excluded_terms(search, candidate)
         if not matches:
             continue
-        candidate["status"] = "ignored"
-        candidate["ignore_reason"] = "search-exclusion"
-        candidate["ignore_reason_detail"] = ", ".join(matches)
-        candidate["ingested_application_id"] = ""
+        if len(candidate_search_ids(candidate)) == 1:
+            candidate["status"] = "ignored"
+            candidate["ignore_reason"] = "search-exclusion"
+            candidate["ignore_reason_detail"] = ", ".join(matches)
+            candidate["ingested_application_id"] = ""
         changed_ids.append(candidate.get("id", ""))
     if changed_ids:
         repository.write_discovery_candidates(rows)
@@ -413,18 +571,22 @@ def undo_search_exclusions(candidate_ids):
 
 def search_keyword_families(search):
     keywords = storage.clean(search.get("keywords", ""))
-    match = re.match(r"^technical program manager\b(.*)$", keywords, re.I)
-    if not match:
+    selected_ids = search.get("role_family_ids", [])
+    selected_families = [
+        ROLE_QUERY_FAMILIES_BY_ID[family_id]
+        for family_id in selected_ids
+        if family_id in ROLE_QUERY_FAMILIES_BY_ID
+    ]
+    if not selected_families:
         return [{"id": "saved", "label": "Saved keywords", "query": keywords}]
-    qualifiers = storage.clean(match.group(1))
+    qualifier_match = re.match(r"^(?:technical program manager|tpm)\b(.*)$", keywords, re.I)
+    qualifiers = storage.clean(qualifier_match.group(1) if qualifier_match else keywords)
     families = []
-    for family in TPM_QUERY_FAMILIES:
+    for family in selected_families:
         terms = family["terms"]
-        query = (
-            f'"{terms[0]}"'
-            if len(terms) == 1
-            else "(" + " OR ".join(f'"{term}"' for term in terms) + ")"
-        )
+        query = "(" + " OR ".join(f'"{term}"' for term in terms) + ")"
+        if family.get("context_query"):
+            query = f"{query} {family['context_query']}"
         families.append(
             {
                 "id": family["id"],
@@ -433,6 +595,114 @@ def search_keyword_families(search):
             }
         )
     return families
+
+
+def candidate_responsibility_signals(candidate):
+    text = companies.normalized_text(
+        " ".join(
+            [
+                storage.clean(candidate.get("title", "")),
+                storage.clean(candidate.get("description_excerpt", ""))
+                or storage.clean(candidate.get("description_text", ""))[:12_000],
+            ]
+        )[:12_000]
+    )
+    if not text:
+        return []
+    return [
+        label
+        for label, terms in ROLE_RESPONSIBILITY_SIGNALS
+        if any(companies.normalized_text(term) in text for term in terms)
+    ]
+
+
+def candidate_role_family(candidate, search=None):
+    title = companies.normalized_text(candidate.get("title", ""))
+    if not title:
+        return None
+    selected_ids = (search or {}).get("role_family_ids", [])
+    families = [
+        ROLE_QUERY_FAMILIES_BY_ID[family_id]
+        for family_id in selected_ids
+        if family_id in ROLE_QUERY_FAMILIES_BY_ID
+    ] if selected_ids else ROLE_QUERY_FAMILIES
+    candidate_text = companies.normalized_text(
+        " ".join(
+            [
+                storage.clean(candidate.get("title", "")),
+                storage.clean(candidate.get("description_excerpt", ""))
+                or storage.clean(candidate.get("description_text", ""))[:4_000],
+            ]
+        )[:4_000]
+    )
+    matches = []
+    for family_index, family in enumerate(families):
+        for term in family.get("terms", []):
+            if not companies.text_contains_phrase_variant(title, term):
+                continue
+            context_bonus = 0
+            if family["id"] == "games-interactive" and any(
+                companies.normalized_text(context) in candidate_text
+                for context in ["game", "gaming", "interactive"]
+            ):
+                context_bonus = 100
+            strong = any(
+                companies.text_contains_phrase_variant(title, strong_term)
+                for strong_term in family.get("strong_terms", [])
+            )
+            matches.append(
+                (
+                    context_bonus + (25 if strong else 0) + len(term.split()),
+                    -family_index,
+                    family,
+                    term,
+                    strong,
+                )
+            )
+    if not matches:
+        return None
+    _score, _order, family, matched_term, strong = max(matches, key=lambda item: (item[0], item[1]))
+    return {
+        "id": family["id"],
+        "label": family["label"],
+        "matched_term": matched_term,
+        "strong_title_match": strong,
+        "requires_responsibility": matched_term.lower() in GENERIC_ROLE_FAMILY_TERMS,
+    }
+
+
+def select_balanced_role_candidates(candidates, search, limit=DISCOVERY_RESULT_LIMIT):
+    ordered = sorted(
+        candidates,
+        key=lambda candidate: (
+            candidate.get("status") == "new",
+            candidate.get("_lane_matched", False),
+            candidate_rank_key(candidate),
+        ),
+        reverse=True,
+    )
+    groups = {}
+    for candidate in ordered:
+        family = candidate_role_family(candidate, search)
+        groups.setdefault(family["id"] if family else "saved", []).append(candidate)
+    if len(groups) <= 1:
+        return ordered[:limit]
+    quota = max(5, limit // len(groups))
+    selected = []
+    selected_ids = set()
+    family_order = [family["id"] for family in ROLE_QUERY_FAMILIES] + ["saved"]
+    family_order.extend(group_id for group_id in groups if group_id not in family_order)
+    for group_id in family_order:
+        for candidate in groups.get(group_id, [])[:quota]:
+            selected.append(candidate)
+            selected_ids.add(id(candidate))
+    if len(selected) < limit:
+        selected.extend(
+            candidate
+            for candidate in ordered
+            if id(candidate) not in selected_ids
+        )
+    return selected[:limit]
 
 
 def expanded_search_keywords(search):
@@ -827,7 +1097,7 @@ def company_from_posting_url(url, platform):
     host = parsed.netloc.lower().removeprefix("www.")
     segments = [segment for segment in parsed.path.split("/") if segment]
     slug = ""
-    if platform in {"greenhouse", "lever", "smartrecruiters"} and segments:
+    if platform in {"ashby", "greenhouse", "lever", "smartrecruiters"} and segments:
         slug = segments[0]
     elif platform == "workday":
         slug = host.split(".", 1)[0]
@@ -835,6 +1105,36 @@ def company_from_posting_url(url, platform):
         return ""
     words = re.sub(r"[-_]+", " ", slug).split()
     return " ".join(word.upper() if len(word) <= 4 else word.title() for word in words)
+
+
+def company_name_from_posting_evidence(candidate):
+    """Recover an employer name from a shared ATS posting without trusting its host."""
+    url = candidate.get("canonical_url") or candidate.get("url", "")
+    identity = companies.shared_job_board_identity(url)
+    if not identity:
+        return ""
+    description = re.sub(r"\s+", " ", storage.clean(candidate.get("description_text", ""))).strip()
+    title = re.sub(r"\s+", " ", storage.clean(candidate.get("title", ""))).strip()
+    if title and description:
+        match = re.match(
+            rf"^Job Application for\s+{re.escape(title)}\s+at\s+(.+?)\s+Back to jobs\b",
+            description,
+            re.I,
+        )
+        if match:
+            return storage.clean(match.group(1))
+
+    # Prefer the employer's own casing from the posting body. This also turns
+    # concatenated tenants such as `planetlabs` into `Planet Labs`.
+    tenant_keys = companies.job_board_tenant_keys(identity[1])
+    words = re.findall(r"[\w&.+'’-]+", description, re.UNICODE)
+    for start in range(len(words)):
+        for length in range(1, 7):
+            phrase = " ".join(words[start : start + length])
+            if companies.compact_company_identity(phrase) in tenant_keys:
+                return storage.clean(phrase).strip(" .,:;-")
+
+    return company_from_posting_url(url, identity[0])
 
 
 def apply_search_result_details(candidate, result):
@@ -933,7 +1233,14 @@ def result_has_location_signal(result, desired_location):
     return False
 
 
-def candidate_matches_lane(candidate, result, lane):
+def candidate_matches_lane(
+    candidate,
+    result,
+    lane,
+    *,
+    normalized_candidate_context=None,
+    normalized_candidate_location=None,
+):
     expected_modes = set(lane.get("work_modes", []))
     actual_mode = storage.clean(candidate.get("work_mode", "")).lower()
     actual_mode = "on-site" if actual_mode in {"onsite", "on site"} else actual_mode
@@ -941,19 +1248,23 @@ def candidate_matches_lane(candidate, result, lane):
         return False
 
     desired_location = normalized_location_text(lane.get("location", ""))
-    candidate_text = normalized_location_text(
-        " ".join(
-            [
-                candidate.get("location", ""),
-                candidate.get("description_text", ""),
-                result.get("title", ""),
-                result.get("snippet", ""),
-            ]
+    candidate_text = normalized_candidate_context
+    if candidate_text is None:
+        candidate_text = normalized_location_text(
+            " ".join(
+                [
+                    candidate.get("location", ""),
+                    candidate.get("description_text", ""),
+                    result.get("title", ""),
+                    result.get("snippet", ""),
+                ]
+            )
         )
-    )
     country_wide = desired_location in {"united states", "us", "usa", "u s"}
     remote_only = expected_modes == {"remote"}
-    candidate_location = normalized_location_text(candidate.get("location", ""))
+    candidate_location = normalized_candidate_location
+    if candidate_location is None:
+        candidate_location = normalized_location_text(candidate.get("location", ""))
     if remote_only:
         if actual_mode != "remote":
             return False
@@ -985,6 +1296,85 @@ def meaningful_description(value):
         ):
             return False
     return True
+
+
+def candidate_detail_gaps(candidate):
+    gaps = []
+    has_identity = bool(
+        (candidate.get("company_id") or candidate.get("company"))
+        and candidate.get("title")
+    )
+    source_url = storage.clean(candidate.get("canonical_url") or candidate.get("url", ""))
+    if not has_identity:
+        gaps.append(
+            {
+                "id": "missing-identity",
+                "label": "Company or role identity is missing",
+                "automatic": bool(source_url),
+            }
+        )
+    if not meaningful_description(candidate.get("description_text", "")):
+        gaps.append(
+            {
+                "id": "missing-description",
+                "label": "Complete posting description is missing",
+                "automatic": bool(source_url),
+            }
+        )
+    if not (
+        candidate.get("location")
+        or storage.clean(candidate.get("work_mode", "")).lower() == "remote"
+    ):
+        gaps.append(
+            {
+                "id": "missing-location",
+                "label": "Role location eligibility is missing",
+                "automatic": bool(source_url),
+            }
+        )
+    if (
+        candidate.get("source_platform") == "linkedin"
+        and LINKEDIN_DETAILS_WARNING in (candidate.get("warnings", "") or "").splitlines()
+    ):
+        gaps.append(
+            {
+                "id": "source-verification",
+                "label": "LinkedIn posting still needs detail-page verification",
+                "automatic": bool(source_url),
+            }
+        )
+    return gaps
+
+
+def detail_attempt_count(candidate):
+    try:
+        return max(0, int(candidate.get("detail_attempt_count", "") or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def candidate_detail_state(candidate):
+    gaps = candidate_detail_gaps(candidate)
+    if not gaps:
+        return "ready"
+    if detail_attempt_count(candidate) >= MAX_DETAIL_ATTEMPTS or any(
+        not gap["automatic"] for gap in gaps
+    ):
+        return "needs-input"
+    if {gap["id"] for gap in gaps} == {"source-verification"}:
+        return "source-verification"
+    return "pending-enrichment"
+
+
+def candidate_detail_next_action(candidate):
+    state = candidate_detail_state(candidate)
+    if state == "ready":
+        return "Ready for review"
+    if state == "needs-input":
+        return "Review the unresolved fields or add a direct employer posting"
+    if state == "source-verification":
+        return "Hunter can verify the LinkedIn detail page in the background"
+    return "Hunter can continue automatic detail enrichment"
 
 
 def apply_browser_details(candidate, details):
@@ -1025,7 +1415,7 @@ def apply_browser_details(candidate, details):
             candidate.get("description_text", ""),
         )
     if (
-        candidate.get("company")
+        (candidate.get("company_id") or candidate.get("company"))
         and candidate.get("title")
         and meaningful_description(candidate.get("description_text", ""))
     ):
@@ -1050,6 +1440,200 @@ def apply_browser_details(candidate, details):
     if availability:
         candidate["freshness_checked_at"] = now_iso()
     return candidate
+
+
+def greenhouse_job_reference(url):
+    parsed = urlparse(companies.normalize_url(url))
+    if parsed.netloc.lower().removeprefix("www.") not in {
+        "boards.greenhouse.io",
+        "job-boards.greenhouse.io",
+    }:
+        return None
+    parts = [part for part in parsed.path.split("/") if part]
+    try:
+        jobs_index = parts.index("jobs")
+    except ValueError:
+        return None
+    if jobs_index < 1 or len(parts) <= jobs_index + 1:
+        return None
+    board_token = parts[jobs_index - 1]
+    job_id = re.match(r"\d+", parts[jobs_index + 1])
+    if not board_token or not job_id:
+        return None
+    return board_token, job_id.group(0)
+
+
+def provider_candidate_details(url, fetcher=None):
+    reference = greenhouse_job_reference(url)
+    if reference:
+        board_token, job_id = reference
+        api_url = companies.greenhouse_api_url(board_token, f"jobs/{job_id}?content=true")
+        fetched = (fetcher or companies.fetch_careers_page)(api_url)
+        if fetched.get("error") or not fetched.get("html"):
+            return {}, storage.clean(fetched.get("error", "")) or "Greenhouse returned no job details."
+        try:
+            job = json.loads(fetched.get("html", "") or "{}")
+        except json.JSONDecodeError:
+            return {}, "Greenhouse returned an unreadable job response."
+        if not isinstance(job, dict) or not job.get("title"):
+            return {}, "Greenhouse did not return an individual job."
+        description = companies.clean_html_text(
+            " ".join(
+                companies.greenhouse_text_value(job.get(field))
+                for field in ["content", "description"]
+                if job.get(field)
+            )
+        )[:MAX_DESCRIPTION_CHARS]
+        location = companies.greenhouse_location(job)
+        return {
+            "title": storage.clean(str(job.get("title", "") or "")),
+            "canonical_url": companies.greenhouse_candidate_url(
+                {**job, "board_url": companies.greenhouse_board_url_for_token(board_token)}
+            ) or companies.normalize_url(url),
+            "location": location,
+            "work_mode": work_mode_from_text(location, description),
+            "description_text": description,
+            "availability_status": "open",
+        }, ""
+
+    generic = extracted_candidate(url, fetcher=fetcher)
+    posting_evidence = generic.pop("_posting_evidence", "")
+    if posting_evidence == "individual":
+        return generic, ""
+    error = "; ".join(
+        line
+        for line in storage.clean(generic.get("warnings", "")).splitlines()
+        if line
+    )
+    return {}, error or "The posting page did not provide verifiable job details."
+
+
+def matching_company_from_linkedin_job_url(value, company_rows=None):
+    parsed = urlparse(companies.normalize_url(value))
+    if "linkedin.com" not in parsed.netloc.lower():
+        return None
+    slug = next((part for part in parsed.path.split("/") if "-at-" in part), "")
+    match = re.search(r"-at-(.+?)-\d{6,}$", slug, re.I)
+    if not match:
+        return None
+    slug_key = companies.normalized_key(match.group(1).replace("-", " "))
+    if len(slug_key) < 5:
+        return None
+    corporate_suffixes = {"co", "company", "corp", "corporation", "inc", "incorporated", "llc", "ltd"}
+
+    def without_suffix(value):
+        parts = value.split()
+        while parts and parts[-1] in corporate_suffixes:
+            parts.pop()
+        return " ".join(parts)
+
+    wanted = without_suffix(slug_key)
+    for company in company_rows if company_rows is not None else repository.read_companies():
+        if any(without_suffix(key) == wanted for key in companies.company_keys(company)):
+            return company
+    return None
+
+
+def apply_known_company_candidate_source(candidate, company_candidates=None):
+    company_id = storage.clean(candidate.get("company_id", "")).upper()
+    if not company_id and candidate.get("company"):
+        company = companies.matching_company_record(name=candidate.get("company", ""))
+        company_id = company.get("id", "") if company else ""
+    if not company_id:
+        return False
+    candidate_title = normalized_candidate_title(candidate)
+    if not candidate_title:
+        return False
+    matches = []
+    for source in company_candidates if company_candidates is not None else repository.read_company_posting_candidates():
+        if source.get("company_id", "").upper() != company_id:
+            continue
+        if source.get("status") == "unavailable" or source.get("scan_state") == "unavailable":
+            continue
+        source_title = normalized_candidate_title(source)
+        if not source_title:
+            continue
+        similarity = 1.0 if source_title == candidate_title else SequenceMatcher(None, source_title, candidate_title).ratio()
+        if similarity < 0.9:
+            continue
+        source_url = companies.normalize_url(source.get("url", ""))
+        if not source_url or "linkedin.com" in urlparse(source_url).netloc.lower():
+            continue
+        matches.append((similarity, source))
+    if not matches:
+        return False
+    _similarity, source = max(matches, key=lambda item: item[0])
+    candidate["company_id"] = company_id
+    candidate["canonical_url"] = companies.normalize_url(source.get("url", ""))
+    for field in ["location", "work_mode"]:
+        if source.get(field) and not candidate.get(field):
+            candidate[field] = source.get(field, "")
+    excerpt = storage.clean(source.get("description_excerpt", ""))
+    if meaningful_description(excerpt) and not meaningful_description(candidate.get("description_text", "")):
+        candidate["description_text"] = excerpt[:MAX_DESCRIPTION_CHARS]
+    sync_candidate_source_urls(candidate)
+    return True
+
+
+def resolve_candidate_details(
+    candidate,
+    fetcher=None,
+    browser_detailer=None,
+    company_rows=None,
+    company_candidates=None,
+):
+    timestamp = now_iso()
+    before_state = candidate_detail_state(candidate)
+    before = tuple(candidate.get(field, "") for field in [
+        "company_id", "title", "canonical_url", "location", "work_mode", "description_text", "warnings"
+    ])
+    candidate["detail_attempt_count"] = str(detail_attempt_count(candidate) + 1)
+    candidate["detail_last_attempt_at"] = timestamp
+    candidate["detail_last_error"] = ""
+
+    inferred_company = matching_company_from_linkedin_job_url(
+        candidate.get("canonical_url") or candidate.get("url", ""),
+        company_rows=company_rows,
+    )
+    if inferred_company:
+        candidate["company_id"] = inferred_company.get("id", "")
+        candidate["company"] = candidate.get("company") or inferred_company.get("name", "")
+    apply_known_company_candidate_source(candidate, company_candidates=company_candidates)
+
+    target_url = candidate.get("canonical_url") or candidate.get("url", "")
+    errors = []
+    provider_details, provider_error = provider_candidate_details(target_url, fetcher=fetcher)
+    if provider_details:
+        apply_browser_details(candidate, provider_details)
+    elif provider_error:
+        errors.append(provider_error)
+
+    if candidate_detail_gaps(candidate) and browser_detailer is not None and target_url:
+        try:
+            browser_details = browser_detailer(target_url) or {}
+        except (browser_discovery.BrowserDiscoveryError, RuntimeError) as exc:
+            browser_details = {}
+            errors.append(storage.clean(str(exc)))
+        if browser_details:
+            apply_browser_details(candidate, browser_details)
+        elif not errors:
+            errors.append("No readable posting details were returned.")
+
+    connect_candidate_company(candidate, seen_at=timestamp)
+    score_candidate(candidate, timestamp)
+    sync_candidate_source_urls(candidate)
+    after = tuple(candidate.get(field, "") for field in [
+        "company_id", "title", "canonical_url", "location", "work_mode", "description_text", "warnings"
+    ])
+    after_state = candidate_detail_state(candidate)
+    if after_state != "ready" and errors:
+        candidate["detail_last_error"] = "; ".join(dict.fromkeys(error for error in errors if error))
+    return {
+        "changed": before != after or before_state != after_state,
+        "before_state": before_state,
+        "after_state": after_state,
+        "errors": errors,
+    }
 
 
 def posting_valid_through_expired(value, reference=None):
@@ -1139,6 +1723,42 @@ def sync_candidate_source_urls(candidate):
     return candidate
 
 
+def candidate_search_ids(candidate):
+    """Return every saved search associated with one canonical candidate."""
+    search_ids = []
+    raw_memberships = candidate.get("search_ids_json", "")
+    try:
+        decoded = json.loads(raw_memberships or "[]")
+    except (TypeError, ValueError):
+        decoded = []
+    values = decoded if storage.clean(raw_memberships) and isinstance(decoded, list) else [candidate.get("search_id", "")]
+    for value in values:
+        search_id = storage.clean(value).upper()
+        if search_id and search_id not in search_ids:
+            search_ids.append(search_id)
+    return search_ids
+
+
+def set_candidate_search_ids(candidate, search_ids):
+    normalized = []
+    for value in search_ids:
+        search_id = storage.clean(value).upper()
+        if search_id and search_id not in normalized:
+            normalized.append(search_id)
+    candidate["search_ids_json"] = json.dumps(normalized, ensure_ascii=False)
+    if not candidate.get("search_id") and normalized:
+        candidate["search_id"] = normalized[0]
+    return candidate
+
+
+def add_candidate_search(candidate, search_id):
+    return set_candidate_search_ids(candidate, [*candidate_search_ids(candidate), search_id])
+
+
+def candidate_belongs_to_search(candidate, search_id):
+    return storage.clean(search_id).upper() in candidate_search_ids(candidate)
+
+
 def discovery_excluded_company_identity(company_rows=None):
     company_ids = set()
     company_keys = set()
@@ -1205,8 +1825,18 @@ def connect_candidate_company(candidate, seen_at=""):
     if candidate.get("company_id"):
         try:
             company = companies.get_company(candidate.get("company_id", ""))
+            source_url = candidate.get("canonical_url") or candidate.get("url", "")
+            if companies.company_shared_job_board_url_conflicts(company, source_url):
+                company = None
+                candidate["company_id"] = ""
         except ValueError:
             candidate["company_id"] = ""
+    if company is None and not candidate.get("company"):
+        candidate["company"] = company_name_from_posting_evidence(candidate)
+    if company is None and candidate.get("company"):
+        company = companies.matching_company_record_from_url(
+            candidate.get("canonical_url") or candidate.get("url", "")
+        ) or companies.record_discovered_company(candidate, seen_at=seen_at)
     if company is None:
         source_company = companies.matching_company_record_from_url(
             candidate.get("canonical_url") or candidate.get("url", "")
@@ -1233,26 +1863,78 @@ def connect_candidate_company(candidate, seen_at=""):
             ),
             checked_at=storage.clean(seen_at) or now_iso(),
         )
+    # Candidate discovery and company-first discovery share the same evaluator.
+    # Marking here is cheap and idempotent; the local API starts the background
+    # worker after the candidate search response has been assembled.
+    from . import company_evaluation
+
+    company_evaluation.mark_pending(
+        [company.get("id", "")],
+        profile=company_evaluation.load_profile(),
+    )
+    company = companies.get_company(company.get("id", ""))
     return company
 
 
 def canonicalize_candidate_rows(rows):
     canonical = []
+    identity_indices = {}
+    company_indices = {}
+    indexed_identity_keys = {}
+    indexed_company_keys = {}
     status_rank = {
-        "ingested": 6,
+        "pursued": 6,
         "duplicate": 5,
         "new": 4,
         "ignored": 3,
         "unavailable": 2,
         SCREENED_STATUS: 1,
     }
+
+    def remove_index(index):
+        for key in indexed_identity_keys.get(index, set()):
+            indices = identity_indices.get(key)
+            if indices is not None:
+                indices.discard(index)
+                if not indices:
+                    identity_indices.pop(key, None)
+        company_key = indexed_company_keys.get(index, "")
+        if company_key:
+            indices = company_indices.get(company_key)
+            if indices is not None:
+                indices.discard(index)
+                if not indices:
+                    company_indices.pop(company_key, None)
+
+    def add_index(index, candidate):
+        identity_keys = candidate_identity_keys(candidate)
+        company_key = normalized_candidate_company(candidate)
+        indexed_identity_keys[index] = identity_keys
+        indexed_company_keys[index] = company_key
+        for key in identity_keys:
+            identity_indices.setdefault(key, set()).add(index)
+        if company_key:
+            company_indices.setdefault(company_key, set()).add(index)
+
     for original in rows:
         candidate = dict(original)
         sync_candidate_source_urls(candidate)
-        duplicate = matching_candidate(canonical, candidate)
-        if duplicate is None:
+        set_candidate_search_ids(candidate, candidate_search_ids(candidate))
+        candidate_keys = candidate_identity_keys(candidate)
+        possible_indices = set()
+        for key in candidate_keys:
+            possible_indices.update(identity_indices.get(key, set()))
+        company_key = normalized_candidate_company(candidate)
+        for index in company_indices.get(company_key, set()):
+            if candidates_semantically_match(canonical[index], candidate):
+                possible_indices.add(index)
+        if not possible_indices:
+            index = len(canonical)
             canonical.append(candidate)
+            add_index(index, candidate)
             continue
+        index = min(possible_indices)
+        duplicate = canonical[index]
         duplicate_priority = (
             status_rank.get(duplicate.get("status", ""), 0),
             candidate_rank_key(duplicate),
@@ -1261,8 +1943,8 @@ def canonicalize_candidate_rows(rows):
             status_rank.get(candidate.get("status", ""), 0),
             candidate_rank_key(candidate),
         )
+        remove_index(index)
         if candidate_priority > duplicate_priority:
-            index = canonical.index(duplicate)
             preserved_status = candidate.get("status", "")
             merge_candidate(candidate, duplicate)
             candidate["status"] = preserved_status
@@ -1271,6 +1953,7 @@ def canonicalize_candidate_rows(rows):
             preserved_status = duplicate.get("status", "")
             merge_candidate(duplicate, candidate)
             duplicate["status"] = preserved_status
+        add_index(index, canonical[index])
     return canonical
 
 
@@ -1307,6 +1990,34 @@ def sync_discovered_companies():
     return linked_count
 
 
+def api_result_matches(result, search):
+    lane_ids = set(result.get("lane_ids", []))
+    family_ids = set(result.get("role_family_ids", []))
+    lanes = [
+        lane
+        for lane in search.get("lanes", [])
+        if not lane_ids or lane.get("id", "") in lane_ids
+    ]
+    families = [
+        family
+        for family in search_keyword_families(search)
+        if not family_ids or family.get("id", "") in family_ids
+    ]
+    strategy = {
+        "id": result.get("provider", "api"),
+        "label": {
+            "ats": "Direct company career sources",
+            "openai": "OpenAI source-backed web search",
+            "adzuna": "Jobs by Adzuna",
+        }.get(result.get("provider", ""), "API search"),
+    }
+    return [
+        {"strategy": strategy, "lane": lane, "family": family}
+        for lane in lanes
+        for family in families
+    ]
+
+
 def run_search(
     search_id,
     search_fetcher=None,
@@ -1314,6 +2025,10 @@ def run_search(
     browser_searcher=None,
     browser_detailer=None,
     company_researcher=None,
+    source_mode="api",
+    openai_requester=None,
+    adzuna_fetcher=None,
+    progress=None,
 ):
     search = get_search(search_id)
     timestamp = now_iso()
@@ -1323,6 +2038,7 @@ def run_search(
     found_by_url = {}
     evaluated_count = 0
     known_candidate_ids = set()
+    known_membership_candidate_ids = set()
     duplicate_count = 0
     skip_reasons = {}
     screened_reasons = {}
@@ -1334,7 +2050,12 @@ def run_search(
             counter[reason] = counter.get(reason, 0) + count
 
     chrome_browser = None
-    if search_fetcher is None and browser_searcher is None:
+    use_api_sources = (
+        source_mode != "browser"
+        and search_fetcher is None
+        and browser_searcher is None
+    )
+    if source_mode == "browser" and search_fetcher is None and browser_searcher is None:
         chrome_browser = browser_discovery.HunterChrome()
 
         def browser_searcher(engine, value, page):
@@ -1345,114 +2066,149 @@ def run_search(
 
     attempted_sources = 0
     failed_sources = 0
-    for lane in search.get("lanes", []):
-        for family in search_keyword_families(search):
-            for strategy in BUILT_IN_SEARCH_STRATEGIES:
-                query = discovery_query(search, lane, strategy, family["query"])
-                attempted_sources += 1
-                browser_engine = "linkedin" if strategy["id"] == "linkedin" else "google"
-                engine = ""
-                source_items = []
-                source_seen = set()
-                page_limit = 1 if search_fetcher is not None else (
-                    LINKEDIN_PAGE_COUNT if strategy["id"] == "linkedin" else GOOGLE_PAGE_COUNT
+    if use_api_sources:
+        bundle = candidate_sources.provider_bundle(
+            search,
+            ROLE_QUERY_FAMILIES,
+            fetcher=adzuna_fetcher or posting_fetcher,
+            openai_requester=openai_requester,
+            progress=progress,
+        )
+        source_runs.extend(bundle["sources"])
+        errors.extend(bundle["errors"])
+        attempted_sources = len(source_runs)
+        failed_sources = sum(source.get("page_count", 0) == 0 for source in source_runs)
+        for item in bundle["results"]:
+            matches = api_result_matches(item, search)
+            if not matches:
+                continue
+            normalized_url = (
+                storage.clean(item.get("url", ""))
+                if item.get("provider") == "adzuna"
+                else normalize_search_result_url(item.get("url", ""))
+            )
+            if not normalized_url:
+                continue
+            item = {**item, "url": normalized_url}
+            existing = found_by_url.get(normalized_url)
+            if existing:
+                duplicate_count += 1
+                existing["matches"].extend(
+                    match for match in matches if match not in existing["matches"]
                 )
-                successful_pages = 0
-                source_error = ""
-                skipped_after_verification = browser_engine in blocked_engines
-                if skipped_after_verification:
-                    source_error = blocked_engines[browser_engine]
-                for page in range(0 if skipped_after_verification else page_limit):
-                    attempts = []
-                    try:
+                continue
+            combined = {**item, "matches": matches}
+            found_by_url[normalized_url] = combined
+            found.append(combined)
+    else:
+        for lane in search.get("lanes", []):
+            for family in search_keyword_families(search):
+                for strategy in BUILT_IN_SEARCH_STRATEGIES:
+                    query = discovery_query(search, lane, strategy, family["query"])
+                    attempted_sources += 1
+                    browser_engine = "linkedin" if strategy["id"] == "linkedin" else "google"
+                    engine = ""
+                    source_items = []
+                    source_seen = set()
+                    page_limit = 1 if search_fetcher is not None else (
+                        LINKEDIN_PAGE_COUNT if strategy["id"] == "linkedin" else GOOGLE_PAGE_COUNT
+                    )
+                    successful_pages = 0
+                    source_error = ""
+                    skipped_after_verification = browser_engine in blocked_engines
+                    if skipped_after_verification:
+                        source_error = blocked_engines[browser_engine]
+                    for page in range(0 if skipped_after_verification else page_limit):
+                        attempts = []
+                        try:
+                            if search_fetcher is not None:
+                                page_items, attempts = fetch_search_results(query, fetcher=search_fetcher)
+                                engine = attempts[-1]["engine"] if attempts else ""
+                            elif strategy["id"] == "linkedin":
+                                engine = "hunter-chrome-linkedin"
+                                page_items = fetch_browser_results(
+                                    "linkedin",
+                                    linkedin_search_url(search, lane, family["query"]),
+                                    page=page,
+                                    searcher=browser_searcher,
+                                )
+                            else:
+                                engine = "hunter-chrome-google"
+                                page_items = fetch_browser_results(
+                                    "google",
+                                    query,
+                                    page=page,
+                                    searcher=browser_searcher,
+                                )
+                            successful_pages += 1
+                        except browser_discovery.BrowserDiscoveryError as exc:
+                            source_error = storage.clean(str(exc))
+                            blocked_engines[browser_engine] = source_error
+                            break
+                        except RuntimeError as exc:
+                            page_items = []
+                            source_error = storage.clean(str(exc))
+                        attempt_errors = [attempt["error"] for attempt in attempts if attempt.get("error")]
+                        if attempt_errors and not page_items:
+                            source_error = attempt_errors[-1]
+                        page_new_count = 0
+                        for item in page_items:
+                            if item["url"] in source_seen:
+                                duplicate_count += 1
+                                continue
+                            source_seen.add(item["url"])
+                            source_items.append(item)
+                            page_new_count += 1
                         if search_fetcher is not None:
-                            page_items, attempts = fetch_search_results(query, fetcher=search_fetcher)
-                            engine = attempts[-1]["engine"] if attempts else ""
-                        elif strategy["id"] == "linkedin":
-                            engine = "hunter-chrome-linkedin"
-                            page_items = fetch_browser_results(
-                                "linkedin",
-                                linkedin_search_url(search, lane, family["query"]),
-                                page=page,
-                                searcher=browser_searcher,
-                            )
-                        else:
-                            engine = "hunter-chrome-google"
-                            page_items = fetch_browser_results(
-                                "google",
-                                query,
-                                page=page,
-                                searcher=browser_searcher,
-                            )
-                        successful_pages += 1
-                    except browser_discovery.BrowserDiscoveryError as exc:
-                        source_error = storage.clean(str(exc))
-                        blocked_engines[browser_engine] = source_error
-                        break
-                    except RuntimeError as exc:
-                        page_items = []
-                        source_error = storage.clean(str(exc))
-                    attempt_errors = [attempt["error"] for attempt in attempts if attempt.get("error")]
-                    if attempt_errors and not page_items:
-                        source_error = attempt_errors[-1]
-                    page_new_count = 0
-                    for item in page_items:
-                        if item["url"] in source_seen:
-                            duplicate_count += 1
-                            continue
-                        source_seen.add(item["url"])
-                        source_items.append(item)
-                        page_new_count += 1
-                    if search_fetcher is not None:
-                        break
-                    continue_yield = (
-                        LINKEDIN_CONTINUE_YIELD
-                        if strategy["id"] == "linkedin"
-                        else GOOGLE_CONTINUE_YIELD
-                    )
-                    if page_new_count < continue_yield:
-                        break
+                            break
+                        continue_yield = (
+                            LINKEDIN_CONTINUE_YIELD
+                            if strategy["id"] == "linkedin"
+                            else GOOGLE_CONTINUE_YIELD
+                        )
+                        if page_new_count < continue_yield:
+                            break
 
-                if successful_pages == 0:
-                    failed_sources += 1
-                if (
-                    source_error
-                    and not skipped_after_verification
-                    and browser_engine not in reported_browser_errors
-                ):
-                    errors.append(
-                        f"{strategy['label']} · {lane.get('label') or lane.get('location')}: {source_error}"
+                    if successful_pages == 0:
+                        failed_sources += 1
+                    if (
+                        source_error
+                        and not skipped_after_verification
+                        and browser_engine not in reported_browser_errors
+                    ):
+                        errors.append(
+                            f"{strategy['label']} · {lane.get('label') or lane.get('location')}: {source_error}"
+                        )
+                        reported_browser_errors.add(browser_engine)
+                    source_runs.append(
+                        {
+                            "source": strategy["id"],
+                            "label": strategy["label"],
+                            "query_family": family["id"],
+                            "query_family_label": family["label"],
+                            "lane_id": lane.get("id", ""),
+                            "lane_label": lane.get("label", "") or lane.get("location", ""),
+                            "query": query,
+                            "found_count": len(source_items),
+                            "page_count": successful_pages,
+                            "engine": engine,
+                        }
                     )
-                    reported_browser_errors.add(browser_engine)
-                source_runs.append(
-                    {
-                        "source": strategy["id"],
-                        "label": strategy["label"],
-                        "query_family": family["id"],
-                        "query_family_label": family["label"],
-                        "lane_id": lane.get("id", ""),
-                        "lane_label": lane.get("label", "") or lane.get("location", ""),
-                        "query": query,
-                        "found_count": len(source_items),
-                        "page_count": successful_pages,
-                        "engine": engine,
-                    }
-                )
-                for item in source_items:
-                    existing = found_by_url.get(item["url"])
-                    match_context = {"strategy": strategy, "lane": lane, "family": family}
-                    if existing:
-                        duplicate_count += 1
-                        existing["matches"].append(match_context)
-                        continue
-                    combined = {**item, "matches": [match_context]}
-                    found_by_url[item["url"]] = combined
-                    found.append(combined)
+                    for item in source_items:
+                        existing = found_by_url.get(item["url"])
+                        match_context = {"strategy": strategy, "lane": lane, "family": family}
+                        if existing:
+                            duplicate_count += 1
+                            existing["matches"].append(match_context)
+                            continue
+                        combined = {**item, "matches": [match_context]}
+                        found_by_url[item["url"]] = combined
+                        found.append(combined)
     found = found[:RAW_DISCOVERY_RESULT_LIMIT]
     evaluated_count = len(found)
 
     if attempted_sources and failed_sources == attempted_sources:
-        first_error = errors[0].split(": ", 1)[-1] if errors else "Hunter Chrome search was unavailable."
+        first_error = errors[0].split(": ", 1)[-1] if errors else "Candidate search providers were unavailable."
         raise RuntimeError(first_error)
 
     stored_candidates = canonicalize_candidate_rows(
@@ -1469,6 +2225,8 @@ def run_search(
             }
         )
         apply_search_result_details(candidate, result)
+        candidate["description_excerpt"] = storage.clean(result.get("snippet", ""))[:4_000]
+        candidate["description_text"] = storage.clean(result.get("description_text", ""))[:MAX_DESCRIPTION_CHARS]
         if candidate.get("company"):
             company = companies.matching_company_record(
                 name=candidate.get("company", ""),
@@ -1478,6 +2236,8 @@ def run_search(
         existing = matching_candidate(stored_candidates, candidate)
         if existing:
             known_candidate_ids.add(existing.get("id", ""))
+            if candidate_matches_search(candidate, search):
+                known_membership_candidate_ids.add(existing.get("id", ""))
             continue
         unseen_found.append(result)
     found = unseen_found
@@ -1486,14 +2246,53 @@ def run_search(
     skipped_count = 0
     for result in found:
         candidate = {field: "" for field in schema.DISCOVERY_CANDIDATE_FIELDS}
-        candidate.update(extracted_candidate(result["url"], fetcher=posting_fetcher))
+        if result.get("provider") == "ats":
+            candidate.update(
+                {
+                    "url": result.get("url", ""),
+                    "canonical_url": result.get("url", ""),
+                    "title": result.get("title", ""),
+                    "location": result.get("location", ""),
+                    "work_mode": result.get("work_mode", ""),
+                    "source_platform": result.get("source_platform", "") or source_platform(result.get("url", "")),
+                    "description_text": result.get("description_text", ""),
+                    "description_excerpt": result.get("snippet", ""),
+                    "fit_score": result.get("fit_score", ""),
+                    "fit_summary": result.get("fit_summary", ""),
+                    "fit_checked_at": result.get("fit_checked_at", ""),
+                    "freshness_status": "confirmed-open",
+                    "freshness_checked_at": result.get("last_verified_at", "") or timestamp,
+                    "processing_status": (
+                        "ready" if meaningful_description(result.get("description_text", "")) else "partial"
+                    ),
+                    "_posting_evidence": "individual",
+                }
+            )
+        else:
+            candidate.update(extracted_candidate(result["url"], fetcher=posting_fetcher))
         apply_search_result_details(candidate, result)
+        if not candidate.get("description_excerpt"):
+            candidate["description_excerpt"] = storage.clean(result.get("snippet", ""))[:4_000]
+        if not candidate.get("description_text"):
+            candidate["description_text"] = storage.clean(result.get("description_text", ""))[:MAX_DESCRIPTION_CHARS]
+        if result.get("provider") == "adzuna":
+            # Adzuna requires its redirect URL to remain the user-facing link.
+            # The fetched destination may still supply title, location, and job details.
+            candidate["url"] = result["url"]
+            candidate["canonical_url"] = result["url"]
+            candidate["source_platform"] = "adzuna"
         enrich_workday_candidate(candidate, fetcher=posting_fetcher)
         posting_evidence = candidate.pop("_posting_evidence", "")
         if posting_evidence != "individual":
-            if browser_detailer is None or not likely_individual_posting(
-                candidate.get("canonical_url") or candidate.get("url", ""),
-                candidate.get("title", ""),
+            provider_listing = result.get("provider") in {"openai", "adzuna"} and bool(
+                candidate.get("title") and candidate.get("company")
+            )
+            if not provider_listing and (
+                browser_detailer is None
+                or not likely_individual_posting(
+                    candidate.get("canonical_url") or candidate.get("url", ""),
+                    candidate.get("title", ""),
+                )
             ):
                 skipped_count += 1
                 record_reason(skip_reasons, "invalid-posting-page")
@@ -1550,6 +2349,7 @@ def run_search(
                 "notes": "Found automatically in Discovery.",
             }
         )
+        add_candidate_search(candidate, search["id"])
         score_candidate(candidate, timestamp)
         apply_candidate_review_admission(candidate, search=search)
         candidate["_match_context"] = matched_context
@@ -1682,15 +2482,7 @@ def run_search(
     prepared = deduped_prepared
     qualified_count = sum(candidate.get("status") == "new" for candidate in prepared)
     screened_count = sum(candidate.get("status") == SCREENED_STATUS for candidate in prepared)
-    selected = sorted(
-        prepared,
-        key=lambda candidate: (
-            candidate.get("status") == "new",
-            candidate.get("_lane_matched", False),
-            candidate_rank_key(candidate),
-        ),
-        reverse=True,
-    )[:DISCOVERY_RESULT_LIMIT]
+    selected = select_balanced_role_candidates(prepared, search, DISCOVERY_RESULT_LIMIT)
     limited_count = max(0, len(prepared) - len(selected))
     company_by_id = {}
     connected_selected = []
@@ -1713,8 +2505,7 @@ def run_search(
         apply_candidate_review_admission(candidate, company, search)
     selected = connected_selected
     lane_unmatched_count = sum(
-        candidate.get("status") == "new"
-        and not candidate.get("_lane_matched", False)
+        not candidate.get("_lane_matched", False)
         for candidate in selected
     )
     for candidate in selected:
@@ -1733,6 +2524,7 @@ def run_search(
         _admitted, reason = candidate_review_admission(
             candidate,
             company_by_id.get(candidate.get("company_id", "")),
+            search,
         )
         record_reason(screened_reasons, reason or "automatic-quality-screen")
     if excluded_after_connection:
@@ -1774,6 +2566,9 @@ def run_search(
             company_by_id[company_id] = research.get("company", company)
 
     rows = repository.read_discovery_candidates()
+    for candidate in rows:
+        if candidate.get("id", "") in known_membership_candidate_ids:
+            add_candidate_search(candidate, search["id"])
     captured = []
     new_count = 0
     updated_count = 0
@@ -1809,11 +2604,17 @@ def run_search(
         stored_by_id.get(candidate.get("id", ""), candidate)
         for candidate in captured
     ]
+    role_family_counts = {}
+    for candidate in captured:
+        role_family = candidate_role_family(candidate, search)
+        if role_family:
+            role_family_counts[role_family["label"]] = role_family_counts.get(role_family["label"], 0) + 1
     result = {
         "search": get_search(search["id"]),
         "captured": captured,
         "evaluated_count": evaluated_count,
         "known_count": len(known_candidate_ids),
+        "associated_count": len(known_membership_candidate_ids),
         "qualified_count": qualified_count,
         "screened_count": screened_count,
         "skip_reasons": skip_reasons,
@@ -1829,6 +2630,7 @@ def run_search(
         "enriched_count": enriched_count,
         "company_researched_count": company_researched_count,
         "company_suggestion_count": company_suggestion_count,
+        "role_family_counts": role_family_counts,
         "sources": source_runs,
         "errors": errors,
     }
@@ -1843,6 +2645,7 @@ def run_search(
                 for field in [
                     "evaluated_count",
                     "known_count",
+                    "associated_count",
                     "qualified_count",
                     "screened_count",
                     "found_count",
@@ -1856,6 +2659,7 @@ def run_search(
                     "enriched_count",
                     "company_researched_count",
                     "company_suggestion_count",
+                    "role_family_counts",
                 ]
             }
             | {
@@ -1898,7 +2702,7 @@ def company_research_needed(company, reference=None):
 
 
 def enrichment_needed(candidate, company=None, reference=None):
-    if candidate.get("status") in {"ignored", "ingested", "duplicate", SCREENED_STATUS}:
+    if candidate.get("status") in {"ignored", "pursued", "duplicate", SCREENED_STATUS}:
         return False
     if ignored_discovery_source(candidate.get("canonical_url") or candidate.get("url", "")):
         return False
@@ -2115,20 +2919,174 @@ def continue_enrichment(
     }
 
 
-def continue_discovery(search_id, enrichment_limit=CONTINUE_ENRICHMENT_LIMIT):
-    search = get_search(search_id)
-    chrome_browser = browser_discovery.HunterChrome()
-    chrome_browser.find_window()
+def detail_enrichment_targets(rows=None, search_id="", company_rows=None):
+    wanted_search = storage.clean(search_id).upper()
+    candidates = rows if rows is not None else canonicalize_candidate_rows(repository.read_discovery_candidates())
+    companies_by_id = {
+        company.get("id", "").upper(): company
+        for company in (company_rows if company_rows is not None else repository.read_companies())
+    }
+    return [
+        candidate
+        for candidate in candidates
+        if candidate.get("status") == "new"
+        and (not wanted_search or candidate_belongs_to_search(candidate, wanted_search))
+        and candidate_detail_state(candidate) in {"pending-enrichment", "source-verification"}
+        and detail_attempt_count(candidate) < MAX_DETAIL_ATTEMPTS
+        and not ignored_discovery_source(candidate.get("canonical_url") or candidate.get("url", ""))
+        and (
+            companies_by_id.get(candidate.get("company_id", "").upper(), {}).get("interest_status", "").lower()
+            not in DISCOVERY_EXCLUDED_COMPANY_INTEREST_STATUSES
+        )
+    ]
 
-    def browser_searcher(engine, value, page):
-        return browser_discovery.search(engine, value, page=page, browser=chrome_browser)
+
+def enrich_candidate_backlog(
+    search_id="",
+    limit=DETAIL_ENRICHMENT_BATCH_LIMIT,
+    fetcher=None,
+    browser_detailer=None,
+    use_browser_fallback=False,
+    progress=None,
+):
+    rows = canonicalize_candidate_rows(repository.read_discovery_candidates())
+    searches = list_searches()
+    repository.write_discovery_candidates(rows)
+    company_rows = repository.read_companies()
+    company_candidates = repository.read_company_posting_candidates()
+    selected = sorted(
+        detail_enrichment_targets(rows, search_id=search_id, company_rows=company_rows),
+        key=lambda candidate: (
+            greenhouse_job_reference(candidate.get("canonical_url") or candidate.get("url", "")) is not None,
+            candidate_detail_state(candidate) == "pending-enrichment",
+            candidate_rank_key(candidate),
+        ),
+        reverse=True,
+    )[:max(1, int(limit or DETAIL_ENRICHMENT_BATCH_LIMIT))]
+    chrome_browser = None
+
+    def lazy_browser_detailer(url):
+        nonlocal chrome_browser
+        if browser_detailer is not None:
+            return browser_detailer(url)
+        if not use_browser_fallback:
+            return {}
+        if chrome_browser is None:
+            chrome_browser = browser_discovery.HunterChrome()
+            chrome_browser.find_window()
+        return chrome_browser.details(url)
+
+    ready_count = 0
+    needs_input_count = 0
+    changed_count = 0
+    errors = []
+    for index, candidate in enumerate(selected, start=1):
+        result = resolve_candidate_details(
+            candidate,
+            fetcher=fetcher,
+            browser_detailer=(
+                lazy_browser_detailer
+                if browser_detailer is not None or use_browser_fallback
+                else None
+            ),
+            company_rows=company_rows,
+            company_candidates=company_candidates,
+        )
+        apply_candidate_review_admission_for_memberships(
+            candidate,
+            company=(
+                next((company for company in company_rows if company.get("id") == candidate.get("company_id")), None)
+            ),
+            searches=searches,
+        )
+        if result["changed"]:
+            changed_count += 1
+        if result["after_state"] == "ready":
+            ready_count += 1
+        elif result["after_state"] == "needs-input":
+            needs_input_count += 1
+        errors.extend(
+            f"{candidate.get('title') or candidate.get('id')}: {error}"
+            for error in result["errors"]
+            if error
+        )
+        repository.write_discovery_candidates(canonicalize_candidate_rows(rows))
+        if progress:
+            progress(
+                {
+                    "phase": "enriching",
+                    "message": f"Resolving candidate details {index} of {len(selected)}…",
+                    "completed_steps": index,
+                    "total_steps": max(1, len(selected)),
+                    "source": candidate.get("source_platform", ""),
+                }
+            )
+
+    refreshed = canonicalize_candidate_rows(repository.read_discovery_candidates())
+    repository.write_discovery_candidates(refreshed)
+    refreshed_companies_by_id = {
+        company.get("id", "").upper(): company
+        for company in repository.read_companies()
+    }
+
+    def candidate_in_scope(candidate):
+        company = refreshed_companies_by_id.get(candidate.get("company_id", "").upper(), {})
+        return (
+            candidate.get("status") == "new"
+            and (not search_id or candidate_belongs_to_search(candidate, search_id))
+            and not ignored_discovery_source(candidate.get("canonical_url") or candidate.get("url", ""))
+            and company.get("interest_status", "").lower() not in DISCOVERY_EXCLUDED_COMPANY_INTEREST_STATUSES
+        )
+
+    states = {
+        state: sum(
+            candidate_in_scope(candidate)
+            and candidate_detail_state(candidate) == state
+            for candidate in refreshed
+        )
+        for state in ["ready", "pending-enrichment", "source-verification", "needs-input"]
+    }
+    return {
+        "target_count": len(selected),
+        "processed_count": len(selected),
+        "changed_count": changed_count,
+        "ready_count": ready_count,
+        "needs_input_count": needs_input_count,
+        "remaining_count": states["pending-enrichment"] + states["source-verification"],
+        "state_counts": states,
+        "errors": errors,
+    }
+
+
+def continue_discovery(
+    search_id,
+    enrichment_limit=CONTINUE_ENRICHMENT_LIMIT,
+    use_browser_fallback=False,
+    progress=None,
+):
+    search = get_search(search_id)
+    chrome_browser = None
+    browser_searcher = None
+    browser_detailer = None
+    company_researcher = None
+    if use_browser_fallback:
+        chrome_browser = browser_discovery.HunterChrome()
+        chrome_browser.find_window()
+
+        def browser_searcher(engine, value, page):
+            return browser_discovery.search(engine, value, page=page, browser=chrome_browser)
+
+        browser_detailer = chrome_browser.details
+        company_researcher = chrome_browser.company
 
     try:
         result = run_search(
             search_id,
             browser_searcher=browser_searcher,
-            browser_detailer=chrome_browser.details,
-            company_researcher=chrome_browser.company,
+            browser_detailer=browser_detailer,
+            company_researcher=company_researcher,
+            source_mode="browser" if use_browser_fallback else "api",
+            progress=progress,
         )
     except RuntimeError as exc:
         result = {
@@ -2154,11 +3112,26 @@ def continue_discovery(search_id, enrichment_limit=CONTINUE_ENRICHMENT_LIMIT):
             "sources": [],
             "errors": [storage.clean(str(exc))],
         }
-    enrichment = continue_enrichment(
-        limit=enrichment_limit,
-        browser_detailer=chrome_browser.details,
-        company_researcher=chrome_browser.company,
-    )
+    if int(enrichment_limit or 0) > 0:
+        enrichment = enrich_candidate_backlog(
+            search_id=search_id,
+            limit=enrichment_limit,
+            browser_detailer=browser_detailer,
+            use_browser_fallback=use_browser_fallback,
+            progress=progress,
+        )
+    else:
+        enrichment = {
+            "processed_count": 0,
+            "posting_checked_count": 0,
+            "posting_enriched_count": 0,
+            "company_researched_count": 0,
+            "company_research_remaining_count": 0,
+            "unavailable_count": 0,
+            "remaining_count": len(detail_enrichment_targets(search_id=search_id)),
+            "ready_count": 0,
+            "errors": [],
+        }
     result["enrichment"] = enrichment
     result["errors"] = [*result.get("errors", []), *enrichment.get("errors", [])]
 
@@ -2239,24 +3212,71 @@ def candidate_title_matches_search(candidate, search=None):
         return True
     title = companies.normalized_text(candidate.get("title", ""))
     keywords = storage.clean(search.get("keywords", ""))
-    if not title or not keywords:
+    if not title:
+        return True
+    if search.get("role_family_ids"):
+        return candidate_role_family(candidate, search) is not None
+    if not keywords:
         return True
     role_terms = [keywords]
-    normalized_keywords = companies.normalized_text(keywords)
-    if (
-        "technical program manager" in normalized_keywords
-        or normalized_keywords == "tpm"
-    ):
-        role_terms.extend(
-            term
-            for strategy in TPM_QUERY_FAMILIES
-            for term in strategy.get("terms", [])
-        )
-        role_terms.append("tpm")
     return any(
         companies.text_contains_phrase_variant(title, term)
         for term in dict.fromkeys(role_terms)
         if storage.clean(term)
+    )
+
+
+def search_focus_terms(search):
+    """Extract user-entered focus phrases from the lightweight OR syntax used by saved searches."""
+    value = storage.clean((search or {}).get("keywords", ""))
+    if not value:
+        return []
+    if (search or {}).get("role_family_ids") and companies.normalized_text(value) in {
+        "tpm",
+        "technical program manager",
+    }:
+        return []
+    parts = re.split(r"\s+OR\s+", value, flags=re.I)
+    terms = []
+    for part in parts:
+        term = storage.clean(re.sub(r"^[\s(\"]+|[\s)\"]+$", "", part))
+        if term and term.lower() not in {"and", "or", "not"} and term not in terms:
+            terms.append(term)
+    return terms
+
+
+def candidate_matches_search_focus(candidate, search=None):
+    terms = search_focus_terms(search)
+    if not terms:
+        return True
+    text = companies.normalized_text(
+        " ".join(
+            [
+                candidate.get("title", ""),
+                candidate.get("description_excerpt", ""),
+                candidate.get("description_text", ""),
+            ]
+        )
+    )
+    return any(
+        companies.text_contains_phrase_variant(text, term)
+        for term in terms
+    )
+
+
+def candidate_matches_search_lane(candidate, search=None):
+    lanes = (search or {}).get("lanes", [])
+    if not lanes:
+        return True
+    return any(candidate_matches_lane(candidate, {}, lane) for lane in lanes)
+
+
+def candidate_matches_search(candidate, search):
+    return (
+        not candidate_is_excluded(search, candidate)
+        and candidate_title_matches_search(candidate, search)
+        and candidate_matches_search_focus(candidate, search)
+        and candidate_matches_search_lane(candidate, search)
     )
 
 
@@ -2272,6 +3292,21 @@ def candidate_review_admission(candidate, company=None, search=None):
         return False, "the ATS URL is a board, redirect, or error page"
     if not candidate_title_matches_search(candidate, search):
         return False, "the role title does not match this search focus"
+    if not candidate_matches_search_focus(candidate, search):
+        return False, "the posting does not contain this search's additional focus"
+    if search and not candidate_matches_search_lane(candidate, search):
+        if not storage.clean(candidate.get("location", "")) or not storage.clean(candidate.get("work_mode", "")):
+            return False, "location eligibility still needs verification"
+        return False, "the role is outside the configured location lanes"
+    role_family = candidate_role_family(candidate, search)
+    responsibility_signals = candidate_responsibility_signals(candidate)
+    if (
+        role_family
+        and role_family["requires_responsibility"]
+        and candidate.get("processing_status") == "ready"
+        and len(responsibility_signals) < 2
+    ):
+        return False, "the adjacent title lacks enough relevant delivery responsibilities"
     try:
         fit_score = int(candidate.get("fit_score", "") or 0)
     except (TypeError, ValueError):
@@ -2279,7 +3314,7 @@ def candidate_review_admission(candidate, company=None, search=None):
     if fit_score < MIN_REVIEW_FIT_SCORE:
         return False, f"the role match score is below {MIN_REVIEW_FIT_SCORE}"
     trust = candidate_source_trust(candidate, company)
-    if trust["id"] == "aggregator":
+    if trust["id"] == "aggregator" and candidate.get("source_platform") != "adzuna":
         return False, "the posting is from an aggregator without a verified employer source"
     if candidate.get("freshness_status") == "closed":
         return False, "the posting is closed"
@@ -2303,26 +3338,54 @@ def apply_candidate_review_admission(candidate, company=None, search=None):
     return admitted
 
 
+def apply_candidate_review_admission_for_memberships(candidate, company=None, searches=None):
+    search_by_id = {
+        search.get("id", "").upper(): search
+        for search in (searches if searches is not None else list_searches())
+    }
+    memberships = [
+        search_by_id[search_id]
+        for search_id in candidate_search_ids(candidate)
+        if search_id in search_by_id
+    ]
+    if not memberships:
+        return apply_candidate_review_admission(candidate, company, None)
+    reasons = []
+    for search in memberships:
+        admitted, reason = candidate_review_admission(candidate, company, search)
+        if admitted:
+            return apply_candidate_review_admission(candidate, company, search)
+        if reason:
+            reasons.append(reason)
+    apply_candidate_review_admission(candidate, company, memberships[0])
+    if reasons:
+        warning_lines = [
+            line
+            for line in (candidate.get("warnings", "") or "").splitlines()
+            if line and not line.startswith(SCREENING_WARNING_PREFIX)
+        ]
+        warning_lines.append(f"{SCREENING_WARNING_PREFIX}{reasons[0]}.")
+        candidate["warnings"] = "\n".join(dict.fromkeys(warning_lines))
+    return False
+
+
 def reclassify_review_queue():
     rows = canonicalize_candidate_rows(repository.read_discovery_candidates())
     company_by_id = {
         company.get("id", ""): company
         for company in repository.read_companies()
     }
-    search_by_id = {
-        search.get("id", "").upper(): search
-        for search in list_searches()
-    }
+    searches = list_searches()
     screened_count = 0
     restored_count = 0
     for candidate in rows:
         if candidate.get("status") not in {"new", SCREENED_STATUS}:
             continue
         previous_status = candidate.get("status", "")
-        apply_candidate_review_admission(
+        apply_candidate_review_admission_for_memberships(
             candidate,
             company_by_id.get(candidate.get("company_id", "")),
-            search_by_id.get(candidate.get("search_id", "").upper()),
+            searches,
         )
         if previous_status != SCREENED_STATUS and candidate.get("status") == SCREENED_STATUS:
             screened_count += 1
@@ -2330,6 +3393,74 @@ def reclassify_review_queue():
             restored_count += 1
     repository.write_discovery_candidates(rows)
     return {
+        "screened_count": screened_count,
+        "restored_count": restored_count,
+    }
+
+
+def reclassify_candidate_search_memberships():
+    """Align existing candidates to current saved searches without changing past decisions."""
+    rows = repository.read_discovery_candidates()
+    searches = list_searches()
+    company_by_id = {
+        company.get("id", ""): company
+        for company in repository.read_companies()
+    }
+    active_statuses = {"new", SCREENED_STATUS}
+    changed_count = 0
+    unassigned_count = 0
+    membership_count = 0
+    screened_count = 0
+    restored_count = 0
+    for candidate in rows:
+        existing_ids = candidate_search_ids(candidate)
+        matching_ids = [
+            search["id"]
+            for search in searches
+            if candidate_matches_search(candidate, search)
+        ]
+        desired_ids = (
+            matching_ids
+            if candidate.get("status") in active_statuses
+            else list(dict.fromkeys([*existing_ids, *matching_ids]))
+        )
+        if desired_ids != existing_ids:
+            set_candidate_search_ids(candidate, desired_ids)
+            changed_count += 1
+        membership_count += len(desired_ids)
+        if not desired_ids:
+            unassigned_count += 1
+            if candidate.get("status") == "new":
+                candidate["status"] = SCREENED_STATUS
+                warning_lines = [
+                    line
+                    for line in (candidate.get("warnings", "") or "").splitlines()
+                    if line and not line.startswith(SCREENING_WARNING_PREFIX)
+                ]
+                warning_lines.append(
+                    f"{SCREENING_WARNING_PREFIX}the role does not match any current saved search and location lane."
+                )
+                candidate["warnings"] = "\n".join(dict.fromkeys(warning_lines))
+                screened_count += 1
+            continue
+        if candidate.get("status") not in active_statuses:
+            continue
+        previous_status = candidate.get("status", "")
+        apply_candidate_review_admission_for_memberships(
+            candidate,
+            company_by_id.get(candidate.get("company_id", "")),
+            searches,
+        )
+        if previous_status != SCREENED_STATUS and candidate.get("status") == SCREENED_STATUS:
+            screened_count += 1
+        elif previous_status == SCREENED_STATUS and candidate.get("status") == "new":
+            restored_count += 1
+    repository.write_discovery_candidates(rows)
+    return {
+        "candidate_count": len(rows),
+        "changed_count": changed_count,
+        "membership_count": membership_count,
+        "unassigned_count": unassigned_count,
         "screened_count": screened_count,
         "restored_count": restored_count,
     }
@@ -2352,10 +3483,8 @@ def cleanup_candidates():
         company.get("id", ""): company
         for company in repository.read_companies()
     }
-    search_by_id = {
-        search.get("id", "").upper(): search
-        for search in list_searches()
-    }
+    searches = list_searches()
+    search_by_id = {search.get("id", "").upper(): search for search in searches}
     excluded_identity = discovery_excluded_company_identity(company_by_id.values())
     ignored_company_count = 0
     ignored_exclusion_count = 0
@@ -2379,9 +3508,18 @@ def cleanup_candidates():
             ignored_company_count += 1
             continue
 
-        search = search_by_id.get(candidate.get("search_id", "").upper())
-        matches = matching_excluded_terms(search, candidate) if search else []
-        if matches:
+        membership_searches = [
+            search_by_id[search_id]
+            for search_id in candidate_search_ids(candidate)
+            if search_id in search_by_id
+        ]
+        excluded_memberships = [
+            search
+            for search in membership_searches
+            if matching_excluded_terms(search, candidate)
+        ]
+        if membership_searches and len(excluded_memberships) == len(membership_searches):
+            matches = matching_excluded_terms(excluded_memberships[0], candidate)
             candidate["status"] = "ignored"
             candidate["ignore_reason"] = "search-exclusion"
             candidate["ignore_reason_detail"] = ", ".join(matches)
@@ -2390,7 +3528,7 @@ def cleanup_candidates():
             continue
 
         previous_status = candidate.get("status", "")
-        apply_candidate_review_admission(candidate, company, search)
+        apply_candidate_review_admission_for_memberships(candidate, company, searches)
         if previous_status != SCREENED_STATUS and candidate.get("status") == SCREENED_STATUS:
             screened_count += 1
         elif previous_status == SCREENED_STATUS and candidate.get("status") == "new":
@@ -2424,10 +3562,18 @@ def recommendation_eligible(candidate, company=None):
     )
 
 
-def fit_strengths(candidate, company=None):
+def fit_strengths(candidate, company=None, role_family=None, responsibility_signals=None):
     summary = storage.clean(candidate.get("fit_summary", ""))
     match = re.search(r"\bmatches\s+(.+?)\.?$", summary, re.I)
     strengths = []
+    role_family = role_family if role_family is not None else candidate_role_family(candidate)
+    if role_family:
+        strengths.append(role_family["label"])
+    strengths.extend(
+        responsibility_signals
+        if responsibility_signals is not None
+        else candidate_responsibility_signals(candidate)
+    )
     if match:
         strengths.extend(
             storage.clean(value)
@@ -2442,13 +3588,8 @@ def fit_strengths(candidate, company=None):
 
 
 def fit_gaps(candidate, company=None):
-    gaps = []
-    if candidate.get("processing_status") != "ready":
-        gaps.append("Posting details still need verification")
-    if not candidate.get("location"):
-        gaps.append("Location is unknown")
-    if not candidate.get("work_mode"):
-        gaps.append("Work mode is unknown")
+    detail_gaps = candidate_detail_gaps(candidate)
+    gaps = [gap["label"] for gap in detail_gaps]
     if not candidate.get("canonical_url"):
         gaps.append("Direct employer posting link is missing")
     if company and not company.get("industry"):
@@ -2467,6 +3608,7 @@ def fit_gaps(candidate, company=None):
             storage.clean(line)
             for line in candidate.get("warnings", "").splitlines()
             if storage.clean(line)
+            and line not in {LINKEDIN_DETAILS_WARNING, BROWSER_VALIDATION_WARNING}
         )
     return list(dict.fromkeys(gaps))
 
@@ -2482,11 +3624,26 @@ def candidate_source_confidence(candidate, company=None):
     return "Low"
 
 
-def candidate_lane_match(candidate):
+def candidate_lane_match(candidate, searches=None):
     matches = []
-    for search in list_searches():
+    normalized_context = normalized_location_text(
+        " ".join(
+            [
+                candidate.get("location", ""),
+                candidate.get("description_text", ""),
+            ]
+        )
+    )
+    normalized_location = normalized_location_text(candidate.get("location", ""))
+    for search in searches if searches is not None else list_searches():
         for lane in search.get("lanes", []):
-            if candidate_matches_lane(candidate, {}, lane):
+            if candidate_matches_lane(
+                candidate,
+                {},
+                lane,
+                normalized_candidate_context=normalized_context,
+                normalized_candidate_location=normalized_location,
+            ):
                 label = lane.get("label", "") or lane.get("location", "")
                 mode = storage.clean(candidate.get("work_mode", ""))
                 value = f"{label} · {mode}" if mode else label
@@ -2495,19 +3652,28 @@ def candidate_lane_match(candidate):
     return ", ".join(matches[:2])
 
 
-def candidate_payload(candidate, company_by_id=None):
+def candidate_payload(candidate, company_by_id=None, searches=None):
     payload = dict(candidate)
     company = (company_by_id or {}).get(candidate.get("company_id", ""))
     source_trust = candidate_source_trust(candidate, company)
+    role_family = candidate_role_family(candidate)
+    responsibility_signals = candidate_responsibility_signals(candidate)
     payload["source_urls"] = candidate_source_urls(candidate)
-    payload["fit_strengths"] = fit_strengths(candidate, company)
+    payload["search_ids"] = candidate_search_ids(candidate)
+    payload["fit_strengths"] = fit_strengths(candidate, company, role_family, responsibility_signals)
     payload["fit_gaps"] = fit_gaps(candidate, company)
     payload["source_confidence"] = candidate_source_confidence(candidate, company)
     payload["source_trust"] = source_trust["id"]
     payload["source_trust_label"] = source_trust["label"]
     payload["is_direct_employer_source"] = source_trust["is_direct_employer_source"]
     payload["recommendation_eligible"] = recommendation_eligible(candidate, company)
-    payload["lane_match"] = candidate_lane_match(candidate)
+    payload["lane_match"] = candidate_lane_match(candidate, searches)
+    payload["role_family_id"] = role_family["id"] if role_family else ""
+    payload["role_family"] = role_family["label"] if role_family else "Saved keyword match"
+    payload["responsibility_signals"] = responsibility_signals
+    payload["detail_state"] = candidate_detail_state(candidate)
+    payload["detail_gaps"] = candidate_detail_gaps(candidate)
+    payload["detail_next_action"] = candidate_detail_next_action(candidate)
     return payload
 
 
@@ -2517,8 +3683,9 @@ def list_candidates():
         company.get("id", ""): company
         for company in repository.read_companies()
     }
+    searches = list_searches()
     return [
-        candidate_payload(candidate, company_by_id)
+        candidate_payload(candidate, company_by_id, searches)
         for candidate in collapsed
         if not ignored_discovery_source(
             candidate.get("canonical_url") or candidate.get("url", "")
@@ -2526,7 +3693,7 @@ def list_candidates():
     ]
 
 
-def preference_suggestions():
+def preference_suggestions(candidates=None):
     searches = list_searches()
     searches_by_id = {
         search.get("id", ""): search
@@ -2535,14 +3702,15 @@ def preference_suggestions():
     }
     fallback_search_id = searches[0].get("id", "") if len(searches) == 1 else ""
     ignored_by_search = {}
-    for candidate in list_candidates():
+    for candidate in candidates if candidates is not None else list_candidates():
         if candidate.get("status") != "ignored":
             continue
         if candidate.get("ignore_reason") not in {"", "wrong-role", "level", "other"}:
             continue
-        search_id = storage.clean(candidate.get("search_id", "")) or fallback_search_id
-        if search_id in searches_by_id:
-            ignored_by_search.setdefault(search_id, []).append(candidate)
+        search_ids = candidate_search_ids(candidate) or ([fallback_search_id] if fallback_search_id else [])
+        for search_id in search_ids:
+            if search_id in searches_by_id:
+                ignored_by_search.setdefault(search_id, []).append(candidate)
     stop_words = {
         "and", "for", "the", "technical", "technology", "program", "programme",
         "manager", "management", "senior", "staff", "principal", "lead", "director",
@@ -2858,6 +4026,13 @@ def extracted_candidate(url, fetcher=None):
 
 def apply_manual_details(candidate, details):
     details = details or {}
+    material_detail_supplied = bool(
+        storage.clean(details.get("company_id", ""))
+        or storage.clean(details.get("company_name", ""))
+        or storage.clean(details.get("company", ""))
+        or any(storage.clean(details.get(field, "")) for field in ["title", "canonical_url", "location", "work_mode"])
+        or str(details.get("description_text", "") or "").strip()
+    )
     if "company_id" in details:
         candidate["company_id"] = storage.clean(details.get("company_id", ""))
     for field in [
@@ -2892,24 +4067,18 @@ def apply_manual_details(candidate, details):
             for line in (candidate.get("warnings", "") or "").splitlines()
             if line != LINKEDIN_DETAILS_WARNING
         )
+    if material_detail_supplied:
+        candidate["detail_attempt_count"] = "0"
+        candidate["detail_last_attempt_at"] = ""
+        candidate["detail_last_error"] = ""
     return candidate
 
 
 def processing_status(candidate):
-    has_identity = bool(
-        (candidate.get("company_id") or candidate.get("company"))
-        and candidate.get("title")
-    )
-    has_posting_details = meaningful_description(candidate.get("description_text", ""))
-    has_lane_evidence = bool(
-        candidate.get("location")
-        or storage.clean(candidate.get("work_mode", "")).lower() == "remote"
-    )
-    if has_identity and has_posting_details and has_lane_evidence:
-        if candidate.get("source_platform") == "linkedin" and LINKEDIN_DETAILS_WARNING in candidate.get("warnings", ""):
-            return "partial"
+    gaps = candidate_detail_gaps(candidate)
+    if not gaps:
         return "ready"
-    if has_identity:
+    if (candidate.get("company_id") or candidate.get("company")) and candidate.get("title"):
         return "partial"
     return "needs-details"
 
@@ -2928,6 +4097,17 @@ def score_candidate(candidate, checked_at):
     )
     candidate["description_excerpt"] = description[:1000]
     candidate.update(companies.score_candidate_fit(normalized, settings.fit_context(), checked_at))
+    role_family = candidate_role_family(candidate)
+    responsibility_signals = candidate_responsibility_signals(candidate)
+    if role_family and candidate.get("fit_score") != "":
+        try:
+            score = int(candidate.get("fit_score", "") or 0)
+        except (TypeError, ValueError):
+            score = 0
+        score += 4 + min(12, len(responsibility_signals) * 3)
+        if role_family["strong_title_match"] or len(responsibility_signals) >= 2:
+            score = max(score, MIN_REVIEW_FIT_SCORE)
+        candidate["fit_score"] = str(min(100, score))
     candidate["processing_status"] = processing_status(candidate)
     if candidate["processing_status"] != "ready":
         candidate["fit_summary"] = "Fit pending automatic detail enrichment."
@@ -2936,8 +4116,8 @@ def score_candidate(candidate, checked_at):
 
 def candidate_identity_keys(candidate):
     keys = set()
-    for field in ["url", "canonical_url"]:
-        value = storage.clean(candidate.get(field, ""))
+    for value in candidate_source_urls(candidate):
+        value = storage.clean(value)
         if value:
             keys.update(companies.posting_identity_keys(value))
             for requisition in re.findall(r"(?i)(?:req(?:uisition)?[-_ ]*)?((?:r|jr)\d{5,})", value):
@@ -2967,6 +4147,14 @@ def candidates_semantically_match(left, right):
     left_title = normalized_candidate_title(left)
     right_title = normalized_candidate_title(right)
     if not left_title or not right_title:
+        return False
+    generic_titles = {
+        "careers",
+        "job search",
+        "jobs",
+        "microsoft careers",
+    }
+    if left_title in generic_titles or right_title in generic_titles:
         return False
     if left_title == right_title:
         return True
@@ -3039,6 +4227,10 @@ def merge_candidate(existing, incoming):
     ]
     existing["warnings"] = "\n".join(dict.fromkeys(warning_lines))
     existing["source_urls_json"] = json.dumps(source_urls, ensure_ascii=False)
+    set_candidate_search_ids(
+        existing,
+        [*candidate_search_ids(existing), *candidate_search_ids(incoming)],
+    )
     captured_dates = [
         value
         for value in [existing.get("captured_at", ""), incoming.get("captured_at", "")]
@@ -3053,7 +4245,7 @@ def merge_candidate(existing, incoming):
     if incoming.get("freshness_checked_at", "") > existing.get("freshness_checked_at", ""):
         existing["freshness_checked_at"] = incoming.get("freshness_checked_at", "")
         existing["freshness_status"] = incoming.get("freshness_status", "")
-    if existing.get("status") not in {"ingested", "duplicate", "ignored", "unavailable"}:
+    if existing.get("status") not in {"pursued", "duplicate", "ignored", "unavailable"}:
         existing["status"] = incoming.get("status") or "new"
     return existing
 
@@ -3082,6 +4274,7 @@ def capture_candidates(search_id, capture_text, details=None, fetcher=None):
                 "status": "new",
             }
         )
+        add_candidate_search(candidate, search_id)
         if len(urls) == 1:
             apply_manual_details(candidate, details or {})
         connect_candidate_company(candidate, seen_at=timestamp)
@@ -3136,6 +4329,7 @@ def update_candidate_status(candidate_id, status, ignore_reason="", ignore_reaso
 
 def update_candidate_statuses(candidate_ids, status, ignore_reason="", ignore_reason_detail=""):
     cleaned_status = storage.clean(status).lower()
+    cleaned_status = schema.CANDIDATE_STATUS_ALIASES.get(cleaned_status, cleaned_status)
     if cleaned_status not in schema.DISCOVERY_CANDIDATE_STATUSES:
         raise ValueError(f"Unsupported Discovery candidate status: {cleaned_status}")
     cleaned_reason = storage.clean(ignore_reason).lower()
@@ -3222,13 +4416,13 @@ def matching_application(candidate):
     )
 
 
-def ingest_candidate(candidate_id):
+def pursue_candidate(candidate_id):
     candidate = get_candidate(candidate_id)
     if not candidate.get("company_id") or not candidate.get("title"):
         raise ValueError("Link a company and add the role title before ingesting this Discovery result.")
     existing = matching_application(candidate)
     if existing:
-        updated = update_candidate_status(candidate_id, "ingested")
+        updated = update_candidate_status(candidate_id, "pursued")
         rows = repository.read_discovery_candidates()
         for row in rows:
             if row.get("id", "").upper() == updated.get("id", "").upper():
@@ -3238,7 +4432,8 @@ def ingest_candidate(candidate_id):
 
     company = companies.get_company(candidate.get("company_id", ""))
     source_url = candidate.get("canonical_url") or candidate.get("url", "")
-    search = get_search(candidate.get("search_id", ""))
+    search_ids = candidate_search_ids(candidate)
+    search = get_search(search_ids[0] if search_ids else candidate.get("search_id", ""))
     posting = applications.create_application(
         {
             "company_id": company.get("id", ""),
@@ -3270,7 +4465,36 @@ def ingest_candidate(candidate_id):
     rows = repository.read_discovery_candidates()
     for row in rows:
         if row.get("id", "").upper() == storage.clean(candidate_id).upper():
-            row["status"] = "ingested"
+            row["status"] = "pursued"
             row["ingested_application_id"] = posting.get("id", "")
     repository.write_discovery_candidates(rows)
     return {"candidate": get_candidate(candidate_id), "posting": posting, "created": True}
+
+
+def ingest_candidate(candidate_id):
+    """Compatibility alias for callers created before Pursue replaced Ingest."""
+    return pursue_candidate(candidate_id)
+
+
+def undo_candidate_decision(candidate_id, decision, application_id="", remove_posting=False):
+    candidate = get_candidate(candidate_id)
+    cleaned_decision = storage.clean(decision).lower()
+    if cleaned_decision == "ignored":
+        if candidate.get("status") != "ignored":
+            raise ValueError("This role is no longer ignored.")
+        return {"candidate": update_candidate_status(candidate_id, "new"), "posting_removed": False}
+    if cleaned_decision != "pursued":
+        raise ValueError(f"Unsupported Discovery decision to undo: {cleaned_decision}")
+    if candidate.get("status") != "pursued":
+        raise ValueError("This role is no longer pursued.")
+    linked_application_id = storage.clean(candidate.get("ingested_application_id", "")).upper()
+    wanted_application_id = storage.clean(application_id).upper()
+    if wanted_application_id and linked_application_id != wanted_application_id:
+        raise ValueError("The pursued posting no longer matches this role.")
+    posting_removed = False
+    if remove_posting and linked_application_id:
+        posting_removed = repository.delete_unmodified_discovery_application(linked_application_id)
+    return {
+        "candidate": update_candidate_status(candidate_id, "new"),
+        "posting_removed": posting_removed,
+    }

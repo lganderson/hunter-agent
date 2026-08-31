@@ -159,9 +159,9 @@ def cmd_unlink_contact(args):
 
 def cmd_ingest_candidate(args):
     sqlite_store.initialize()
-    result = companies.ingest_candidate(args.candidate_id)
+    result = companies.pursue_candidate(args.candidate_id)
     candidate = result["candidate"]
-    print(f"Ingested {candidate['id']}: {candidate['url']}")
+    print(f"Pursued {candidate['id']}: {candidate['url']}")
     if result.get("stdout"):
         print(result["stdout"])
 
@@ -226,7 +226,11 @@ def build_parser():
     unlink_parser.add_argument("contact_id")
     unlink_parser.set_defaults(func=cmd_unlink_contact)
 
-    ingest_parser = subparsers.add_parser("ingest-candidate", help="Ingest a reviewed company posting candidate.")
+    pursue_parser = subparsers.add_parser("pursue-candidate", help="Pursue a reviewed company posting candidate.")
+    pursue_parser.add_argument("candidate_id")
+    pursue_parser.set_defaults(func=cmd_ingest_candidate)
+
+    ingest_parser = subparsers.add_parser("ingest-candidate", help=argparse.SUPPRESS)
     ingest_parser.add_argument("candidate_id")
     ingest_parser.set_defaults(func=cmd_ingest_candidate)
 

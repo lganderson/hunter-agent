@@ -1,13 +1,14 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
-import { useSearchParams } from "react-router-dom";
 import { FilterIcon, ListIcon, PeopleIcon, SearchIcon, XIcon } from "../components/Icons";
 import { SortableHeader } from "../components/Primitives";
 import { linkCompanyContact, linkContact, unlinkCompanyContact, unlinkContact, upsertContact } from "../core/api";
 import { titleCase } from "../core/format";
 import { compareText, nextSortState, type SortDirection, type SortState } from "../core/tableSort";
 import type { AppState, Contact } from "../core/types";
+import { sortFromParams, usePersistentViewParams } from "../core/viewState";
 
 type ContactSortKey = "contact" | "status" | "relationship" | "next_follow_up";
+const CONTACT_SORT_KEYS: ContactSortKey[] = ["contact", "status", "relationship", "next_follow_up"];
 
 type ContactsPageProps = {
   data: AppState;
@@ -15,13 +16,13 @@ type ContactsPageProps = {
 };
 
 export function ContactsPage({ data, refresh }: ContactsPageProps) {
-  const [searchParams, setSearchParams] = useSearchParams();
-  const [search, setSearch] = useState("");
+  const { params: viewParams, updateParams: updateViewParams, clearParams: clearViewParams } = usePersistentViewParams("contacts");
+  const search = viewParams.get("q") || "";
   const [selectedContactId, setSelectedContactId] = useState("");
   const [operationStatus, setOperationStatus] = useState("");
-  const [sort, setSort] = useState<SortState<ContactSortKey>>({ key: "contact", direction: "asc" });
+  const sort = sortFromParams(viewParams, "sort", "direction", CONTACT_SORT_KEYS, { key: "contact", direction: "asc" });
   const selectedContact = data.contacts.find(contact => contact.id === selectedContactId) || null;
-  const companyId = searchParams.get("company_id") || "";
+  const companyId = viewParams.get("company_id") || "";
   const filteredCompany = data.companies.find(company => company.id === companyId) || null;
   const companyContactIds = useMemo(
     () => new Set(data.company_contacts.filter(link => link.company_id === companyId).map(link => link.contact_id)),
@@ -47,7 +48,11 @@ export function ContactsPage({ data, refresh }: ContactsPageProps) {
     .sort((a, b) => compareContactRows(a, b, sort));
 
   function changeSort(key: ContactSortKey, initialDirection: SortDirection) {
-    setSort(current => nextSortState(current, key, initialDirection));
+    const next = nextSortState(sort, key, initialDirection);
+    updateViewParams({
+      sort: next.key === "contact" ? null : next.key,
+      direction: next.direction === "asc" ? null : next.direction
+    });
   }
 
   function closeModal() {
@@ -63,9 +68,10 @@ export function ContactsPage({ data, refresh }: ContactsPageProps) {
             <label className="search">
               <span className="sr-only">Search contacts</span>
               <SearchIcon />
-              <input value={search} onChange={event => setSearch(event.target.value)} type="search" placeholder="Search contacts, companies, notes..." />
+              <input value={search} onChange={event => updateViewParams({ q: event.target.value || null })} type="search" placeholder="Search contacts, companies, notes..." />
             </label>
-            {companyId ? <button className="button" type="button" onClick={() => setSearchParams({})}><FilterIcon size={16} /> Clear company</button> : null}
+            <button className="button" type="button" onClick={clearViewParams}><FilterIcon size={16} /> Clear</button>
+            {companyId ? <button className="button" type="button" onClick={() => updateViewParams({ company_id: null })}><FilterIcon size={16} /> Clear company</button> : null}
             <button className="button primary" type="button" onClick={() => setSelectedContactId("new")}><PeopleIcon /> New Contact</button>
             {companyId ? <span className="active-filter">Company: {filteredCompany?.name || companyId}</span> : null}
           </div>

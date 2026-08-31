@@ -109,6 +109,51 @@ class HunterCompaniesTest(unittest.TestCase):
         self.assertEqual(app["company"], "Apple")
         self.assertEqual(action["company"], "Apple")
 
+    def test_shared_job_board_matching_uses_employer_tenant_not_ats_hostname(self):
+        sqlite_store.initialize()
+        anthropic = companies.upsert_company(
+            "",
+            {
+                "name": "Anthropic",
+                "careers_url": "https://job-boards.greenhouse.io/anthropic",
+            },
+        )
+        oura = companies.upsert_company("", {"name": "OURA"})
+
+        self.assertEqual(
+            companies.matching_company_record_from_url(
+                "https://job-boards.greenhouse.io/anthropic/jobs/123"
+            )["id"],
+            anthropic["id"],
+        )
+        self.assertEqual(
+            companies.matching_company_record_from_url(
+                "https://job-boards.greenhouse.io/oura/jobs/456"
+            )["id"],
+            oura["id"],
+        )
+        self.assertIsNone(
+            companies.matching_company_record_from_url(
+                "https://job-boards.greenhouse.io/keepersecurity/jobs/789"
+            )
+        )
+
+    def test_shared_job_board_matching_accepts_equivalent_tenant_suffix(self):
+        sqlite_store.initialize()
+        company = companies.upsert_company(
+            "",
+            {
+                "name": "Rivian and Volkswagen Group Technologies",
+                "careers_url": "https://jobs.ashbyhq.com/rivianvw",
+            },
+        )
+
+        matched = companies.matching_company_record_from_url(
+            "https://jobs.ashbyhq.com/rivianvw.tech/123"
+        )
+
+        self.assertEqual(matched["id"], company["id"])
+
     def test_initialize_adds_company_metadata_columns_without_losing_existing_company(self):
         with sqlite_store.connect() as connection:
             connection.execute(
@@ -337,7 +382,7 @@ class HunterCompaniesTest(unittest.TestCase):
         payload_company = app_state.build_payload()["companies"][0]
 
         self.assertEqual(payload_company["ignored_role_count"], 2)
-        self.assertEqual(payload_company["ingested_role_count"], 0)
+        self.assertEqual(payload_company["pursued_role_count"], 0)
         self.assertIn("mark it Not interested", payload_company["decision_recommendation"])
 
         companies.upsert_company(company["id"], {"interest_status": "not-interested"})
@@ -448,6 +493,78 @@ class HunterCompaniesTest(unittest.TestCase):
         self.assertEqual(candidates[0]["scan_state"], "current")
         self.assertEqual(result["scan"]["unique_candidate_count"], "2")
         self.assertIn("fit_score", candidates[0])
+
+    def test_target_check_uses_jobsearch_api_and_retires_generic_navigation_candidates(self):
+        sqlite_store.initialize()
+        careers_url = "https://corporate.target.com/careers/job-search"
+        company = companies.upsert_company("", {"name": "Target", "careers_url": careers_url})
+        old_candidate = {field: "" for field in schema.COMPANY_POSTING_CANDIDATE_FIELDS}
+        old_candidate.update(
+            {
+                "id": "CP0001",
+                "company_id": company["id"],
+                "title": "Careers FAQs",
+                "url": "https://corporate.target.com/careers/faqs",
+                "source_platform": "generic_html",
+                "status": "new",
+                "scan_state": "current",
+            }
+        )
+        repository.write_company_posting_candidates([old_candidate])
+        payload = {
+            "count": 2,
+            "results": [
+                {
+                    "document": {
+                        "title": "Lead UX Design Operations Program Manager",
+                        "url": "/jobs/w77/02/lead-ux-design-operations-program-manager",
+                        "jobaddress": "1000 Nicollet Mall, Minneapolis, MN",
+                        "remotetype": "Hybrid",
+                        "jobarea": "User Experience",
+                        "jobfamily": "User Experience",
+                        "jobcategories": ["UX Design, Research & Accessibility"],
+                        "jobskills": ["Cross-Functional Partnerships", "Project Management"],
+                        "requisitionid": "R0000447702",
+                    }
+                },
+                {
+                    "document": {
+                        "title": "Full Time Hourly Warehouse Operations Openings",
+                        "url": "/jobs/w76/40/full-time-hourly-warehouse-operations-openings",
+                        "jobaddress": "2200 Viking Rd, Cedar Falls, IA",
+                        "jobarea": "Distribution Center Hourly",
+                        "jobcategories": ["Supply Chain Hourly"],
+                        "requisitionid": "R0000440000",
+                    }
+                },
+            ],
+        }
+        calls = []
+
+        def fetcher(url, headers=None, method="GET", data=None):
+            calls.append({"url": url, "headers": headers or {}, "method": method, "data": data})
+            if url == "https://corporate.target.com/api/jobsearch" and method == "POST":
+                return {"status": 200, "final_url": url, "html": json.dumps(payload), "error": ""}
+            return {"status": 404, "final_url": url, "html": "", "error": "HTTP Error 404"}
+
+        with patch.object(companies, "resume_search_terms", return_value=["technical program manager"]):
+            result = companies.check_company_postings(company["id"], fetcher=fetcher)
+
+        source = result["career_source"]
+        self.assertEqual(source["platform_type"], "target_jobsearch")
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["headers"]["Content-Type"], "application/x-www-form-urlencoded")
+        self.assertIn(b"q=technical+program+manager", calls[0]["data"])
+        self.assertEqual([row["title"] for row in result["new"]], ["Lead UX Design Operations Program Manager"])
+        candidate = result["new"][0]
+        self.assertEqual(candidate["location"], "1000 Nicollet Mall, Minneapolis, MN")
+        self.assertEqual(candidate["work_mode"], "Hybrid")
+        self.assertEqual(candidate["source_job_id"], "R0000447702")
+        self.assertEqual(candidate["source_platform"], "target_jobsearch")
+        retired = next(row for row in result["candidates"] if row["id"] == "CP0001")
+        self.assertEqual(retired["status"], "unavailable")
+        self.assertEqual(retired["scan_state"], "unavailable")
+        self.assertEqual(result["scan"]["unavailable_count"], "1")
 
     def test_check_company_postings_records_partial_scan_and_query_provenance(self):
         sqlite_store.initialize()
@@ -581,7 +698,7 @@ class HunterCompaniesTest(unittest.TestCase):
 
         self.assertEqual(result["new"], [])
         self.assertEqual(result["recommended"], [])
-        self.assertEqual(result["candidates"][0]["status"], "ingested")
+        self.assertEqual(result["candidates"][0]["status"], "pursued")
 
     def test_ingest_candidate_passes_candidate_title_as_role(self):
         sqlite_store.initialize()
@@ -606,7 +723,7 @@ class HunterCompaniesTest(unittest.TestCase):
         self.assertEqual(command[command.index("--role") + 1], "Product Manager, AI Platform")
         self.assertEqual(command[command.index("--location") + 1], "Remote; United States")
         self.assertEqual(command[-1], "https://example.com/jobs/product-manager-ai-platform")
-        self.assertEqual(result["candidate"]["status"], "ingested")
+        self.assertEqual(result["candidate"]["status"], "pursued")
 
     def test_check_company_postings_does_not_mark_missing_search_results_unavailable(self):
         sqlite_store.initialize()
@@ -1321,15 +1438,242 @@ class HunterCompaniesTest(unittest.TestCase):
                 "waf_action": "challenge",
             }
 
-        with self.assertRaisesRegex(ValueError, "AWS WAF JavaScript challenge"):
+        with (
+            patch("hunter.agent._settings", side_effect=ValueError("No OpenAI API token is configured.")),
+            self.assertRaisesRegex(ValueError, "AWS WAF JavaScript challenge"),
+        ):
             companies.check_company_postings(company["id"], fetcher=fetcher)
 
         source = repository.read_company_career_sources()[0]
         checked = companies.get_company(company["id"])
-        self.assertEqual(source["platform_type"], "avature_waf_blocked")
-        self.assertEqual(source["status"], "blocked")
+        self.assertEqual(source["platform_type"], "avature_web_search")
+        self.assertEqual(source["status"], "discovered")
         self.assertIn("aws_waf_javascript_challenge", source["config_json"])
+        self.assertIn("openai_web_search", source["config_json"])
         self.assertIn("AWS WAF JavaScript challenge", checked["last_check_status"])
+
+    def test_avature_web_search_accepts_only_direct_official_job_details(self):
+        sqlite_store.initialize()
+        settings.save_settings(
+            "openai",
+            "gpt-5.6-luna",
+            "test-token",
+            "",
+            fit_signals={
+                "role_terms": "product manager | 42",
+                "search_terms": "product manager",
+            },
+        )
+        company = companies.upsert_company(
+            "",
+            {
+                "name": "Delta Air Lines",
+                "careers_url": "https://delta.avature.net/en_US/careers",
+            },
+        )
+        challenge_html = """
+        <html>
+          <script>window.awsWafCookieDomainList = [];</script>
+          <script src="https://example.token.awswaf.com/challenge.js"></script>
+        </html>
+        """
+
+        def fetcher(url):
+            return {
+                "status": 202,
+                "final_url": url,
+                "html": challenge_html,
+                "error": "",
+                "waf_action": "challenge",
+            }
+
+        response = {
+            "model": "gpt-5.6-luna",
+            "output_text": json.dumps(
+                {
+                    "jobs": [
+                        {
+                            "title": "Product Manager - AI and Automation",
+                            "url": "https://delta.avature.net/en_US/careers/JobDetail?jobId=33234",
+                            "location": "Atlanta, GA",
+                            "work_mode": "Hybrid",
+                            "source_job_id": "33234",
+                            "freshness_evidence": "Official job result crawled this week.",
+                        },
+                        {
+                            "title": "Product Manager from an aggregator",
+                            "url": "https://example.com/jobs/33235",
+                            "location": "Atlanta, GA",
+                            "work_mode": "",
+                            "source_job_id": "33235",
+                            "freshness_evidence": "Aggregator result crawled this week.",
+                        },
+                    ]
+                }
+            ),
+            "usage": {"input_tokens": 20, "output_tokens": 10, "total_tokens": 30},
+            "output": [{"type": "web_search_call"}],
+        }
+        with (
+            patch(
+                "hunter.agent._settings",
+                return_value={"token": "test-token", "api_base": "https://api.openai.com/v1"},
+            ),
+            patch("hunter.agent._request_json", return_value=response) as request_json,
+        ):
+            result = companies.check_company_postings(company["id"], fetcher=fetcher)
+
+        source = repository.read_company_career_sources()[0]
+        self.assertEqual(source["platform_type"], "avature_web_search")
+        self.assertEqual(source["status"], "verified")
+        self.assertEqual(len(result["new"]), 1)
+        self.assertEqual(result["new"][0]["source_job_id"], "33234")
+        self.assertEqual(result["new"][0]["source_platform"], "avature_web_search")
+        self.assertEqual(result["new"][0]["location"], "Atlanta, GA")
+        self.assertEqual(request_json.call_count, 1)
+        usage_rows = (paths.DATA_DIR / "agent_usage.jsonl").read_text(encoding="utf-8")
+        self.assertIn('"feature": "career-search"', usage_rows)
+        self.assertNotIn("example.com/jobs/33235", json.dumps(result))
+
+    def test_cloudflare_blocked_official_site_uses_guarded_web_search(self):
+        sqlite_store.initialize()
+        settings.save_settings(
+            "openai",
+            "gpt-5.6-luna",
+            "test-token",
+            "",
+            fit_signals={"role_terms": "program manager | 42", "search_terms": "program manager"},
+        )
+        company = companies.upsert_company(
+            "",
+            {
+                "name": "General Motors",
+                "careers_url": "https://search-careers.gm.com/en/jobs/",
+            },
+        )
+
+        def fetcher(url, headers=None):
+            del headers
+            return {
+                "status": 403,
+                "final_url": url,
+                "html": "<html><title>Just a moment...</title>Cloudflare cf-ray</html>",
+                "error": "HTTP Error 403: Forbidden",
+            }
+
+        response = {
+            "model": "gpt-5.6-luna",
+            "output_text": json.dumps(
+                {
+                    "jobs": [
+                        {
+                            "title": "Group Program Manager, Hardware Design Program Management",
+                            "url": (
+                                "https://search-careers.gm.com/en/jobs/jr-202614853/"
+                                "group-program-manager-hardware-design-program-management/"
+                            ),
+                            "location": "Sunnyvale, California; Warren, Michigan",
+                            "work_mode": "Hybrid",
+                            "source_job_id": "JR-202614853",
+                            "freshness_evidence": "Listed on the current official GM jobs page.",
+                        }
+                    ]
+                }
+            ),
+        }
+        with (
+            patch(
+                "hunter.agent._settings",
+                return_value={"token": "test-token", "api_base": "https://api.openai.com/v1"},
+            ),
+            patch("hunter.agent._request_json", return_value=response),
+        ):
+            result = companies.check_company_postings(company["id"], fetcher=fetcher)
+
+        source = repository.read_company_career_sources()[0]
+        self.assertEqual(source["platform_type"], "official_web_search")
+        self.assertEqual(source["status"], "verified")
+        self.assertEqual([row["source_job_id"] for row in result["new"]], ["JR-202614853"])
+
+    def test_shopify_react_router_jobs_are_extracted_from_official_page(self):
+        sqlite_store.initialize()
+        settings.save_settings(
+            "openai",
+            "gpt-5.6-luna",
+            "",
+            "",
+            fit_signals={
+                "role_terms": "technical program manager | 50",
+                "search_terms": "technical program manager",
+            },
+        )
+        company = companies.upsert_company(
+            "",
+            {"name": "Shopify", "careers_url": "https://www.shopify.com/careers"},
+        )
+        payload = {
+            "loaderData": {
+                "($locale)/careers": {
+                    "jobPostingsWithJobs": [
+                        {
+                            "jobPosting": {
+                                "id": "3f5d85c0-816a-4173-96e7-4ee200b3b20e",
+                                "title": "Staff Technical Program Manager",
+                                "status": "Published",
+                                "isListed": True,
+                                "teamName": "Engineering",
+                                "locationName": "Americas",
+                                "workplaceType": "Remote",
+                                "publishedDate": "2026-06-04",
+                            },
+                            "job": {
+                                "title": "Engineering - Technical Program Management - Generalist",
+                                "status": "Open",
+                                "customFields": [
+                                    {
+                                        "title": "Subdiscipline",
+                                        "valueLabel": "Technical Program Management",
+                                    }
+                                ],
+                            },
+                        }
+                    ]
+                }
+            }
+        }
+        flattened = []
+
+        def flatten(value):
+            index = len(flattened)
+            flattened.append(None)
+            if isinstance(value, dict):
+                flattened[index] = {f"_{flatten(str(key))}": flatten(item) for key, item in value.items()}
+            elif isinstance(value, list):
+                flattened[index] = [flatten(item) for item in value]
+            else:
+                flattened[index] = value
+            return index
+
+        flatten(payload)
+        encoded = json.dumps(json.dumps(flattened))
+        page_html = (
+            "<html><script>window.__reactRouterContext.streamController.enqueue("
+            f"{encoded})</script></html>"
+        )
+
+        def fetcher(url):
+            return {"status": 200, "final_url": url, "html": page_html, "error": ""}
+
+        result = companies.check_company_postings(company["id"], fetcher=fetcher)
+
+        source = repository.read_company_career_sources()[0]
+        self.assertEqual(source["platform_type"], "shopify_embedded_jobs")
+        self.assertEqual([row["title"] for row in result["new"]], ["Staff Technical Program Manager"])
+        self.assertEqual(
+            result["new"][0]["url"],
+            "https://www.shopify.com/careers/staff-technical-program-manager_3f5d85c0-816a-4173-96e7-4ee200b3b20e",
+        )
+        self.assertEqual(result["new"][0]["work_mode"], "Remote")
 
     def test_greenhouse_board_check_filters_to_matching_company_department(self):
         sqlite_store.initialize()
@@ -2030,6 +2374,149 @@ class HunterCompaniesTest(unittest.TestCase):
         self.assertEqual([row["title"] for row in result["new"]], ["Product Manager, API Agents"])
         self.assertEqual(result["new"][0]["url"], "https://jobs.ashbyhq.com/openai/pm-1")
         self.assertEqual(result["recommended"][0]["title"], "Product Manager, API Agents")
+
+    def test_branded_careers_page_resolves_embedded_ashby_board(self):
+        sqlite_store.initialize()
+        settings.save_settings(
+            "openai",
+            "gpt-5.5",
+            "",
+            "",
+            fit_signals={"role_terms": "technical program manager | 50", "search_terms": "technical program manager"},
+        )
+        settings.save_resume_upload(
+            "resume.txt",
+            base64.b64encode(b"Senior Technical Program Manager for platforms and operations.").decode(),
+        )
+        company = companies.upsert_company(
+            "",
+            {"name": "Applied Intuition", "careers_url": "https://www.appliedintuition.com/careers"},
+        )
+        branded_html = '<a href="https://jobs.ashbyhq.com/applied/job-id">Technical Program Manager</a>'
+        ashby_payload = {
+            "jobBoard": {
+                "jobPostings": [
+                    {
+                        "id": "tpm-1",
+                        "title": "Technical Program Manager, Vehicle OS",
+                        "isListed": True,
+                        "locationName": "Sunnyvale",
+                        "departmentName": "Vehicle OS",
+                    },
+                    {"id": "sales-1", "title": "Account Executive", "isListed": True},
+                ]
+            }
+        }
+        ashby_html = (
+            f"<script>window.__appData = {json.dumps(ashby_payload)};\n"
+            'fetch("https://cdn.ashbyprd.com/manifest.json")</script>'
+        )
+
+        def fetcher(url):
+            if url == "https://www.appliedintuition.com/careers":
+                return {"status": 200, "final_url": url, "html": branded_html, "error": ""}
+            if url == "https://jobs.ashbyhq.com/applied":
+                return {"status": 200, "final_url": url, "html": ashby_html, "error": ""}
+            return {"status": 404, "final_url": url, "html": "", "error": "HTTP Error 404"}
+
+        result = companies.check_company_postings(company["id"], fetcher=fetcher)
+
+        self.assertEqual(result["career_source"]["platform_type"], "ashby")
+        self.assertEqual([row["title"] for row in result["new"]], ["Technical Program Manager, Vehicle OS"])
+
+    def test_lever_careers_check_uses_regional_postings_api(self):
+        sqlite_store.initialize()
+        settings.save_settings(
+            "openai",
+            "gpt-5.5",
+            "",
+            "",
+            fit_signals={"role_terms": "technical product manager | 50", "search_terms": "technical product manager"},
+        )
+        settings.save_resume_upload(
+            "resume.txt",
+            base64.b64encode(b"Senior Technical Product Manager for platforms and APIs.").decode(),
+        )
+        careers_url = "https://jobs.eu.lever.co/quantinuum"
+        company = companies.upsert_company("", {"name": "Quantinuum", "careers_url": careers_url})
+        payload = [
+            {
+                "id": "job-1",
+                "text": "Senior Technical Product Manager - Quantum Developer Platform",
+                "hostedUrl": "https://jobs.eu.lever.co/quantinuum/job-1",
+                "workplaceType": "hybrid",
+                "categories": {
+                    "location": "US Broomfield, CO / US Brooklyn Park, MN",
+                    "team": "Quantum Computing Software",
+                    "commitment": "Full-time",
+                },
+                "descriptionPlain": "Lead product management for a developer platform and APIs.",
+            },
+            {
+                "id": "job-2",
+                "text": "Senior Counsel",
+                "hostedUrl": "https://jobs.eu.lever.co/quantinuum/job-2",
+                "categories": {"location": "London", "team": "Legal"},
+            },
+        ]
+        calls = []
+
+        def fetcher(url, headers=None):
+            calls.append({"url": url, "headers": headers or {}})
+            return {"status": 200, "final_url": url, "html": json.dumps(payload), "error": ""}
+
+        result = companies.check_company_postings(company["id"], fetcher=fetcher)
+
+        self.assertEqual(result["career_source"]["platform_type"], "lever")
+        self.assertEqual(calls[0]["url"], "https://api.eu.lever.co/v0/postings/quantinuum?mode=json")
+        self.assertEqual([row["title"] for row in result["new"]], [payload[0]["text"]])
+        self.assertEqual(result["new"][0]["source_job_id"], "job-1")
+        self.assertEqual(result["new"][0]["work_mode"], "Hybrid")
+
+    def test_cdpr_careers_check_uses_embedded_jobs_data(self):
+        sqlite_store.initialize()
+        settings.save_settings(
+            "openai",
+            "gpt-5.5",
+            "",
+            "",
+            fit_signals={"role_terms": "producer | 50", "search_terms": "producer"},
+        )
+        settings.save_resume_upload(
+            "resume.txt",
+            base64.b64encode(b"Senior Producer and Technical Program Manager for game development.").decode(),
+        )
+        careers_url = "https://www.cdprojektred.com/en/jobs"
+        company = companies.upsert_company("", {"name": "CD Projekt Red", "careers_url": careers_url})
+        payload = [
+            {
+                "id": 22122,
+                "name": "Senior Producer",
+                "applyUrl": "https://jobs.smartrecruiters.com/CDPROJEKTRED/22122-senior-producer",
+                "category": {"name": "Production"},
+                "project": {"name": "Cyberpunk 2"},
+                "location": {"name": "United States"},
+                "remote": False,
+            },
+            {
+                "id": 22198,
+                "name": "Finance Manager",
+                "applyUrl": "https://jobs.smartrecruiters.com/CDPROJEKTRED/22198-finance-manager",
+                "location": {"name": "Poland"},
+                "remote": False,
+            },
+        ]
+        page_html = f"<script>window.cdpData.jobsData = {json.dumps(payload)};</script>"
+
+        result = companies.check_company_postings(
+            company["id"],
+            fetcher=lambda url: {"status": 200, "final_url": url, "html": page_html, "error": ""},
+        )
+
+        self.assertEqual(result["career_source"]["platform_type"], "cdpr_embedded_jobs")
+        self.assertEqual([row["title"] for row in result["new"]], ["Senior Producer"])
+        self.assertEqual(result["new"][0]["location"], "United States")
+        self.assertEqual(result["new"][0]["work_mode"], "On-site")
 
     def test_custom_workday_careers_check_uses_platform_api(self):
         sqlite_store.initialize()
@@ -2799,7 +3286,7 @@ class HunterCompaniesTest(unittest.TestCase):
         ingested = companies.update_candidate_status(candidate["id"], "ingested")
 
         self.assertEqual(ignored["status"], "ignored")
-        self.assertEqual(ingested["status"], "ingested")
+        self.assertEqual(ingested["status"], "pursued")
 
     def test_bulk_candidate_status_transition_writes_selected_candidates_once(self):
         sqlite_store.initialize()
