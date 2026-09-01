@@ -37,6 +37,9 @@ MUTATING_TOOLS = {
     "hunter_link_company_contact",
     "hunter_unlink_company_contact",
     "hunter_ingest_company_candidate",
+    "hunter_consider_company_candidate",
+    "hunter_consider_discovery_candidate",
+    "hunter_refresh_discovery_candidates",
     "hunter_update_company_candidate",
     "hunter_update_settings",
     "hunter_run_discovery_search",
@@ -226,8 +229,10 @@ def _tool_receipt(name, arguments):
         return "Added the posting to your local tracker."
     if name == "hunter_update_company_candidate":
         return f'Updated {arguments.get("id", "the candidate")} to {arguments.get("status", "the requested status")}.'
-    if name == "hunter_ingest_company_candidate":
-        return f'Pursued {arguments.get("id", "the candidate")} as a tracked posting.'
+    if name in {"hunter_ingest_company_candidate", "hunter_consider_company_candidate", "hunter_consider_discovery_candidate"}:
+        return f'Added {arguments.get("id", "the candidate")} to Postings in Considering.'
+    if name == "hunter_refresh_discovery_candidates":
+        return "Refreshed existing Discovery candidate posting details and freshness."
     if name == "hunter_check_company_postings":
         return f'Checked the careers page for {arguments.get("id", "the company")}.'
     if name == "hunter_research_company":

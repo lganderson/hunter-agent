@@ -223,9 +223,9 @@ export function CandidatesPage({ data, refresh, applyCompanyCandidateUpdates, ap
       const result = await pursueCompanyCandidate(candidateId);
       await refresh();
       setIngestedPostingId(result.posting?.id || "");
-      setOperationStatus("Role pursued and added to Considering.");
+      setOperationStatus("Role added to Considering.");
     } catch (error) {
-      setOperationStatus(`Could not pursue role. ${error instanceof Error ? error.message : String(error)}`);
+      setOperationStatus(`Could not add role to Considering. ${error instanceof Error ? error.message : String(error)}`);
     } finally {
       setOperationPending(false);
     }
@@ -249,7 +249,7 @@ export function CandidatesPage({ data, refresh, applyCompanyCandidateUpdates, ap
         let failureCount = 0;
         let postingId = "";
         for (const [index, row] of eligibleRows.entries()) {
-          setOperationStatus(`Pursuing ${index + 1} of ${eligibleRows.length} selected candidates...`);
+          setOperationStatus(`Adding ${index + 1} of ${eligibleRows.length} selected candidates to Considering...`);
           try {
             const result = await pursueCompanyCandidate(row.candidate.id);
             successCount += 1;
@@ -261,8 +261,8 @@ export function CandidatesPage({ data, refresh, applyCompanyCandidateUpdates, ap
         await refresh();
         setIngestedPostingId(successCount === 1 ? postingId : "");
         setOperationStatus(
-          `${successCount} candidate${successCount === 1 ? "" : "s"} pursued.`
-          + (failureCount ? ` ${failureCount} could not be pursued.` : "")
+          `${successCount} candidate${successCount === 1 ? "" : "s"} added to Considering.`
+          + (failureCount ? ` ${failureCount} could not be added.` : "")
         );
       } else {
         const status = action === "ignored" ? "ignored" : "new";
@@ -325,7 +325,7 @@ export function CandidatesPage({ data, refresh, applyCompanyCandidateUpdates, ap
     checkAbortController.current = abortController;
     setIngestedPostingId("");
     setCheckingAll(true);
-    setOperationStatus("Checking careers pages for all companies...");
+    setOperationStatus("Checking careers pages for tracked companies...");
     setCheckProgress({ completed: 0, total: companiesToCheck.length });
     try {
       for (const company of companiesToCheck) {
@@ -430,8 +430,8 @@ export function CandidatesPage({ data, refresh, applyCompanyCandidateUpdates, ap
           <label className="toggle"><input checked={latestOnly} onChange={event => updateViewParams({ latest: event.target.checked ? "true" : "false" })} type="checkbox" /> Latest scan</label>
           <label className="toggle"><input checked={searchScopeOnly} onChange={event => updateViewParams({ scope: event.target.checked ? "matching" : "all" })} type="checkbox" /> Search scope</label>
           <button className="button" type="button" onClick={clearFilters}><FilterIcon size={16} /> Clear</button>
-          <button className="button primary" type="button" disabled={checkingAll} onClick={checkAllCompanies}>
-            {checkingAll ? "Checking..." : "Check All Careers"}
+          <button className="button primary" type="button" disabled={checkingAll} onClick={checkAllCompanies} title="Refreshes existing roles and finds new roles across tracked company careers pages">
+            {checkingAll ? "Checking tracked companies…" : "Check tracked companies"}
           </button>
         </div>
 
@@ -492,12 +492,12 @@ export function CandidatesPage({ data, refresh, applyCompanyCandidateUpdates, ap
             actions={[
               {
                 id: "pursue",
-                label: `Pursue ${selectedIngestCandidates.length}`,
+                label: `Consider ${selectedIngestCandidates.length}`,
                 primary: true,
                 disabled: !selectedIngestCandidates.length || selectedIngestCandidates.length > MAX_BULK_INGEST,
                 title: selectedIngestCandidates.length > MAX_BULK_INGEST
-                  ? `Select ${MAX_BULK_INGEST} or fewer candidates to pursue at once`
-                  : "Pursue selected candidates",
+                  ? `Select ${MAX_BULK_INGEST} or fewer candidates to consider at once`
+                  : "Add selected candidates to Considering",
                 run: () => void runBulkCandidateAction("pursue")
               },
               {
@@ -565,14 +565,14 @@ export function CandidatesPage({ data, refresh, applyCompanyCandidateUpdates, ap
                     <span className={`pill fit-${fitBand(candidate)}`}>{candidate.fit_score || "0"}</span>
                     <span className="cell-subtle">{candidateReviewStateLabel(candidate.review_state)}</span>
                   </td>
-                  <td>{titleCase(candidate.status)}</td>
+                  <td>{candidate.status === "pursued" ? "Considering" : titleCase(candidate.status)}</td>
                   <td>
                     {candidateDateLabel(candidate)}
                   </td>
                   <td>
                     <div className="table-actions">
                       <a className="button compact" href={candidate.url} target="_blank" rel="noreferrer"><ExternalIcon size={15} /> Open</a>
-                      <button className="button compact" type="button" disabled={candidate.status === "pursued" || candidate.review_state !== "ready" || operationPending} title={candidate.review_state === "ready" ? "Add to Considering" : candidateReviewStateLabel(candidate.review_state)} onClick={() => pursueCandidate(candidate.id)}>Pursue</button>
+                      <button className="button compact" type="button" disabled={candidate.status === "pursued" || candidate.review_state !== "ready" || operationPending} title={candidate.review_state === "ready" ? "Add to Considering" : candidateReviewStateLabel(candidate.review_state)} onClick={() => pursueCandidate(candidate.id)}>Consider</button>
                       {candidate.status === "ignored"
                         ? <button className="button compact" type="button" disabled={operationPending} onClick={() => setCandidateStatus(candidate.id, "new")}>Needs decision</button>
                         : <button className="button compact" type="button" disabled={candidate.status === "pursued" || operationPending} onClick={() => setCandidateStatus(candidate.id, "ignored")}>Ignore</button>}

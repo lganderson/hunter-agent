@@ -407,6 +407,7 @@ export function startCandidateDiscovery(payload: {
 
 export function startCandidateEnrichment(payload: {
   search_id?: string;
+  candidate_id?: string;
   limit?: number;
 } = {}): Promise<{ job: CandidateEnrichmentJob }> {
   return postJson<{ job: CandidateEnrichmentJob }>("/api/discovery/enrichment-jobs", payload);

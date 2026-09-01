@@ -62,6 +62,10 @@ export function SearchIcon(props: IconProps) {
   return <Icon {...props}><path d="m21 21-4.3-4.3M10.5 18a7.5 7.5 0 1 1 0-15 7.5 7.5 0 0 1 0 15Z" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" /></Icon>;
 }
 
+export function RefreshIcon(props: IconProps) {
+  return <Icon {...props}><path d="M20 11a8 8 0 0 0-14.9-4M4 3v4h4m-4 6a8 8 0 0 0 14.9 4M20 21v-4h-4" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" /></Icon>;
+}
+
 export function FilterIcon(props: IconProps) {
   return <Icon {...props}><path d="M4 5h16l-6 7v5l-4 2v-7L4 5Z" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" /></Icon>;
 }

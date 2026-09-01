@@ -161,7 +161,7 @@ def cmd_ingest_candidate(args):
     sqlite_store.initialize()
     result = companies.pursue_candidate(args.candidate_id)
     candidate = result["candidate"]
-    print(f"Pursued {candidate['id']}: {candidate['url']}")
+    print(f"Added to Considering {candidate['id']}: {candidate['url']}")
     if result.get("stdout"):
         print(result["stdout"])
 
@@ -226,7 +226,11 @@ def build_parser():
     unlink_parser.add_argument("contact_id")
     unlink_parser.set_defaults(func=cmd_unlink_contact)
 
-    pursue_parser = subparsers.add_parser("pursue-candidate", help="Pursue a reviewed company posting candidate.")
+    consider_parser = subparsers.add_parser("consider-candidate", help="Add a reviewed company posting candidate to Considering.")
+    consider_parser.add_argument("candidate_id")
+    consider_parser.set_defaults(func=cmd_ingest_candidate)
+
+    pursue_parser = subparsers.add_parser("pursue-candidate", help=argparse.SUPPRESS)
     pursue_parser.add_argument("candidate_id")
     pursue_parser.set_defaults(func=cmd_ingest_candidate)
 

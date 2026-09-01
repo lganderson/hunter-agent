@@ -419,9 +419,15 @@ Exposed tools:
 - `hunter_list_postings`
 - `hunter_get_posting`
 - `hunter_list_actions`
+- `hunter_create_action`
 - `hunter_update_action`
+- `hunter_update_action_fields`
+- `hunter_make_next_action`
 - `hunter_update_application`
 - `hunter_ingest_posting`
+- `hunter_get_resume_text`
+- `hunter_get_settings`
+- `hunter_update_settings`
 - `hunter_list_contacts`
 - `hunter_upsert_contact`
 - `hunter_link_contact`
@@ -429,10 +435,27 @@ Exposed tools:
 - `hunter_list_companies`
 - `hunter_get_company`
 - `hunter_upsert_company`
+- `hunter_archive_company`
+- `hunter_restore_company`
+- `hunter_research_company`
+- `hunter_track_company`
+- `hunter_untrack_company`
+- `hunter_resolve_company_metadata_suggestion`
 - `hunter_check_company_postings`
+- `hunter_get_company_candidate`
+- `hunter_list_company_candidates`
+- `hunter_get_discovery_candidate`
+- `hunter_list_discovery_candidates`
+- `hunter_list_discovery_searches`
+- `hunter_run_discovery_search`
+- `hunter_run_discovery_searches`
+- `hunter_refresh_discovery_candidates`
+- `hunter_consider_discovery_candidate`
+- `hunter_update_company_candidate`
 - `hunter_link_company_contact`
 - `hunter_unlink_company_contact`
 - `hunter_ingest_company_candidate`
+- `hunter_consider_company_candidate`
 
 The MCP server uses the same local SQLite database as the app. The server is local-only and does not transmit data except to the MCP client you connect it to.
 

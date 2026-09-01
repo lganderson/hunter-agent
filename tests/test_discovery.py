@@ -2874,6 +2874,31 @@ class HunterDiscoveryTest(unittest.TestCase):
 
         self.assertEqual([row["id"] for row in targets], ["DC0001"])
 
+    def test_enrichment_backlog_can_target_one_existing_candidate(self):
+        company = companies.upsert_company("", {"name": "Example"})
+        candidates = []
+        for candidate_id in ["DC0001", "DC0002"]:
+            candidate = {field: "" for field in schema.DISCOVERY_CANDIDATE_FIELDS}
+            candidate.update({
+                "id": candidate_id,
+                "company_id": company["id"],
+                "title": "Senior Product Manager",
+                "canonical_url": f"https://example.com/jobs/{candidate_id.lower()}",
+                "location": "Remote; United States",
+                "description_text": "Responsibilities and requirements. " * 30,
+                "processing_status": "ready",
+                "status": "new",
+            })
+            candidates.append(candidate)
+
+        targets = discovery.detail_enrichment_targets(
+            rows=candidates,
+            candidate_id="dc0002",
+            company_rows=[company],
+        )
+
+        self.assertEqual([row["id"] for row in targets], ["DC0002"])
+
     def test_distinct_requisitions_are_not_canonicalized_or_matched_to_posting(self):
         company = companies.upsert_company("", {"name": "Waymo"})
         posting = {field: "" for field in schema.APPLICATION_FIELDS}

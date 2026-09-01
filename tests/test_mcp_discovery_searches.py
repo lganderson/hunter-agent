@@ -8,6 +8,12 @@ from hunter import mcp_server
 
 
 class McpDiscoverySearchesTest(unittest.TestCase):
+    def test_candidate_status_label_uses_considering_for_legacy_storage_value(self):
+        self.assertEqual(
+            mcp_server.compact_discovery_candidate({"status": "pursued"})["status_label"],
+            "Considering",
+        )
+
     def test_list_searches_returns_configured_searches(self):
         search = {
             "id": "DS0001",
@@ -101,6 +107,41 @@ class McpDiscoverySearchesTest(unittest.TestCase):
         self.assertEqual(payload["results"][1]["status"], "completed")
         self.assertEqual(len(calls), 3)
         self.assertTrue(all(call[1]["timeout"] == 5 for call in calls))
+
+    def test_refresh_existing_candidates_does_not_run_acquisition_and_defaults_to_full_backlog(self):
+        result = {
+            "target_count": 12,
+            "processed_count": 12,
+            "ready_count": 9,
+            "remaining_count": 3,
+            "errors": [],
+        }
+        with patch(
+            "hunter.mcp_server.discovery_store.enrich_candidate_backlog",
+            return_value=result,
+        ) as refresh:
+            response = mcp_server.call_named_tool(
+                "hunter_refresh_discovery_candidates",
+                {},
+            )
+
+        payload = json.loads(response["content"][0]["text"])
+        refresh.assert_called_once_with(candidate_id="", limit=0)
+        self.assertEqual(payload["processed_count"], 12)
+        self.assertIn("hunter_consider_discovery_candidate", mcp_server.TOOLS)
+        self.assertIn("hunter_consider_company_candidate", mcp_server.TOOLS)
+
+    def test_refresh_existing_candidates_can_target_one_candidate(self):
+        with patch(
+            "hunter.mcp_server.discovery_store.enrich_candidate_backlog",
+            return_value={"target_count": 1, "processed_count": 1, "errors": []},
+        ) as refresh:
+            mcp_server.call_named_tool(
+                "hunter_refresh_discovery_candidates",
+                {"id": "dc0042", "limit": 1},
+            )
+
+        refresh.assert_called_once_with(candidate_id="DC0042", limit=1)
 
 
 if __name__ == "__main__":

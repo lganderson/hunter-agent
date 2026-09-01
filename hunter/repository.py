@@ -31,7 +31,7 @@ def write_applications(rows):
 def delete_unmodified_discovery_application(application_id):
     if using_sqlite():
         return sqlite_store.delete_unmodified_discovery_application(application_id)
-    raise ValueError("Undo Pursue requires the local SQLite store.")
+    raise ValueError("Undo Consider requires the local SQLite store.")
 
 
 def read_actions():

@@ -138,10 +138,16 @@ def compact_company(company, detail=False):
     return row
 
 
+def candidate_status_label(candidate):
+    status = storage.clean(candidate.get("status", ""))
+    return "Considering" if status == "pursued" else status.replace("-", " ").title()
+
+
 def compact_company_candidate(candidate, detail=False):
     if detail:
         row = {field: candidate.get(field, "") for field in schema.COMPANY_POSTING_CANDIDATE_FIELDS}
         row["review_state"] = company_store.candidate_review_state(candidate)
+        row["status_label"] = candidate_status_label(candidate)
         row["requisition_ids"] = sorted(company_store.normalized_requisition_ids(candidate.get("url", "")))
         return row
     fields = [
@@ -161,6 +167,7 @@ def compact_company_candidate(candidate, detail=False):
     ]
     row = {field: candidate.get(field, "") for field in fields}
     row["review_state"] = company_store.candidate_review_state(candidate)
+    row["status_label"] = candidate_status_label(candidate)
     row["requisition_ids"] = sorted(company_store.normalized_requisition_ids(candidate.get("url", "")))
     row["notes_preview"] = preview_text(candidate.get("notes", ""))
     return row
@@ -177,6 +184,7 @@ def compact_discovery_candidate(candidate, detail=False):
             "recommendation_eligible",
         ]:
             row[field] = candidate.get(field, [] if field.endswith("_ids") else "")
+        row["status_label"] = candidate_status_label(candidate)
         return row
     fields = [
         "id", "company_id", "company", "title", "canonical_url", "url", "location",
@@ -185,6 +193,7 @@ def compact_discovery_candidate(candidate, detail=False):
         "review_state", "review_next_action", "requisition_ids", "matching_posting_ids",
     ]
     row = {field: candidate.get(field, "") for field in fields}
+    row["status_label"] = candidate_status_label(candidate)
     row["notes_preview"] = preview_text(candidate.get("notes", ""))
     return row
 
@@ -884,6 +893,31 @@ def tool_run_discovery_searches(args):
     )
 
 
+def tool_refresh_discovery_candidates(args):
+    candidate_id = storage.clean(args.get("id", "")).upper()
+    raw_limit = args.get("limit")
+    try:
+        limit = max(1, int(raw_limit)) if raw_limit is not None else 0
+    except (TypeError, ValueError) as exc:
+        raise ValueError("limit must be an integer.") from exc
+    result = discovery_store.enrich_candidate_backlog(
+        candidate_id=candidate_id,
+        limit=limit,
+    )
+    return text_result(result)
+
+
+def tool_consider_discovery_candidate(args):
+    result = discovery_store.pursue_candidate(args.get("id", ""))
+    return text_result(
+        {
+            "candidate": compact_discovery_candidate(result["candidate"]),
+            "posting": compact_application(result["posting"]),
+            "created": result.get("created", False),
+        }
+    )
+
+
 def tool_update_company_candidate(args):
     candidate = company_store.update_candidate_status(args.get("id", ""), args.get("status", ""))
     company = company_store.get_company(candidate.get("company_id", ""))
@@ -914,6 +948,10 @@ def tool_ingest_company_candidate(args):
             "stdout": result.get("stdout", ""),
         }
     )
+
+
+def tool_consider_company_candidate(args):
+    return tool_ingest_company_candidate(args)
 
 
 TOOLS = {
@@ -1401,6 +1439,26 @@ TOOLS = {
         },
         "handler": tool_run_discovery_searches,
     },
+    "hunter_refresh_discovery_candidates": {
+        "description": "Check existing eligible Discovery candidates that need posting detail or freshness. Does not run saved searches. Omit limit to process the complete eligible backlog, or provide id for one candidate.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "id": {"type": "string", "description": "Optional Discovery candidate id."},
+                "limit": {"type": "integer", "minimum": 1},
+            },
+        },
+        "handler": tool_refresh_discovery_candidates,
+    },
+    "hunter_consider_discovery_candidate": {
+        "description": "Add one review-ready Discovery candidate to Postings in Considering.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"id": {"type": "string", "description": "Discovery candidate id."}},
+            "required": ["id"],
+        },
+        "handler": tool_consider_discovery_candidate,
+    },
     "hunter_update_company_candidate": {
         "description": "Update a company posting candidate's review status, such as ignoring it or returning it to new.",
         "inputSchema": {
@@ -1438,13 +1496,22 @@ TOOLS = {
         "handler": tool_unlink_company_contact,
     },
     "hunter_ingest_company_candidate": {
-        "description": "Pursue a reviewed company posting candidate and add it to Postings in Considering.",
+        "description": "Compatibility alias for adding a reviewed company posting candidate to Postings in Considering.",
         "inputSchema": {
             "type": "object",
             "properties": {"id": {"type": "string", "description": "Company posting candidate id."}},
             "required": ["id"],
         },
         "handler": tool_ingest_company_candidate,
+    },
+    "hunter_consider_company_candidate": {
+        "description": "Add one review-ready company posting candidate to Postings in Considering.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"id": {"type": "string", "description": "Company posting candidate id."}},
+            "required": ["id"],
+        },
+        "handler": tool_consider_company_candidate,
     },
 }
 

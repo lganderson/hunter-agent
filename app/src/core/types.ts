@@ -224,6 +224,7 @@ export type CandidateEnrichmentJob = {
   error: string;
   request: {
     search_id?: string;
+    candidate_id?: string;
     limit?: number;
     use_browser_fallback?: boolean;
     enrichment_limit?: number;

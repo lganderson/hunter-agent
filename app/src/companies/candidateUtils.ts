@@ -6,7 +6,7 @@ export const RECOMMENDED_CANDIDATE_LIMIT = 25;
 
 export const CANDIDATE_FILTERS = [
   { id: "needs-decision", label: "Needs decision" },
-  { id: "pursued", label: "Pursued" },
+  { id: "pursued", label: "Considering" },
   { id: "ignored", label: "Ignored" },
 ] as const;
 

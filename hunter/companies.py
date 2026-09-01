@@ -6309,12 +6309,12 @@ def pursue_candidate(candidate_id):
     if not candidate:
         raise ValueError(f"No company posting candidate found with id {candidate_id}.")
     company = candidate_eligibility.require_candidate_eligible(
-        candidate, repository.read_companies(), operation="pursue"
+        candidate, repository.read_companies(), operation="add to Considering"
     )
     review_state = candidate_review_state(candidate)
     if review_state != "ready":
         raise ValueError(
-            f"Candidate is {review_state}; complete posting detail and freshness checks before pursuing."
+            f"Candidate is {review_state}; complete posting detail and freshness checks before adding it to Considering."
         )
     command = [
         sys.executable,
@@ -6348,7 +6348,7 @@ def pursue_candidate(candidate_id):
 
 
 def ingest_candidate(candidate_id):
-    """Compatibility alias for callers created before Pursue replaced Ingest."""
+    """Compatibility alias for callers using the legacy ingest name."""
     return pursue_candidate(candidate_id)
 
 

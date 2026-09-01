@@ -69,6 +69,42 @@ class HunterDiscoveryJobsTest(unittest.TestCase):
         self.assertIn("1 need your input", completed["message"])
         self.assertTrue(discovery_jobs.job_path().exists())
 
+    def test_background_enrichment_defaults_to_complete_backlog(self):
+        target_count = 300
+        result = {
+            "target_count": target_count,
+            "processed_count": target_count,
+            "changed_count": target_count,
+            "ready_count": target_count,
+            "needs_input_count": 0,
+            "remaining_count": 0,
+            "state_counts": {"needs-input": 0},
+            "errors": [],
+        }
+
+        def fake_enrichment(**kwargs):
+            self.assertEqual(kwargs["candidate_id"], "")
+            self.assertEqual(kwargs["limit"], 0)
+            return result
+
+        with (
+            patch(
+                "hunter.discovery_jobs.discovery.detail_enrichment_targets",
+                return_value=[{} for _ in range(target_count)],
+            ),
+            patch(
+                "hunter.discovery_jobs.discovery.enrich_candidate_backlog",
+                side_effect=fake_enrichment,
+            ),
+            patch("hunter.company_discovery_jobs.enqueue_pending_evaluation"),
+        ):
+            started = discovery_jobs.start_job({})
+            discovery_jobs._active_thread.join(timeout=2)
+
+        self.assertEqual(started["request"]["limit"], 0)
+        self.assertEqual(started["total_steps"], target_count)
+        self.assertEqual(discovery_jobs.current_job()["status"], "completed")
+
     def test_background_search_uses_api_providers_and_persists_result(self):
         result = {
             "search": {"id": "DS0001"},

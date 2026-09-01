@@ -3090,8 +3090,9 @@ def continue_enrichment(
     }
 
 
-def detail_enrichment_targets(rows=None, search_id="", company_rows=None):
+def detail_enrichment_targets(rows=None, search_id="", candidate_id="", company_rows=None):
     wanted_search = storage.clean(search_id).upper()
+    wanted_candidate = storage.clean(candidate_id).upper()
     candidates = rows if rows is not None else canonicalize_candidate_rows(repository.read_discovery_candidates())
     companies_by_id = {
         company.get("id", "").upper(): company
@@ -3101,6 +3102,7 @@ def detail_enrichment_targets(rows=None, search_id="", company_rows=None):
         candidate
         for candidate in candidates
         if candidate.get("status") == "new"
+        and (not wanted_candidate or candidate.get("id", "").upper() == wanted_candidate)
         and (not wanted_search or candidate_belongs_to_search(candidate, wanted_search))
         and candidate_review_state(candidate) in {"needs-detail", "needs-freshness"}
         and detail_attempt_count(candidate) < MAX_DETAIL_ATTEMPTS
@@ -3114,6 +3116,7 @@ def detail_enrichment_targets(rows=None, search_id="", company_rows=None):
 
 def enrich_candidate_backlog(
     search_id="",
+    candidate_id="",
     limit=DETAIL_ENRICHMENT_BATCH_LIMIT,
     fetcher=None,
     browser_detailer=None,
@@ -3125,15 +3128,22 @@ def enrich_candidate_backlog(
     repository.write_discovery_candidates(rows)
     company_rows = repository.read_companies()
     company_candidates = repository.read_company_posting_candidates()
-    selected = sorted(
-        detail_enrichment_targets(rows, search_id=search_id, company_rows=company_rows),
+    targets = sorted(
+        detail_enrichment_targets(
+            rows,
+            search_id=search_id,
+            candidate_id=candidate_id,
+            company_rows=company_rows,
+        ),
         key=lambda candidate: (
             greenhouse_job_reference(candidate.get("canonical_url") or candidate.get("url", "")) is not None,
             candidate_detail_state(candidate) == "pending-enrichment",
             candidate_rank_key(candidate),
         ),
         reverse=True,
-    )[:max(1, int(limit or DETAIL_ENRICHMENT_BATCH_LIMIT))]
+    )
+    requested_limit = int(limit or 0)
+    selected = targets[:requested_limit] if requested_limit > 0 else targets
     chrome_browser = None
 
     def lazy_browser_detailer(url):
@@ -4748,7 +4758,7 @@ def pursue_candidate(candidate_id):
     review_state = candidate_review_state(candidate)
     if review_state != "ready":
         raise ValueError(
-            f"Candidate is {review_state}; complete posting detail and freshness checks before pursuing."
+            f"Candidate is {review_state}; complete posting detail and freshness checks before adding it to Considering."
         )
     existing = matching_application(candidate)
     if existing:
@@ -4802,7 +4812,7 @@ def pursue_candidate(candidate_id):
 
 
 def ingest_candidate(candidate_id):
-    """Compatibility alias for callers created before Pursue replaced Ingest."""
+    """Compatibility alias for callers using the legacy ingest name."""
     return pursue_candidate(candidate_id)
 
 
@@ -4816,11 +4826,11 @@ def undo_candidate_decision(candidate_id, decision, application_id="", remove_po
     if cleaned_decision != "pursued":
         raise ValueError(f"Unsupported Discovery decision to undo: {cleaned_decision}")
     if candidate.get("status") != "pursued":
-        raise ValueError("This role is no longer pursued.")
+        raise ValueError("This role is no longer in Considering.")
     linked_application_id = storage.clean(candidate.get("ingested_application_id", "")).upper()
     wanted_application_id = storage.clean(application_id).upper()
     if wanted_application_id and linked_application_id != wanted_application_id:
-        raise ValueError("The pursued posting no longer matches this role.")
+        raise ValueError("The Considering posting no longer matches this role.")
     posting_removed = False
     if remove_posting and linked_application_id:
         posting_removed = repository.delete_unmodified_discovery_application(linked_application_id)

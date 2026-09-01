@@ -100,7 +100,7 @@ export function agentExperience(context: AgentContext, data: AppState): AgentExp
           starters: [
             { label: "Review strongest fits", prompt: "Review my strongest new Discovery results and explain the evidence behind each fit." },
             { label: "Find missing details", prompt: "Which Discovery results need more information before I can evaluate them?" },
-            { label: "Choose roles to pursue", prompt: "Which Discovery results should I pursue into my posting pipeline, and why?" }
+            { label: "Choose roles to consider", prompt: "Which Discovery results should I add to Considering, and why?" }
           ]
         };
       }

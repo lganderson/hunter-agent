@@ -1229,9 +1229,9 @@ export function CompanyDetailPage({ data, refresh, applyCompanyCandidateUpdates,
     try {
       await pursueCompanyCandidate(candidateId);
       await refresh();
-      setOperationStatus("Role pursued and added to Considering.");
+      setOperationStatus("Role added to Considering.");
     } catch (error) {
-      setOperationStatus(`Could not pursue role. ${error instanceof Error ? error.message : String(error)}`);
+      setOperationStatus(`Could not add role to Considering. ${error instanceof Error ? error.message : String(error)}`);
     } finally {
       setActiveCandidateActionId("");
     }
@@ -1245,7 +1245,7 @@ export function CompanyDetailPage({ data, refresh, applyCompanyCandidateUpdates,
       if (action === "ignored") await updateDiscoveryCandidate(candidateId, "ignored");
       else await pursueDiscoveryCandidate(candidateId);
       await refresh();
-      setOperationStatus(action === "ignored" ? "Discovery role ignored." : "Discovery role pursued.");
+      setOperationStatus(action === "ignored" ? "Discovery role ignored." : "Discovery role added to Considering.");
     } catch (error) {
       setOperationStatus(`Could not update Discovery role. ${error instanceof Error ? error.message : String(error)}`);
     } finally {
@@ -1430,7 +1430,7 @@ export function CompanyDetailPage({ data, refresh, applyCompanyCandidateUpdates,
                     </div>
                     <dl className="company-candidate-facts">
                       <div><dt>Source</dt><dd>{candidateSourceLabel(row)}</dd></div>
-                      <div><dt>Status</dt><dd>{titleCase(candidate.status)}</dd></div>
+                      <div><dt>Status</dt><dd>{candidate.status === "pursued" ? "Considering" : titleCase(candidate.status)}</dd></div>
                       <div><dt>Fit</dt><dd>{candidate.fit_score ? `${candidate.fit_score} · ${fitLabel(candidate.fit_score)}` : "Not scored"}</dd></div>
                       <div><dt>Seen</dt><dd>{candidateDateLabel(candidate)}</dd></div>
                     </dl>
@@ -1442,7 +1442,7 @@ export function CompanyDetailPage({ data, refresh, applyCompanyCandidateUpdates,
                         disabled={!canIngest || Boolean(activeCandidateActionId)}
                         onClick={() => isDiscovery ? updateDiscoveryRole(candidate.id, "pursued") : pursueCandidate(candidate.id)}
                       >
-                        {isActiveAction ? "Saving..." : candidate.status === "pursued" ? "Pursued" : "Pursue"}
+                        {isActiveAction ? "Saving..." : candidate.status === "pursued" ? "Considering" : "Consider"}
                       </button>
                       <button
                         className="button compact"

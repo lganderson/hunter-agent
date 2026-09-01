@@ -294,7 +294,7 @@ function CandidateEnrichmentJobBanner({ job }: { job: CandidateEnrichmentJob | n
   if (!job) return null;
   const active = job.status === "queued" || job.status === "running";
   const discovering = job.job_type === "candidate-discovery";
-  if (job.status === "completed") return null;
+  if (job.status === "completed" && discovering) return null;
   if (!active && dismissedJobId === job.id) return null;
   const jobId = job.id;
   const maximum = Math.max(1, job.total_steps || 1);
@@ -312,9 +312,11 @@ function CandidateEnrichmentJobBanner({ job }: { job: CandidateEnrichmentJob | n
   return (
     <aside className={`global-job-status ${job.status}`} aria-live="polite" aria-label={discovering ? "Candidate Discovery status" : "Candidate enrichment status"}>
       <div className="global-job-status-copy">
-        <strong>{active
-          ? discovering ? "Candidate Discovery is running" : "Candidate details are being resolved"
-          : discovering ? "Candidate Discovery needs attention" : "Candidate enrichment needs attention"}</strong>
+        <strong>{job.status === "completed"
+          ? "Existing role refresh complete"
+          : active
+            ? discovering ? "Hunter is finding new roles" : "Hunter is refreshing existing roles"
+            : discovering ? "Finding new roles needs attention" : "Refreshing existing roles needs attention"}</strong>
         <span>{job.message}</span>
       </div>
       <div className="global-job-status-progress">

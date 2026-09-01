@@ -43,11 +43,19 @@ def current_job():
 
 def start_job(payload=None):
     global _active_thread
+    raw_limit = (payload or {}).get("limit")
     request = {
         "search_id": storage.clean((payload or {}).get("search_id", "")).upper(),
-        "limit": max(1, min(250, int((payload or {}).get("limit", discovery.DETAIL_ENRICHMENT_BATCH_LIMIT)))),
+        "candidate_id": storage.clean((payload or {}).get("candidate_id", "")).upper(),
+        # An omitted limit refreshes the complete eligible backlog. Callers may
+        # still request a smaller batch when they need a bounded operation.
+        "limit": max(1, int(raw_limit)) if raw_limit is not None else 0,
     }
-    target_count = len(discovery.detail_enrichment_targets(search_id=request["search_id"]))
+    targets = discovery.detail_enrichment_targets(
+        search_id=request["search_id"],
+        candidate_id=request["candidate_id"],
+    )
+    target_count = min(len(targets), request["limit"]) if request["limit"] else len(targets)
     with _lock:
         existing = _read_locked()
         if (
@@ -63,9 +71,9 @@ def start_job(payload=None):
             "job_type": "candidate-enrichment",
             "status": "queued",
             "phase": "queued",
-            "message": f"{target_count} candidates are queued for detail enrichment…",
+            "message": f"{target_count} existing candidates are queued for posting checks…",
             "completed_steps": 0,
-            "total_steps": max(1, min(target_count, request["limit"])),
+            "total_steps": max(1, target_count),
             "source": "candidate-enrichment",
             "started_at": timestamp,
             "updated_at": timestamp,
@@ -141,7 +149,7 @@ def _run_job(job_id, request):
         job_id,
         status="running",
         phase="preparing",
-        message="Preparing candidate detail enrichment…",
+        message="Preparing existing candidate posting checks…",
     )
 
     def progress(update):
@@ -150,6 +158,7 @@ def _run_job(job_id, request):
     try:
         result = discovery.enrich_candidate_backlog(
             search_id=request["search_id"],
+            candidate_id=request["candidate_id"],
             limit=request["limit"],
             progress=progress,
         )
@@ -180,8 +189,8 @@ def _run_job(job_id, request):
         status="completed",
         phase="complete",
         message=(
-            f"Candidate enrichment complete: {result['ready_count']} became ready, "
-            f"{result['remaining_count']} remain automatic, and "
+            f"Posting checks complete: {result['ready_count']} ready for review, "
+            f"{result['remaining_count']} still need automatic checks, and "
             f"{result['state_counts']['needs-input']} need your input."
         ),
         completed_steps=max(1, result["processed_count"]),

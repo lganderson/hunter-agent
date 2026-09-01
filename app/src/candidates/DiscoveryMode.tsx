@@ -31,7 +31,7 @@ import type {
   DiscoverySearchLaneDefinition,
   DiscoverySearchUpdates
 } from "../core/types";
-import { BriefcaseIcon, CheckIcon, ExternalIcon, FilterIcon, PlusIcon, SearchIcon, XIcon } from "../components/Icons";
+import { BriefcaseIcon, CheckIcon, ExternalIcon, FilterIcon, PlusIcon, RefreshIcon, SearchIcon, XIcon } from "../components/Icons";
 import { SortableHeader } from "../components/Primitives";
 import { CandidateBulkActions, CandidateSelectionCheckbox } from "./CandidateBulkActions";
 
@@ -50,7 +50,7 @@ const DISCOVERY_SORT_KEYS: DiscoverySortKey[] = ["candidate", "company", "indust
 
 const DISCOVERY_FILTERS: Array<{ id: DiscoveryFilter; label: string }> = [
   { id: "needs-decision", label: "Needs decision" },
-  { id: "pursued", label: "Pursued" },
+  { id: "pursued", label: "Considering" },
   { id: "ignored", label: "Ignored" },
 ];
 const DISCOVERY_FILTER_VALUES: DiscoveryFilter[] = ["needs-decision", "pursued", "ignored", "duplicate", "unavailable"];
@@ -108,6 +108,7 @@ export function DiscoveryMode({ data, refresh, applyDiscoveryCandidateUpdate, en
   const [runDetailsOpen, setRunDetailsOpen] = useState(false);
   const [dismissedRunKey, setDismissedRunKey] = useState(() => storedDiscoveryRunKey());
   const [pendingCandidateId, setPendingCandidateId] = useState("");
+  const [refreshingCandidateId, setRefreshingCandidateId] = useState("");
   const enrichmentActive = enrichmentJob?.status === "queued" || enrichmentJob?.status === "running";
   const discoveryActive = enrichmentActive && enrichmentJob?.job_type === "candidate-discovery";
   const [editingCandidate, setEditingCandidate] = useState<DiscoveryCandidate | null>(null);
@@ -154,6 +155,10 @@ export function DiscoveryMode({ data, refresh, applyDiscoveryCandidateUpdate, en
     setRunDetailsOpen(false);
   }, [selectedSearch?.id]);
 
+  useEffect(() => {
+    if (!enrichmentActive) setRefreshingCandidateId("");
+  }, [enrichmentActive]);
+
   const discoveryExcludedCompanyIds = useMemo(
     () => new Set(
       data.companies
@@ -176,6 +181,13 @@ export function DiscoveryMode({ data, refresh, applyDiscoveryCandidateUpdate, en
   const industryOptions = useMemo(() => uniqueValues(companyOptions.map(company => company.industry)), [companyOptions]);
   const sizeOptions = useMemo(() => uniqueValues(companyOptions.map(company => company.company_size)), [companyOptions]);
   const sourceOptions = useMemo(() => uniqueValues(selectedCandidates.map(discoverySourceLabel)), [selectedCandidates]);
+  const refreshableCandidates = useMemo(
+    () => selectedCandidates.filter(candidate => (
+      candidate.status === "new"
+      && ["needs-detail", "needs-freshness"].includes(candidate.review_state)
+    )),
+    [selectedCandidates]
+  );
   const companyOptionIds = companyOptions.map(company => company.id);
   const selectedCompanyIds = selectionFromParam(viewParams.get("discovery_companies"), companyOptionIds, companyOptionIds);
   const selectedIndustries = selectionFromParam(viewParams.get("discovery_industries"), industryOptions, industryOptions);
@@ -419,14 +431,16 @@ export function DiscoveryMode({ data, refresh, applyDiscoveryCandidateUpdate, en
     }
   }
 
-  async function enrichPendingCandidates() {
+  async function enrichPendingCandidates(candidateId = "") {
     if (!startEnrichmentJob || enrichmentActive) return;
-    setOperationStatus("Queuing automatic candidate detail checks…");
+    setRefreshingCandidateId(candidateId);
+    setOperationStatus(candidateId ? "Queuing this posting check…" : "Queuing checks for existing candidates…");
     try {
-      const job = await startEnrichmentJob({ limit: 100 });
+      const job = await startEnrichmentJob(candidateId ? { candidate_id: candidateId, limit: 1 } : {});
       setOperationStatus(job.message);
     } catch (error) {
-      setOperationStatus(`Could not start candidate enrichment. ${errorMessage(error)}`);
+      setRefreshingCandidateId("");
+      setOperationStatus(`Could not start posting checks. ${errorMessage(error)}`);
     }
   }
 
@@ -520,10 +534,10 @@ export function DiscoveryMode({ data, refresh, applyDiscoveryCandidateUpdate, en
         applicationId: result.posting.id,
         removePosting: result.created
       });
-      setOperationStatus(result.created ? "Role pursued and added to Considering." : "Role pursued; the posting was already tracked.");
+      setOperationStatus(result.created ? "Role added to Considering." : "Role is already in Postings.");
       return true;
     } catch (error) {
-      setOperationStatus(`Could not pursue role. ${errorMessage(error)}`);
+      setOperationStatus(`Could not add role to Considering. ${errorMessage(error)}`);
       return false;
     } finally {
       setPendingCandidateId("");
@@ -547,7 +561,7 @@ export function DiscoveryMode({ data, refresh, applyDiscoveryCandidateUpdate, en
         let failureCount = 0;
         let postingId = "";
         for (const [index, candidate] of candidates.entries()) {
-          setOperationStatus(`Pursuing ${index + 1} of ${candidates.length} selected roles...`);
+          setOperationStatus(`Adding ${index + 1} of ${candidates.length} selected roles to Considering...`);
           try {
             const result = await pursueDiscoveryCandidate(candidate.id);
             applyDiscoveryCandidateUpdate(result.candidate, result.posting);
@@ -559,8 +573,8 @@ export function DiscoveryMode({ data, refresh, applyDiscoveryCandidateUpdate, en
         }
         setIngestedPostingId(successCount === 1 ? postingId : "");
         setOperationStatus(
-          `${successCount} role${successCount === 1 ? "" : "s"} pursued.`
-          + (failureCount ? ` ${failureCount} could not be pursued.` : "")
+          `${successCount} role${successCount === 1 ? "" : "s"} added to Considering.`
+          + (failureCount ? ` ${failureCount} could not be added.` : "")
         );
       } else {
         const status = action === "ignored" ? "ignored" : "new";
@@ -715,10 +729,23 @@ export function DiscoveryMode({ data, refresh, applyDiscoveryCandidateUpdate, en
           className="button primary"
           type="button"
           disabled={!selectedSearch || pending || enrichmentActive || !startDiscoveryJob}
-          title="Searches direct ATS inventories, the web with OpenAI, and Adzuna in the background"
+          title="Finds new roles for this saved search using direct ATS inventories, OpenAI, and Adzuna"
           onClick={() => void runSearch()}
         >
-          <SearchIcon size={15} /> {discoveryActive ? "Discovery running…" : "Continue discovery"}
+          <SearchIcon size={15} /> {discoveryActive ? "Finding new roles…" : "Find new roles"}
+        </button>
+        <button
+          className="button"
+          type="button"
+          disabled={!refreshableCandidates.length || pending || enrichmentActive || !startEnrichmentJob}
+          title="Checks posting details and availability for existing eligible roles without running saved searches"
+          onClick={() => void enrichPendingCandidates()}
+        >
+          <RefreshIcon size={15} /> {enrichmentActive && !discoveryActive
+            ? "Refreshing existing…"
+            : refreshableCandidates.length
+              ? `Refresh existing (${refreshableCandidates.length})`
+              : "No roles to refresh"}
         </button>
         <details className="discovery-actions-menu">
           <summary className="button" aria-label="Manage Discovery search">Manage</summary>
@@ -742,7 +769,9 @@ export function DiscoveryMode({ data, refresh, applyDiscoveryCandidateUpdate, en
         {selectedSearch ? (
           <span className="discovery-search-context">
             {`${shortSearchName(selectedSearch.name)} · ${discoveryLocationScope(selectedSearch.lanes)}`}
-            {enrichmentActive ? " · Resolving role details in background" : ""}
+            {enrichmentActive
+              ? discoveryActive ? " · Finding new roles in background" : " · Refreshing existing roles in background"
+              : ""}
           </span>
         ) : null}
       </div>
@@ -1059,12 +1088,12 @@ export function DiscoveryMode({ data, refresh, applyDiscoveryCandidateUpdate, en
           actions={[
             {
               id: "pursue",
-              label: `Pursue ready ${bulkIngestCandidates.length}`,
+              label: `Consider ready ${bulkIngestCandidates.length}`,
               primary: true,
               disabled: !bulkIngestCandidates.length || bulkIngestCandidates.length > MAX_BULK_INGEST,
               title: bulkIngestCandidates.length > MAX_BULK_INGEST
-                ? `Select ${MAX_BULK_INGEST} or fewer ready roles to pursue at once`
-                : "Only verified roles with a company and title can be pursued",
+                ? `Select ${MAX_BULK_INGEST} or fewer ready roles to consider at once`
+                : "Only verified roles with a company and title can be added to Considering",
               run: () => void runBulkCandidateAction("pursue")
             },
             {
@@ -1183,13 +1212,27 @@ export function DiscoveryMode({ data, refresh, applyDiscoveryCandidateUpdate, en
                       <button className="button compact" type="button" disabled={pending || rowPending} onClick={() => setReviewCandidateId(candidate.id)}>Review</button>
                     ) : null}
                     {candidate.status === "new" ? (
-                      <button className="button compact primary" type="button" disabled={pending || rowPending || candidate.review_state !== "ready"} title={candidate.review_state === "ready" ? "Add to Postings in Considering" : candidate.review_next_action} onClick={() => void pursueCandidate(candidate)}>{rowPending ? "Saving…" : "Pursue"}</button>
+                      <button
+                        className="button compact primary"
+                        type="button"
+                        disabled={pending || rowPending || Boolean(refreshingCandidateId) || enrichmentActive || !["ready", "needs-detail", "needs-freshness"].includes(candidate.review_state)}
+                        title={candidate.review_state === "ready" ? "Add to Postings in Considering" : candidate.review_next_action}
+                        onClick={() => candidate.review_state === "ready"
+                          ? void pursueCandidate(candidate)
+                          : void enrichPendingCandidates(candidate.id)}
+                      >
+                        {rowPending || refreshingCandidateId === candidate.id
+                          ? "Working…"
+                          : candidate.review_state === "ready"
+                            ? "Consider"
+                            : candidate.review_state === "needs-freshness" ? "Check" : "Resolve"}
+                      </button>
                     ) : null}
                     {candidate.status === "new" ? (
                       <button className="button compact" type="button" disabled={pending || rowPending} onClick={() => void setCandidateStatus(candidate, "ignored")}>Ignore</button>
                     ) : null}
                     {candidate.ingested_application_id ? (
-                      <Link className="icon-button" to={routes.postingDetail(candidate.ingested_application_id)} aria-label="Open pursued posting" title="Open pursued posting"><BriefcaseIcon size={15} /></Link>
+                      <Link className="icon-button" to={routes.postingDetail(candidate.ingested_application_id)} aria-label="Open Considering posting" title="Open Considering posting"><BriefcaseIcon size={15} /></Link>
                     ) : null}
                     {candidate.status === "ignored" || candidate.status === "duplicate"
                       ? <button className="button compact" type="button" disabled={pending || rowPending} onClick={() => void setCandidateStatus(candidate, "new")}>Needs decision</button>
@@ -1223,7 +1266,7 @@ export function DiscoveryMode({ data, refresh, applyDiscoveryCandidateUpdate, en
           applications={data.applications}
           index={activeReviewCandidates.findIndex(candidate => candidate.id === reviewCandidate.id)}
           total={activeReviewCandidates.length}
-          pending={pending || pendingCandidateId === reviewCandidate.id}
+          pending={pending || pendingCandidateId === reviewCandidate.id || refreshingCandidateId === reviewCandidate.id || (enrichmentActive && !discoveryActive)}
           close={() => setReviewCandidateId("")}
           previous={() => {
             const index = activeReviewCandidates.findIndex(candidate => candidate.id === reviewCandidate.id);
@@ -1237,7 +1280,8 @@ export function DiscoveryMode({ data, refresh, applyDiscoveryCandidateUpdate, en
           ignore={() => void reviewCandidateStatus(reviewCandidate, "ignored")}
           markCompanyNotInterested={() => void markCandidateCompanyNotInterested(reviewCandidate)}
           markDuplicate={applicationId => void reviewCandidateDuplicate(reviewCandidate, applicationId)}
-          pursue={() => void reviewCandidateStatus(reviewCandidate, "pursued")}
+          refresh={() => void enrichPendingCandidates(reviewCandidate.id)}
+          consider={() => void reviewCandidateStatus(reviewCandidate, "pursued")}
         />
       ) : null}
     </>
@@ -1256,7 +1300,7 @@ function FitBrief({ candidate, company }: { candidate: DiscoveryCandidate; compa
       {candidate.review_state !== "ready" ? (
         <div className="discovery-review-warning" role="note">
           <strong>{processingLabel(candidate)}</strong>
-          <span>{candidate.review_next_action || "Confirm the posting details before pursuing."}</span>
+          <span>{candidate.review_next_action || "Confirm the posting details before adding it to Considering."}</span>
         </div>
       ) : null}
       <div className="discovery-fit-columns">
@@ -1350,7 +1394,8 @@ function CandidateReviewModal({
   ignore,
   markCompanyNotInterested,
   markDuplicate,
-  pursue
+  refresh,
+  consider
 }: {
   candidate: DiscoveryCandidate;
   company?: Company;
@@ -1365,7 +1410,8 @@ function CandidateReviewModal({
   ignore: () => void;
   markCompanyNotInterested: () => void;
   markDuplicate: (applicationId: string) => void;
-  pursue: () => void;
+  refresh: () => void;
+  consider: () => void;
 }) {
   const [duplicateOpen, setDuplicateOpen] = useState(false);
   const [decision, setDecision] = useState<"ignored" | "pursued" | "">("");
@@ -1449,7 +1495,13 @@ function CandidateReviewModal({
             <button className="button" type="button" disabled={pending || !applications.length} onClick={() => setDuplicateOpen(true)}>
               Mark duplicate
             </button>
-            <button className="button primary" type="button" disabled={pending || candidate.review_state !== "ready"} onClick={() => { setDecision("pursued"); pursue(); }}>{pending && decision === "pursued" ? "Saving…" : "Pursue"}</button>
+            {candidate.review_state === "needs-freshness" || candidate.review_state === "needs-detail" ? (
+              <button className="button primary" type="button" disabled={pending} onClick={refresh}>
+                <RefreshIcon size={15} /> {pending ? "Checking…" : candidate.review_state === "needs-freshness" ? "Check posting" : "Resolve details"}
+              </button>
+            ) : (
+              <button className="button primary" type="button" disabled={pending || candidate.review_state !== "ready"} onClick={() => { setDecision("pursued"); consider(); }}>{pending && decision === "pursued" ? "Saving…" : "Consider"}</button>
+            )}
           </div>
         </div>
       </article>
