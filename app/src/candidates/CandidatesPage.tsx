@@ -26,6 +26,7 @@ import {
 } from "../companies/candidateUtils";
 import { DiscoveryMode } from "./DiscoveryMode";
 import { CandidateBulkActions, CandidateSelectionCheckbox } from "./CandidateBulkActions";
+import { canonicalCandidateRows } from "./candidateCanonicalization";
 
 type CandidateReviewPageProps = {
   data: AppState;
@@ -94,7 +95,7 @@ export function CandidatesPage({ data, refresh, applyCompanyCandidateUpdates, ap
   const sort = sortFromParams(viewParams, "sort", "direction", CANDIDATE_SORT_KEYS, { key: "fit", direction: "desc" });
 
   const allRows = useMemo<CandidateRow[]>(
-    () => data.company_posting_candidates.map(candidate => {
+    () => canonicalCandidateRows(data.company_posting_candidates).map(candidate => {
       const company = companyById.get(candidate.company_id) || null;
       return {
         candidate,
@@ -102,10 +103,7 @@ export function CandidatesPage({ data, refresh, applyCompanyCandidateUpdates, ap
         fitScore: candidateFitScore(candidate),
         latestCheckAt: company?.last_checked_at || ""
       };
-    }).filter(row => (
-      row.company?.tracking_status === "tracked"
-      && !row.candidate.discovery_candidate_id
-    )),
+    }).filter(row => row.company?.tracking_status === "tracked"),
     [companyById, data.company_posting_candidates]
   );
 
@@ -204,8 +202,8 @@ export function CandidatesPage({ data, refresh, applyCompanyCandidateUpdates, ap
     setOperationPending(true);
     setOperationStatus(status === "ignored" ? "Ignoring candidate..." : "Updating candidate...");
     try {
-      const result = await updateCompanyCandidate(candidateId, status);
-      applyCompanyCandidateUpdates([result.candidate]);
+      await updateCompanyCandidate(candidateId, status);
+      await refresh();
       setOperationStatus(status === "ignored" ? "Candidate ignored." : "Candidate returned to Needs decision.");
     } catch (error) {
       setOperationStatus(`Could not update candidate. ${error instanceof Error ? error.message : String(error)}`);
@@ -271,11 +269,11 @@ export function CandidatesPage({ data, refresh, applyCompanyCandidateUpdates, ap
             ? `Ignoring ${eligibleRows.length} selected candidates...`
             : `Returning ${eligibleRows.length} selected candidates to Needs decision...`
         );
-        const result = await updateCompanyCandidates(
+        await updateCompanyCandidates(
           eligibleRows.map(row => row.candidate.id),
           status
         );
-        applyCompanyCandidateUpdates(result.candidates);
+        await refresh();
         setOperationStatus(
           action === "ignored"
             ? `${eligibleRows.length} candidates ignored.`

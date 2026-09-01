@@ -160,21 +160,16 @@ def enrich_company_candidates(candidate_rows, discovery_candidates, searches):
         )
         for company_id, company in company_by_id.items()
     }
-    discovery_entries_by_company_id = {}
+    discovery_candidates_by_company_id = {}
     for discovery_candidate in discovery_candidates:
-        if discovery_candidate.get("status") not in {"new", "pursued", "ignored", "duplicate"}:
+        if discovery_candidate.get("status") not in {
+            "new", "pursued", "ignored", "duplicate", "unavailable"
+        }:
             continue
         discovery_company_id = discovery_candidate.get("company_id", "").upper()
-        identity_keys = set()
-        for url in discovery_store.candidate_source_urls(discovery_candidate):
-            identity_keys.update(company_store.posting_identity_keys(url))
-        discovery_entries_by_company_id.setdefault(discovery_company_id, []).append(
-            {
-                "id": discovery_candidate.get("id", ""),
-                "requisition_ids": set(discovery_candidate.get("requisition_ids", [])),
-                "identity_keys": identity_keys,
-            }
-        )
+        discovery_candidates_by_company_id.setdefault(
+            discovery_company_id, []
+        ).append(discovery_candidate)
     enriched = []
     for candidate in candidate_rows:
         payload = dict(candidate)
@@ -200,20 +195,86 @@ def enrich_company_candidates(candidate_rows, discovery_candidates, searches):
             },
             searches,
         )
-        candidate_requisitions = set(payload["requisition_ids"])
-        candidate_keys = company_store.posting_identity_keys(candidate.get("url", ""))
         payload["discovery_candidate_id"] = ""
-        for discovery_entry in discovery_entries_by_company_id.get(candidate_company_id, []):
-            discovery_requisitions = discovery_entry["requisition_ids"]
-            if candidate_requisitions and discovery_requisitions:
-                matched = bool(candidate_requisitions & discovery_requisitions)
-            else:
-                matched = bool(candidate_keys & discovery_entry["identity_keys"])
-            if matched:
-                payload["discovery_candidate_id"] = discovery_entry["id"]
-                break
+        matching_discovery = company_store.matching_discovery_candidates(
+            candidate,
+            discovery_candidates_by_company_id.get(candidate_company_id, []),
+        )
+        if matching_discovery:
+            payload["discovery_candidate_id"] = matching_discovery[0].get("id", "")
         enriched.append(payload)
     return enriched
+
+
+def canonical_candidate_status(company_candidate, discovery_candidate):
+    company_status = company_candidate.get("status", "new")
+    if company_status != "new":
+        return company_status
+    discovery_status = discovery_candidate.get("status", "")
+    if discovery_status in {"ignored", "pursued", "unavailable"}:
+        return discovery_status
+    if (
+        company_candidate.get("matching_posting_ids")
+        or discovery_candidate.get("matching_posting_ids")
+        or discovery_candidate.get("ingested_application_id")
+    ):
+        return "pursued"
+    return "new"
+
+
+def canonicalize_candidate_visibility(company_candidates, discovery_candidates):
+    """Annotate one renderable row for every eligible cross-pool role."""
+    discovery_by_id = {
+        candidate.get("id", ""): candidate
+        for candidate in discovery_candidates
+        if candidate.get("id", "")
+    }
+    for candidate in discovery_candidates:
+        candidate["is_canonical"] = True
+        candidate["canonical_source"] = "discovery"
+        candidate["canonical_status"] = candidate.get("status", "")
+        candidate["company_candidate_id"] = ""
+    for candidate in company_candidates:
+        candidate["is_canonical"] = True
+        candidate["canonical_source"] = "company"
+        candidate["canonical_status"] = candidate.get("status", "")
+
+    grouped = {}
+    for candidate in company_candidates:
+        discovery_id = candidate.get("discovery_candidate_id", "")
+        if discovery_id and discovery_id in discovery_by_id:
+            grouped.setdefault(discovery_id, []).append(candidate)
+
+    def candidate_rank(candidate):
+        status_rank = {"pursued": 0, "ignored": 1, "new": 2, "unavailable": 3}
+        try:
+            fit_score = int(candidate.get("fit_score", "") or 0)
+        except (TypeError, ValueError):
+            fit_score = 0
+        return (
+            status_rank.get(candidate.get("status", ""), 4),
+            0 if candidate.get("scan_state") == "current" else 1,
+            0 if candidate.get("review_state") == "ready" else 1,
+            -fit_score,
+            candidate.get("id", ""),
+        )
+
+    for discovery_id, linked_company_candidates in grouped.items():
+        discovery_candidate = discovery_by_id[discovery_id]
+        canonical_company_candidate = min(linked_company_candidates, key=candidate_rank)
+        canonical_status = canonical_candidate_status(
+            canonical_company_candidate, discovery_candidate
+        )
+        discovery_candidate["is_canonical"] = False
+        discovery_candidate["canonical_source"] = "company"
+        discovery_candidate["canonical_status"] = canonical_status
+        discovery_candidate["company_candidate_id"] = canonical_company_candidate.get("id", "")
+        for company_candidate in linked_company_candidates:
+            company_candidate["is_canonical"] = company_candidate is canonical_company_candidate
+            company_candidate["canonical_source"] = "company"
+            company_candidate["canonical_status"] = canonical_status
+
+    return company_candidates, discovery_candidates
 
 
 def build_payload(include_excluded_companies=False):
@@ -234,6 +295,10 @@ def build_payload(include_excluded_companies=False):
         company_candidate_rows,
         discovery_candidates,
         discovery_searches,
+    )
+    company_candidates, discovery_candidates = canonicalize_candidate_visibility(
+        company_candidates,
+        discovery_candidates,
     )
     companies = enrich_companies(
         company_rows,

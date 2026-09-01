@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1",
+    "test": "node --test --experimental-strip-types src/candidates/candidateCanonicalization.test.ts",
     "build": "tsc --noEmit && vite build",
     "typecheck": "tsc --noEmit --pretty false",
     "preview": "vite preview --host 127.0.0.1"

@@ -1113,6 +1113,57 @@ def matching_tracked_posting_ids(item, company=None, tracked=None):
     return matches
 
 
+def candidate_source_urls(item):
+    """Return the stored URLs needed to compare candidates across review pools."""
+    values = []
+    for field in ("canonical_url", "url"):
+        value = storage.clean(item.get(field, ""))
+        if value and value not in values:
+            values.append(value)
+    try:
+        stored_values = json.loads(item.get("source_urls_json", "") or "[]")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        stored_values = []
+    for value in stored_values if isinstance(stored_values, list) else []:
+        value = storage.clean(value)
+        if value and value not in values:
+            values.append(value)
+    return values
+
+
+def cross_pool_candidates_match(company_candidate, discovery_candidate):
+    """Compare a company and Discovery candidate without treating status as identity."""
+    company_id = storage.clean(company_candidate.get("company_id", "")).upper()
+    discovery_company_id = storage.clean(discovery_candidate.get("company_id", "")).upper()
+    if not company_id or company_id != discovery_company_id:
+        return False
+    company_urls = candidate_source_urls(company_candidate)
+    discovery_urls = candidate_source_urls(discovery_candidate)
+    company_requisitions = set().union(
+        *(normalized_requisition_ids(url) for url in company_urls)
+    ) if company_urls else set()
+    discovery_requisitions = set().union(
+        *(normalized_requisition_ids(url) for url in discovery_urls)
+    ) if discovery_urls else set()
+    if company_requisitions and discovery_requisitions:
+        return bool(company_requisitions & discovery_requisitions)
+    company_keys = set().union(
+        *(posting_identity_keys(url) for url in company_urls)
+    ) if company_urls else set()
+    discovery_keys = set().union(
+        *(posting_identity_keys(url) for url in discovery_urls)
+    ) if discovery_urls else set()
+    return bool(company_keys & discovery_keys)
+
+
+def matching_discovery_candidates(company_candidate, discovery_candidates):
+    return [
+        candidate
+        for candidate in discovery_candidates
+        if cross_pool_candidates_match(company_candidate, candidate)
+    ]
+
+
 def host_allowed(url, base_url):
     host = urlparse(url).netloc.lower()
     base_host = urlparse(base_url).netloc.lower()
@@ -6293,12 +6344,61 @@ def update_candidate_statuses(candidate_ids, status):
         if row.get("id", "").upper() in wanted_ids:
             row["status"] = status
     repository.write_company_posting_candidates(candidates)
+    sync_linked_discovery_candidate_statuses(
+        [row for row in candidates if row.get("id", "").upper() in wanted_ids],
+        status,
+    )
     updated = [
         row
         for row in repository.read_company_posting_candidates()
         if row.get("id", "").upper() in wanted_ids
     ]
     return {"candidates": updated, "count": len(updated)}
+
+
+def sync_linked_discovery_candidate_statuses(company_candidates, status):
+    """Keep the decision aligned while cross-pool identity remains URL-based."""
+    discovery_candidates = repository.read_discovery_candidates()
+    if not discovery_candidates:
+        return
+    application_rows = repository.read_applications()
+    company_rows = {
+        row.get("id", "").upper(): row
+        for row in repository.read_companies()
+    }
+    changed = False
+    for company_candidate in company_candidates:
+        for discovery_candidate in matching_discovery_candidates(
+            company_candidate, discovery_candidates
+        ):
+            if discovery_candidate.get("status") != status:
+                discovery_candidate["status"] = status
+                changed = True
+            if status == "pursued":
+                company = company_rows.get(
+                    company_candidate.get("company_id", "").upper()
+                )
+                matching_ids = (
+                    matching_tracked_posting_ids(
+                        company_candidate,
+                        company=company,
+                        tracked=tracked_posting_context(
+                            company, application_rows=application_rows
+                        ),
+                    )
+                    if company
+                    else []
+                )
+                if matching_ids and discovery_candidate.get("ingested_application_id") != matching_ids[0]:
+                    discovery_candidate["ingested_application_id"] = matching_ids[0]
+                    changed = True
+            if status != "ignored":
+                if discovery_candidate.get("ignore_reason") or discovery_candidate.get("ignore_reason_detail"):
+                    discovery_candidate["ignore_reason"] = ""
+                    discovery_candidate["ignore_reason_detail"] = ""
+                    changed = True
+    if changed:
+        repository.write_discovery_candidates(discovery_candidates)
 
 
 def pursue_candidate(candidate_id):

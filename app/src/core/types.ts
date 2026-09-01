@@ -305,6 +305,9 @@ export type CompanyPostingCandidate = {
   review_state: "ready" | "needs-detail" | "needs-freshness" | "failed-extraction";
   requisition_ids: string[];
   matching_posting_ids: string[];
+  is_canonical?: boolean;
+  canonical_source?: "company" | "discovery";
+  canonical_status?: string;
 };
 
 export type CompanyCareerScan = {
@@ -425,6 +428,10 @@ export type DiscoveryCandidate = {
   responsibility_signals: string[];
   ingested_application_id: string;
   notes: string;
+  is_canonical?: boolean;
+  canonical_source?: "company" | "discovery";
+  canonical_status?: string;
+  company_candidate_id?: string;
 };
 
 export type DiscoveryDetailState = "ready" | "pending-enrichment" | "source-verification" | "needs-input";

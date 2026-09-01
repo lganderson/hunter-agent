@@ -34,6 +34,7 @@ import type {
 import { BriefcaseIcon, CheckIcon, ExternalIcon, FilterIcon, PlusIcon, RefreshIcon, SearchIcon, XIcon } from "../components/Icons";
 import { SortableHeader } from "../components/Primitives";
 import { CandidateBulkActions, CandidateSelectionCheckbox } from "./CandidateBulkActions";
+import { canonicalCandidateRows } from "./candidateCanonicalization";
 
 type DiscoveryModeProps = {
   data: AppState;
@@ -168,7 +169,7 @@ export function DiscoveryMode({ data, refresh, applyDiscoveryCandidateUpdate, en
     [data.companies]
   );
   const selectedCandidates = useMemo(
-    () => data.discovery_candidates.filter(
+    () => canonicalCandidateRows(data.discovery_candidates).filter(
       candidate => (!candidate.company_id || !discoveryExcludedCompanyIds.has(candidate.company_id))
         && (candidate.status !== "new" || Boolean(candidate.lane_match))
     ),
@@ -203,9 +204,8 @@ export function DiscoveryMode({ data, refresh, applyDiscoveryCandidateUpdate, en
     ),
     [data.discovery_preference_suggestions, data.dismissed_suggestion_ids, selectedSearch]
   );
-  const visibleCandidates = useMemo(
+  const candidatesBeforeStatus = useMemo(
     () => selectedCandidates
-      .filter(candidate => discoveryCandidateMatches(candidate, resultFilter))
       .filter(candidate => discoveryCandidateIncludes(candidate, companyById.get(candidate.company_id), resultSearch))
       .filter(candidate => matchesDiscoverySelections(
         candidate,
@@ -218,9 +218,14 @@ export function DiscoveryMode({ data, refresh, applyDiscoveryCandidateUpdate, en
         sizeOptions,
         selectedSources,
         sourceOptions
-      ))
+      )),
+    [companyById, companyOptionIds, industryOptions, resultSearch, selectedCandidates, selectedCompanyIds, selectedIndustries, selectedSizes, selectedSources, sizeOptions, sourceOptions]
+  );
+  const visibleCandidates = useMemo(
+    () => candidatesBeforeStatus
+      .filter(candidate => discoveryCandidateMatches(candidate, resultFilter))
       .sort((left, right) => compareDiscoveryCandidateRows(left, right, sort, companyById)),
-    [companyById, companyOptionIds, industryOptions, resultFilter, resultSearch, selectedCandidates, selectedCompanyIds, selectedIndustries, selectedSizes, selectedSources, sizeOptions, sort, sourceOptions]
+    [candidatesBeforeStatus, companyById, resultFilter, sort]
   );
 
   function changeSort(key: DiscoverySortKey, initialDirection: SortDirection) {
@@ -262,10 +267,10 @@ export function DiscoveryMode({ data, refresh, applyDiscoveryCandidateUpdate, en
     () => Object.fromEntries(
       DISCOVERY_FILTERS.map(filter => [
         filter.id,
-        selectedCandidates.filter(candidate => discoveryCandidateMatches(candidate, filter.id)).length
+        candidatesBeforeStatus.filter(candidate => discoveryCandidateMatches(candidate, filter.id)).length
       ])
     ) as Record<DiscoveryFilter, number>,
-    [selectedCandidates]
+    [candidatesBeforeStatus]
   );
   const decisionHistoryCount = DISCOVERY_FILTERS.reduce((total, filter) => total + counts[filter.id], 0);
   const reviewQueue = useMemo(

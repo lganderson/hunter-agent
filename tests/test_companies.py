@@ -3824,6 +3824,143 @@ class HunterCompaniesTest(unittest.TestCase):
         self.assertEqual(candidates["CP0002"]["lane_match"], "")
         self.assertEqual(candidates["CP0002"]["discovery_candidate_id"], "")
 
+    def test_app_state_canonicalizes_cross_pool_visibility_and_application_precedence(self):
+        sqlite_store.initialize()
+        company_rows = [
+            companies.upsert_company(
+                "",
+                {
+                    "name": name,
+                    "tracking_status": "tracked",
+                    "interest_status": "interested",
+                },
+            )
+            for name in ["Needs Decision", "Ignored", "Ingested"]
+        ]
+        urls = [f"https://jobs.example.com/{index}" for index in range(1, 4)]
+        company_candidates = []
+        discovery_candidates = []
+        for index, (company, url) in enumerate(zip(company_rows, urls), start=1):
+            company_candidate = {
+                field: "" for field in schema.COMPANY_POSTING_CANDIDATE_FIELDS
+            }
+            company_candidate.update(
+                {
+                    "id": f"CP{index:04d}",
+                    "company_id": company["id"],
+                    "title": f"Role {index}",
+                    "url": url,
+                    "status": "ignored" if index == 2 else "new",
+                    "scan_state": "current",
+                    "fit_score": "70",
+                }
+            )
+            discovery_candidate = {
+                field: "" for field in schema.DISCOVERY_CANDIDATE_FIELDS
+            }
+            discovery_candidate.update(
+                {
+                    "id": f"DC{index:04d}",
+                    "company_id": company["id"],
+                    "title": f"Role {index}",
+                    "url": url,
+                    "canonical_url": url,
+                    "status": "duplicate",
+                }
+            )
+            company_candidates.append(company_candidate)
+            discovery_candidates.append(discovery_candidate)
+        repository.write_company_posting_candidates(company_candidates)
+        repository.write_discovery_candidates(discovery_candidates)
+        repository.write_applications(
+            [
+                application_row(
+                    {
+                        "id": "A0001",
+                        "company_id": company_rows[2]["id"],
+                        "company": company_rows[2]["name"],
+                        "role": "Role 3",
+                        "source_url": urls[2],
+                        "stage": "applied",
+                    }
+                )
+            ]
+        )
+
+        payload = app_state.build_payload()
+        company_by_id = {
+            candidate["id"]: candidate
+            for candidate in payload["company_posting_candidates"]
+        }
+        discovery_by_id = {
+            candidate["id"]: candidate
+            for candidate in payload["discovery_candidates"]
+        }
+
+        self.assertEqual(company_by_id["CP0001"]["canonical_status"], "new")
+        self.assertEqual(company_by_id["CP0002"]["canonical_status"], "ignored")
+        self.assertEqual(company_by_id["CP0003"]["canonical_status"], "pursued")
+        self.assertTrue(all(candidate["is_canonical"] for candidate in company_by_id.values()))
+        self.assertTrue(all(not candidate["is_canonical"] for candidate in discovery_by_id.values()))
+        self.assertEqual(
+            [
+                candidate["id"]
+                for candidate in company_by_id.values()
+                if candidate["is_canonical"] and candidate["canonical_status"] == "new"
+            ],
+            ["CP0001"],
+        )
+
+    def test_company_candidate_decisions_sync_to_linked_discovery_record(self):
+        sqlite_store.initialize()
+        company = companies.upsert_company(
+            "",
+            {
+                "name": "Example",
+                "tracking_status": "tracked",
+                "interest_status": "interested",
+            },
+        )
+        url = "https://jobs.example.com/linked-role"
+        company_candidate = {
+            field: "" for field in schema.COMPANY_POSTING_CANDIDATE_FIELDS
+        }
+        company_candidate.update(
+            {
+                "id": "CP0001",
+                "company_id": company["id"],
+                "title": "Linked role",
+                "url": url,
+                "status": "new",
+            }
+        )
+        discovery_candidate = {
+            field: "" for field in schema.DISCOVERY_CANDIDATE_FIELDS
+        }
+        discovery_candidate.update(
+            {
+                "id": "DC0001",
+                "company_id": company["id"],
+                "title": "Linked role",
+                "url": url,
+                "canonical_url": url,
+                "status": "duplicate",
+                "ingested_application_id": "A0099",
+            }
+        )
+        repository.write_company_posting_candidates([company_candidate])
+        repository.write_discovery_candidates([discovery_candidate])
+
+        companies.update_candidate_status("CP0001", "ignored")
+        stored_discovery = repository.read_discovery_candidates()[0]
+        self.assertEqual(stored_discovery["status"], "ignored")
+        self.assertEqual(stored_discovery["ingested_application_id"], "A0099")
+
+        companies.update_candidate_status("CP0001", "new")
+        stored_discovery = repository.read_discovery_candidates()[0]
+        self.assertEqual(stored_discovery["status"], "new")
+        self.assertEqual(stored_discovery["ingested_application_id"], "A0099")
+
     def test_company_merge_suggestion_and_reviewed_merge_relink_records(self):
         sqlite_store.initialize()
         keep = companies.upsert_company("", {"name": "Reddit", "industry": "Social Networking Platforms"})
