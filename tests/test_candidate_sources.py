@@ -81,7 +81,9 @@ class CandidateSourcesTest(unittest.TestCase):
                 "title": "Technical Program Manager",
                 "role_family_ids": ["technical-program"],
             }
-            for index in range(candidate_sources.OPENAI_FALLBACK_MIN_RESULTS_PER_FAMILY)
+            for index in range(
+                candidate_sources.OPENAI_FALLBACK_MIN_NOVEL_RESULTS_PER_FAMILY
+            )
         ]
 
         with (
@@ -93,8 +95,15 @@ class CandidateSourcesTest(unittest.TestCase):
 
         search.assert_not_called()
         self.assertEqual(bundle["results"], ats_results)
-        self.assertEqual(bundle["sources"][-1]["engine"], "skipped-sufficient-coverage")
+        self.assertEqual(
+            bundle["sources"][-1]["engine"],
+            "skipped-sufficient-novel-coverage",
+        )
         self.assertTrue(bundle["sources"][-1]["skipped"])
+        self.assertEqual(
+            bundle["sources"][-1]["cheap_novel_count"],
+            candidate_sources.OPENAI_FALLBACK_MIN_NOVEL_RESULTS_PER_FAMILY,
+        )
 
     def test_provider_bundle_uses_openai_only_for_undercovered_families(self):
         product_family = {
@@ -114,7 +123,9 @@ class CandidateSourcesTest(unittest.TestCase):
                 "title": "Technical Program Manager",
                 "role_family_ids": ["technical-program"],
             }
-            for index in range(candidate_sources.OPENAI_FALLBACK_MIN_RESULTS_PER_FAMILY)
+            for index in range(
+                candidate_sources.OPENAI_FALLBACK_MIN_NOVEL_RESULTS_PER_FAMILY
+            )
         ]
 
         with (
@@ -132,8 +143,63 @@ class CandidateSourcesTest(unittest.TestCase):
         openai_sources = [source for source in bundle["sources"] if source["source"] == "openai-web"]
         self.assertEqual(
             [source["engine"] for source in openai_sources],
-            ["skipped-sufficient-coverage", "openai-web-search"],
+            ["skipped-sufficient-novel-coverage", "openai-web-search"],
         )
+
+    def test_provider_bundle_falls_back_for_every_under_novel_family_without_a_cap(self):
+        families = [
+            *FAMILIES,
+            {
+                "id": "product-platform",
+                "label": "Product platform leadership",
+                "terms": ["product manager"],
+                "strong_terms": ["product manager"],
+            },
+            {
+                "id": "product-operations",
+                "label": "Product operations",
+                "terms": ["product operations manager"],
+                "strong_terms": ["product operations manager"],
+            },
+        ]
+        search_config = {
+            **SEARCH,
+            "role_family_ids": [family["id"] for family in families],
+        }
+        cheap_results = [
+            {
+                "provider": "ats",
+                "url": f"https://jobs.example.com/jobs/{family['id']}",
+                "title": family["label"],
+                "role_family_ids": [family["id"]],
+            }
+            for family in families
+        ]
+
+        with (
+            patch("hunter.candidate_sources.ats_inventory_results", return_value=cheap_results),
+            patch(
+                "hunter.candidate_sources.settings.adzuna_credentials",
+                return_value={"app_id": "", "app_key": ""},
+            ),
+            patch("hunter.candidate_sources.openai_role_results", return_value=[]) as openai_results,
+        ):
+            bundle = candidate_sources.provider_bundle(
+                search_config,
+                families,
+                result_is_novel=lambda _result: False,
+            )
+
+        fallback_search = openai_results.call_args.args[0]
+        self.assertEqual(
+            fallback_search["role_family_ids"],
+            [family["id"] for family in families],
+        )
+        openai_sources = [
+            source for source in bundle["sources"] if source["source"] == "openai-web"
+        ]
+        self.assertTrue(all(source["engine"] == "openai-web-search" for source in openai_sources))
+        self.assertTrue(all(source["cheap_novel_count"] == 0 for source in openai_sources))
 
     def test_ats_inventory_reuses_current_direct_candidates(self):
         candidates = [

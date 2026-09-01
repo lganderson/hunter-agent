@@ -2061,6 +2061,46 @@ def api_result_matches(result, search):
     ]
 
 
+def provider_result_candidate(result):
+    candidate = {field: "" for field in schema.DISCOVERY_CANDIDATE_FIELDS}
+    candidate.update(
+        {
+            "url": result.get("url", ""),
+            "canonical_url": result.get("url", ""),
+            "source_platform": source_platform(result.get("url", "")),
+        }
+    )
+    apply_search_result_details(candidate, result)
+    candidate["description_excerpt"] = storage.clean(result.get("snippet", ""))[:4_000]
+    candidate["description_text"] = storage.clean(result.get("description_text", ""))[
+        :MAX_DESCRIPTION_CHARS
+    ]
+    if candidate.get("company"):
+        company = companies.matching_company_record(name=candidate.get("company", ""))
+        if company:
+            candidate["company_id"] = company.get("id", "")
+    return candidate
+
+
+def provider_result_novelty_filter(search, stored_candidates, excluded_company_identity):
+    novel_candidates = []
+
+    def result_is_novel(result):
+        candidate = provider_result_candidate(result)
+        if candidate_company_is_excluded(candidate, excluded_company_identity):
+            return False
+        if not candidate_matches_search(candidate, search):
+            return False
+        if matching_candidate(stored_candidates, candidate):
+            return False
+        if matching_candidate(novel_candidates, candidate):
+            return False
+        novel_candidates.append(candidate)
+        return True
+
+    return result_is_novel
+
+
 def run_search(
     search_id,
     search_fetcher=None,
@@ -2087,6 +2127,10 @@ def run_search(
     screened_reasons = {}
     blocked_engines = {}
     reported_browser_errors = set()
+    stored_candidates = canonicalize_candidate_rows(
+        repository.read_discovery_candidates()
+    )
+    excluded_company_identity = discovery_excluded_company_identity()
 
     def record_reason(counter, reason, count=1):
         if count and reason:
@@ -2115,6 +2159,11 @@ def run_search(
             ROLE_QUERY_FAMILIES,
             fetcher=adzuna_fetcher or posting_fetcher,
             openai_requester=openai_requester,
+            result_is_novel=provider_result_novelty_filter(
+                search,
+                stored_candidates,
+                excluded_company_identity,
+            ),
             progress=progress,
         )
         source_runs.extend(bundle["sources"])
@@ -2254,30 +2303,10 @@ def run_search(
         first_error = errors[0].split(": ", 1)[-1] if errors else "Candidate search providers were unavailable."
         raise RuntimeError(first_error)
 
-    stored_candidates = canonicalize_candidate_rows(
-        repository.read_discovery_candidates()
-    )
     unseen_found = []
     skipped_count = 0
-    excluded_company_identity = discovery_excluded_company_identity()
     for result in found:
-        candidate = {field: "" for field in schema.DISCOVERY_CANDIDATE_FIELDS}
-        candidate.update(
-            {
-                "url": result.get("url", ""),
-                "canonical_url": result.get("url", ""),
-                "source_platform": source_platform(result.get("url", "")),
-            }
-        )
-        apply_search_result_details(candidate, result)
-        candidate["description_excerpt"] = storage.clean(result.get("snippet", ""))[:4_000]
-        candidate["description_text"] = storage.clean(result.get("description_text", ""))[:MAX_DESCRIPTION_CHARS]
-        if candidate.get("company"):
-            company = companies.matching_company_record(
-                name=candidate.get("company", ""),
-            )
-            if company:
-                candidate["company_id"] = company.get("id", "")
+        candidate = provider_result_candidate(result)
         if candidate_company_is_excluded(candidate, excluded_company_identity):
             skipped_count += 1
             record_reason(skip_reasons, "not-interested-company")

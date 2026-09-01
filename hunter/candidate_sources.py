@@ -8,7 +8,7 @@ from . import agent, api_usage, candidate_eligibility, companies, repository, se
 
 
 OPENAI_RESULTS_PER_FAMILY = 10
-OPENAI_FALLBACK_MIN_RESULTS_PER_FAMILY = 5
+OPENAI_FALLBACK_MIN_NOVEL_RESULTS_PER_FAMILY = 3
 OPENAI_DISCOVERY_MODEL = "gpt-5.6-luna"
 ADZUNA_RESULTS_PER_QUERY = 25
 ADZUNA_QUERY_LIMIT = 20
@@ -60,7 +60,15 @@ OPENAI_RESPONSE_SCHEMA = {
 }
 
 
-def provider_bundle(search, family_definitions, *, fetcher=None, openai_requester=None, progress=None):
+def provider_bundle(
+    search,
+    family_definitions,
+    *,
+    fetcher=None,
+    openai_requester=None,
+    result_is_novel=None,
+    progress=None,
+):
     results = []
     sources = []
     errors = []
@@ -113,7 +121,17 @@ def provider_bundle(search, family_definitions, *, fetcher=None, openai_requeste
     _progress(progress, "Searching Jobs by Adzuna…", 2, 3, "adzuna")
 
     selected_families = _selected_families(search, family_definitions)
-    fallback_families = _undercovered_families(selected_families, results)
+    novel_counts = _family_coverage_counts(
+        selected_families,
+        results,
+        result_is_novel=result_is_novel,
+    )
+    fallback_families = [
+        family
+        for family in selected_families
+        if novel_counts.get(family.get("id", ""), 0)
+        < OPENAI_FALLBACK_MIN_NOVEL_RESULTS_PER_FAMILY
+    ]
     fallback_ids = {family.get("id", "") for family in fallback_families}
     openai_results = []
     if fallback_families:
@@ -148,10 +166,15 @@ def provider_bundle(search, family_definitions, *, fetcher=None, openai_requeste
                     family_id in result.get("role_family_ids", [])
                     for result in openai_results
                 ),
+                "cheap_novel_count": novel_counts.get(family_id, 0),
                 "page_count": 1 if attempted and not any(
                     error.startswith("OpenAI web search:") for error in errors
                 ) else 0,
-                "engine": "openai-web-search" if attempted else "skipped-sufficient-coverage",
+                "engine": (
+                    "openai-web-search"
+                    if attempted
+                    else "skipped-sufficient-novel-coverage"
+                ),
                 "skipped": not attempted,
             }
         )
@@ -174,21 +197,21 @@ def _selected_families(search, family_definitions):
     ]
 
 
-def _undercovered_families(selected_families, results):
+def _family_coverage_counts(selected_families, results, *, result_is_novel=None):
     urls_by_family = {family.get("id", ""): set() for family in selected_families}
     for result in results:
+        if result_is_novel is not None and not result_is_novel(result):
+            continue
         url = companies.normalize_url(result.get("url", ""))
         if not url:
             continue
         for family_id in result.get("role_family_ids", []):
             if family_id in urls_by_family:
                 urls_by_family[family_id].add(url)
-    return [
-        family
-        for family in selected_families
-        if len(urls_by_family.get(family.get("id", ""), set()))
-        < OPENAI_FALLBACK_MIN_RESULTS_PER_FAMILY
-    ]
+    return {
+        family_id: len(urls)
+        for family_id, urls in urls_by_family.items()
+    }
 
 
 def ats_inventory_results(search, family_definitions):

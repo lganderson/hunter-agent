@@ -869,6 +869,86 @@ class HunterDiscoveryTest(unittest.TestCase):
         self.assertEqual(result["new_count"], 1)
         self.assertEqual(result["captured"][0]["source_platform"], "greenhouse")
 
+    def test_api_search_measures_cheap_source_coverage_by_eligible_unseen_results(self):
+        search = self.save_search("Technical platforms", "technical program manager")
+        excluded_company = companies.upsert_company(
+            "",
+            {"name": "Excluded Labs", "interest_status": "not-interested"},
+        )
+        known = {field: "" for field in schema.DISCOVERY_CANDIDATE_FIELDS}
+        known.update(
+            {
+                "id": "DC0001",
+                "title": "Technical Program Manager",
+                "url": "https://jobs.example.com/jobs/known",
+                "canonical_url": "https://jobs.example.com/jobs/known",
+                "status": "new",
+            }
+        )
+        repository.write_discovery_candidates([known])
+        novelty = {}
+
+        def provider_bundle(_search, _families, **kwargs):
+            result_is_novel = kwargs["result_is_novel"]
+            common = {
+                "provider": "adzuna",
+                "location": "United States",
+                "work_mode": "Remote",
+                "snippet": "Technical program manager leading platform delivery.",
+                "role_family_ids": ["technical-program"],
+                "lane_ids": ["default"],
+            }
+            novelty["known"] = result_is_novel(
+                {
+                    **common,
+                    "url": known["url"],
+                    "title": known["title"],
+                    "company": "Known Labs",
+                }
+            )
+            novelty["excluded"] = result_is_novel(
+                {
+                    **common,
+                    "url": "https://jobs.excluded.example/jobs/tpm",
+                    "title": "Technical Program Manager",
+                    "company": excluded_company["name"],
+                }
+            )
+            novelty["irrelevant"] = result_is_novel(
+                {
+                    **common,
+                    "url": "https://jobs.example.com/jobs/marketing",
+                    "title": "Marketing Manager",
+                    "company": "Marketing Labs",
+                }
+            )
+            novelty["novel"] = result_is_novel(
+                {
+                    **common,
+                    "url": "https://jobs.example.com/jobs/novel",
+                    "title": "Senior Technical Program Manager",
+                    "company": "Novel Labs",
+                }
+            )
+            return {"results": [], "sources": [], "errors": []}
+
+        with patch(
+            "hunter.discovery.candidate_sources.provider_bundle",
+            side_effect=provider_bundle,
+        ):
+            result = discovery.run_search(search["id"])
+
+        self.assertEqual(
+            novelty,
+            {
+                "known": False,
+                "excluded": False,
+                "irrelevant": False,
+                "novel": True,
+            },
+        )
+        self.assertEqual(result["new_count"], 0)
+
     def test_adzuna_provider_results_remain_reviewable_with_attribution_url(self):
         search = self.save_search("Technical platforms", "technical program manager")
         redirect_url = "https://www.adzuna.com/details/123?utm_medium=api"
