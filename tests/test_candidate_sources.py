@@ -1,4 +1,5 @@
 import json
+import time
 import unittest
 from urllib.parse import parse_qs, urlparse
 from unittest.mock import patch
@@ -57,6 +58,34 @@ class CandidateSourcesTest(unittest.TestCase):
             ["direct-ats", "openai-web-search", "not-configured"],
         )
 
+    def test_provider_bundle_retries_one_transient_openai_failure(self):
+        ats_result = {"provider": "ats", "url": "https://jobs.example.com/jobs/123", "title": "TPM"}
+        with (
+            patch("hunter.candidate_sources.ats_inventory_results", return_value=[ats_result]),
+            patch("hunter.candidate_sources.settings.adzuna_credentials", return_value={"app_id": "", "app_key": ""}),
+            patch(
+                "hunter.candidate_sources.openai_role_results",
+                side_effect=[TimeoutError("read timed out"), []],
+            ) as search,
+        ):
+            bundle = candidate_sources.provider_bundle(SEARCH, FAMILIES)
+
+        self.assertEqual(search.call_count, 2)
+        self.assertEqual(bundle["results"], [ats_result])
+        self.assertEqual(bundle["errors"], ["Adzuna is not configured. Add its App ID and App Key in Settings to include those results."])
+
+    def test_openai_attempt_watchdog_returns_without_waiting_for_stuck_request(self):
+        def blocked_search(*_args, **_kwargs):
+            time.sleep(1)
+            return []
+
+        with (
+            patch("hunter.candidate_sources.openai_role_results", side_effect=blocked_search),
+            patch("hunter.candidate_sources.OPENAI_DISCOVERY_ATTEMPT_TIMEOUT_SECONDS", 0.01),
+        ):
+            with self.assertRaises(TimeoutError):
+                candidate_sources._run_openai_results_attempt(SEARCH, FAMILIES)
+
     def test_ats_inventory_reuses_current_direct_candidates(self):
         candidates = [
             {
@@ -85,6 +114,35 @@ class CandidateSourcesTest(unittest.TestCase):
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0]["company"], "Example")
         self.assertEqual(results[0]["provider"], "ats")
+
+    def test_ats_inventory_omits_candidates_from_excluded_companies(self):
+        candidates = [
+            {
+                "company_id": "CO0001",
+                "title": "Senior Technical Program Manager",
+                "url": "https://jobs.example.com/jobs/123",
+                "location": "United States",
+                "work_mode": "Remote",
+                "description_excerpt": "Excluded posting content",
+                "status": "new",
+                "scan_state": "open",
+            }
+        ]
+        with (
+            patch(
+                "hunter.candidate_sources.repository.read_companies",
+                return_value=[
+                    {"id": "CO0001", "name": "Example", "interest_status": "not-interested"}
+                ],
+            ),
+            patch(
+                "hunter.candidate_sources.repository.read_company_posting_candidates",
+                return_value=candidates,
+            ),
+        ):
+            results = candidate_sources.ats_inventory_results(SEARCH, FAMILIES)
+
+        self.assertEqual(results, [])
 
     def test_openai_accepts_only_source_backed_direct_urls(self):
         direct_url = "https://boards.greenhouse.io/example/jobs/123456"

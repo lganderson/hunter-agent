@@ -119,7 +119,15 @@ class AppHandler(SimpleHTTPRequestHandler):
         path = parsed.path
         query = parse_qs(parsed.query)
         if path == "/api/app-state":
-            self.send_json(app_state.build_payload())
+            include_excluded_companies = (
+                (query.get("include_excluded_companies") or ["false"])[0].strip().lower()
+                == "true"
+            )
+            self.send_json(
+                app_state.build_payload(
+                    include_excluded_companies=include_excluded_companies
+                )
+            )
             return
         if path == "/api/postings/snapshots":
             application_id = (query.get("id") or [""])[0].strip().upper()

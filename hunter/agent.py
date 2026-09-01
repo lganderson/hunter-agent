@@ -81,6 +81,7 @@ one as next, use hunter_make_next_action instead of editing the posting."""
 
 CONTEXT_TEXT_CHARS = 240
 CONTEXT_QUERY_LIMIT = 12
+DISCOVERY_REQUEST_TIMEOUT_SECONDS = 20
 
 
 def _settings():
@@ -109,8 +110,14 @@ def _request_json(url, token, payload):
         method="POST",
     )
     context = ssl.create_default_context(cafile=_certifi_ca_file())
+    metadata = payload.get("metadata") if isinstance(payload, dict) else {}
+    timeout = (
+        DISCOVERY_REQUEST_TIMEOUT_SECONDS
+        if isinstance(metadata, dict) and metadata.get("feature") == "candidate-discovery"
+        else 60
+    )
     try:
-        with urlopen(request, timeout=60, context=context) as response:
+        with urlopen(request, timeout=timeout, context=context) as response:
             return json.loads(response.read().decode("utf-8"))
     except HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")

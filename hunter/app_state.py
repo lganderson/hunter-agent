@@ -5,7 +5,7 @@ from datetime import date, datetime
 from . import actions as action_store
 from . import discovery as discovery_store
 from . import companies as company_store
-from . import repository, schema, storage, suggestions, workflow
+from . import candidate_eligibility, repository, schema, storage, suggestions, workflow
 
 
 COMPLETED_ACTION_STATUSES = schema.COMPLETED_ACTION_STATUSES
@@ -183,16 +183,27 @@ def enrich_company_candidates(candidate_rows, discovery_candidates, searches):
     return enriched
 
 
-def build_payload():
-    discovery_candidates = discovery_store.list_candidates()
+def build_payload(include_excluded_companies=False):
+    company_rows = repository.read_companies()
+    _discovery_rows, excluded_discovery_rows, _company_by_id = discovery_store.candidate_review_rows(
+        include_excluded_companies=include_excluded_companies
+    )
+    discovery_candidates = discovery_store.list_candidates(
+        include_excluded_companies=include_excluded_companies
+    )
     discovery_searches = discovery_store.list_searches()
-    company_candidates = enrich_company_candidates(
+    company_candidate_rows, excluded_company_candidate_rows = candidate_eligibility.partition_candidates(
         repository.read_company_posting_candidates(),
+        company_rows,
+        include_excluded_companies=include_excluded_companies,
+    )
+    company_candidates = enrich_company_candidates(
+        company_candidate_rows,
         discovery_candidates,
         discovery_searches,
     )
     companies = enrich_companies(
-        repository.read_companies(),
+        company_rows,
         discovery_candidates,
         company_candidates,
     )
@@ -210,6 +221,13 @@ def build_payload():
         "company_career_sources": repository.read_company_career_sources(),
         "company_posting_candidates": company_candidates,
         "company_career_scans": repository.read_company_career_scans(limit=200),
+        "candidate_review_audit": {
+            "excluded_company_candidate_count": (
+                len(excluded_discovery_rows) + len(excluded_company_candidate_rows)
+            ),
+            "discovery_excluded_company_candidate_count": len(excluded_discovery_rows),
+            "tracked_company_excluded_company_candidate_count": len(excluded_company_candidate_rows),
+        },
         "discovery_searches": discovery_searches,
         "discovery_candidates": discovery_candidates,
         "discovery_preference_suggestions": discovery_store.preference_suggestions(discovery_candidates),

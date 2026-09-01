@@ -3453,6 +3453,121 @@ class HunterCompaniesTest(unittest.TestCase):
         self.assertEqual(payload["candidates"][0]["id"], "CP0001")
         self.assertTrue(payload["candidates"][0]["recommended"])
 
+    def test_candidate_review_contract_gates_company_interest_statuses(self):
+        sqlite_store.initialize()
+        company_rows = {}
+        for name, interest_status in [
+            ("Neutral Co", "neutral"),
+            ("Interested Co", "interested"),
+            ("Not Interested Co", "not-interested"),
+            ("Archived Co", "archived"),
+        ]:
+            company_rows[interest_status] = companies.upsert_company(
+                "", {"name": name, "interest_status": interest_status}
+            )
+
+        company_candidates = []
+        discovery_candidates = []
+        for index, interest_status in enumerate(company_rows, start=1):
+            company_id = company_rows[interest_status]["id"]
+            company_candidate = {field: "" for field in schema.COMPANY_POSTING_CANDIDATE_FIELDS}
+            company_candidate.update(
+                {
+                    "id": f"CP{index:04d}",
+                    "company_id": company_id,
+                    "title": f"Company role {index}",
+                    "status": "new",
+                    "fit_score": "90",
+                    "fit_summary": "must not be assessed when excluded",
+                }
+            )
+            company_candidates.append(company_candidate)
+            discovery_candidate = {field: "" for field in schema.DISCOVERY_CANDIDATE_FIELDS}
+            discovery_candidate.update(
+                {
+                    "id": f"DC{index:04d}",
+                    "company_id": company_id,
+                    "company": company_rows[interest_status]["name"],
+                    "title": f"Discovery role {index}",
+                    "status": "new",
+                    "fit_score": "90",
+                    "processing_status": "ready",
+                }
+            )
+            discovery_candidates.append(discovery_candidate)
+        repository.write_company_posting_candidates(company_candidates)
+        repository.write_discovery_candidates(discovery_candidates)
+
+        company_payload = json.loads(
+            mcp_server.tool_list_company_candidates({})["content"][0]["text"]
+        )
+        discovery_payload = json.loads(
+            mcp_server.tool_list_discovery_candidates({})["content"][0]["text"]
+        )
+        state = app_state.build_payload()
+
+        self.assertEqual(
+            {row["company_id"] for row in company_payload["candidates"]},
+            {company_rows["neutral"]["id"], company_rows["interested"]["id"]},
+        )
+        self.assertEqual(company_payload["excluded_company_candidate_count"], 2)
+        self.assertEqual(
+            {row["company_id"] for row in discovery_payload["candidates"]},
+            {company_rows["neutral"]["id"], company_rows["interested"]["id"]},
+        )
+        self.assertEqual(discovery_payload["excluded_company_candidate_count"], 2)
+        self.assertEqual(state["candidate_review_audit"]["excluded_company_candidate_count"], 4)
+        self.assertEqual(len(state["company_posting_candidates"]), 2)
+        self.assertEqual(len(state["discovery_candidates"]), 2)
+
+        opted_in_state = app_state.build_payload(include_excluded_companies=True)
+        self.assertEqual(len(opted_in_state["company_posting_candidates"]), 4)
+        self.assertEqual(len(opted_in_state["discovery_candidates"]), 4)
+
+        opted_in = json.loads(
+            mcp_server.tool_list_company_candidates(
+                {"include_excluded_companies": True}
+            )["content"][0]["text"]
+        )
+        self.assertEqual(opted_in["count"], 4)
+        excluded_ids = {
+            company_rows["not-interested"]["id"],
+            company_rows["archived"]["id"],
+        }
+        self.assertTrue(
+            all(not row["recommended"] for row in opted_in["candidates"] if row["company_id"] in excluded_ids)
+        )
+
+    def test_excluded_company_candidate_actions_and_scan_are_rejected_without_mutation(self):
+        sqlite_store.initialize()
+        company = companies.upsert_company(
+            "",
+            {
+                "name": "No Thanks",
+                "interest_status": "not-interested",
+                "tracking_status": "tracked",
+                "careers_url": "https://example.com/jobs",
+            },
+        )
+        candidate = {field: "" for field in schema.COMPANY_POSTING_CANDIDATE_FIELDS}
+        candidate.update(
+            {"id": "CP0001", "company_id": company["id"], "title": "Role", "status": "ignored"}
+        )
+        repository.write_company_posting_candidates([candidate])
+        fetched = []
+
+        with self.assertRaisesRegex(ValueError, "not-interested"):
+            companies.check_company_postings(company["id"], fetcher=lambda url: fetched.append(url))
+        with self.assertRaisesRegex(ValueError, "not-interested"):
+            companies.update_candidate_status("CP0001", "new")
+        with patch("hunter.companies.subprocess.run") as run:
+            with self.assertRaisesRegex(ValueError, "not-interested"):
+                companies.pursue_candidate("CP0001")
+            run.assert_not_called()
+
+        self.assertEqual(fetched, [])
+        self.assertEqual(repository.read_company_posting_candidates()[0]["status"], "ignored")
+
     def test_mcp_update_company_candidate_changes_review_status(self):
         sqlite_store.initialize()
         company = companies.upsert_company("", {"name": "Example"})

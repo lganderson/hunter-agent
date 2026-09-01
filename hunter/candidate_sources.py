@@ -2,15 +2,18 @@
 
 import json
 import re
+import threading
 from urllib.parse import urlencode, urlparse
 
-from . import agent, api_usage, companies, repository, settings, storage
+from . import agent, api_usage, candidate_eligibility, companies, repository, settings, storage
 
 
 OPENAI_RESULT_LIMIT = 50
 OPENAI_RESULTS_PER_FAMILY = 20
 ADZUNA_RESULTS_PER_QUERY = 25
 ADZUNA_QUERY_LIMIT = 20
+OPENAI_DISCOVERY_ATTEMPTS = 2
+OPENAI_DISCOVERY_ATTEMPT_TIMEOUT_SECONDS = 15
 OPENAI_BLOCKED_HOSTS = {
     "adzuna.com",
     "glassdoor.com",
@@ -83,7 +86,7 @@ def provider_bundle(search, family_definitions, *, fetcher=None, openai_requeste
     _progress(progress, "Searching direct company career sources…", 1, 3, "direct-ats")
 
     try:
-        openai_results = openai_role_results(
+        openai_results = _openai_results_with_retry(
             search,
             family_definitions,
             requester=openai_requester,
@@ -163,6 +166,51 @@ def provider_bundle(search, family_definitions, *, fetcher=None, openai_requeste
     return {"results": results, "sources": sources, "errors": errors}
 
 
+def _openai_results_with_retry(search, family_definitions, *, requester=None):
+    last_error = None
+    for attempt in range(OPENAI_DISCOVERY_ATTEMPTS):
+        try:
+            return _run_openai_results_attempt(
+                search,
+                family_definitions,
+                requester=requester,
+            )
+        except (TimeoutError, OSError) as exc:
+            last_error = exc
+        except RuntimeError as exc:
+            if "could not be completed" not in str(exc).lower():
+                raise
+            last_error = exc
+        if attempt + 1 < OPENAI_DISCOVERY_ATTEMPTS:
+            continue
+    raise last_error
+
+
+def _run_openai_results_attempt(search, family_definitions, *, requester=None):
+    outcome = {}
+
+    def run():
+        try:
+            outcome["results"] = openai_role_results(
+                search,
+                family_definitions,
+                requester=requester,
+            )
+        except BaseException as exc:  # noqa: BLE001 - preserve provider errors for the caller.
+            outcome["error"] = exc
+
+    worker = threading.Thread(target=run, name="hunter-openai-discovery", daemon=True)
+    worker.start()
+    worker.join(OPENAI_DISCOVERY_ATTEMPT_TIMEOUT_SECONDS)
+    if worker.is_alive():
+        raise TimeoutError(
+            f"OpenAI web search exceeded {OPENAI_DISCOVERY_ATTEMPT_TIMEOUT_SECONDS} seconds."
+        )
+    if "error" in outcome:
+        raise outcome["error"]
+    return outcome.get("results", [])
+
+
 def ats_inventory_results(search, family_definitions):
     company_by_id = {
         company.get("id", "").upper(): company
@@ -170,6 +218,9 @@ def ats_inventory_results(search, family_definitions):
     }
     results = []
     for candidate in repository.read_company_posting_candidates():
+        company = company_by_id.get(candidate.get("company_id", "").upper(), {})
+        if candidate_eligibility.company_is_excluded(company):
+            continue
         if candidate.get("status") in {"ignored", "ingested", "pursued", "unavailable"}:
             continue
         if candidate.get("scan_state") == "unavailable":
@@ -179,7 +230,6 @@ def ats_inventory_results(search, family_definitions):
         family_ids = matching_family_ids(title, search, family_definitions)
         if not url or not title or not family_ids or not candidate_matches_focus(candidate, search):
             continue
-        company = company_by_id.get(candidate.get("company_id", "").upper(), {})
         results.append(
             {
                 "provider": "ats",

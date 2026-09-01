@@ -7,7 +7,7 @@ from difflib import SequenceMatcher
 from datetime import datetime, timedelta
 from urllib.parse import parse_qs, quote_plus, unquote, urljoin, urlparse, urlunparse
 
-from . import applications, browser_discovery, candidate_sources, companies, posting_snapshots, repository, schema, settings, storage
+from . import applications, browser_discovery, candidate_eligibility, candidate_sources, companies, posting_snapshots, repository, schema, settings, storage
 
 
 URL_PATTERN = re.compile(r"https?://[^\s<>'\"]+", re.I)
@@ -38,7 +38,7 @@ MIN_READY_DESCRIPTION_CHARS = 500
 MIN_REVIEW_FIT_SCORE = 45
 SCREENED_STATUS = "screened"
 SCREENING_WARNING_PREFIX = "Screened from New: "
-DISCOVERY_EXCLUDED_COMPANY_INTEREST_STATUSES = {"not-interested", "archived"}
+DISCOVERY_EXCLUDED_COMPANY_INTEREST_STATUSES = candidate_eligibility.EXCLUDED_COMPANY_INTEREST_STATUSES
 ROLE_QUERY_FAMILIES = [
     {
         "id": "technical-program",
@@ -1602,6 +1602,20 @@ def resolve_candidate_details(
     company_rows=None,
     company_candidates=None,
 ):
+    original_candidate = dict(candidate)
+    eligibility_candidate = resolved_candidate_for_review(candidate, company_rows)
+    inferred_company = matching_company_from_linkedin_job_url(
+        candidate.get("canonical_url") or candidate.get("url", ""),
+        company_rows=company_rows,
+    )
+    if inferred_company:
+        eligibility_candidate["company_id"] = inferred_company.get("id", "")
+    candidate_eligibility.require_candidate_eligible(
+        eligibility_candidate,
+        company_rows if company_rows is not None else repository.read_companies(),
+        operation="enrich",
+    )
+
     timestamp = now_iso()
     before_state = candidate_detail_state(candidate)
     before = tuple(candidate.get(field, "") for field in [
@@ -1611,10 +1625,6 @@ def resolve_candidate_details(
     candidate["detail_last_attempt_at"] = timestamp
     candidate["detail_last_error"] = ""
 
-    inferred_company = matching_company_from_linkedin_job_url(
-        candidate.get("canonical_url") or candidate.get("url", ""),
-        company_rows=company_rows,
-    )
     if inferred_company:
         candidate["company_id"] = inferred_company.get("id", "")
         candidate["company"] = candidate.get("company") or inferred_company.get("name", "")
@@ -1639,7 +1649,20 @@ def resolve_candidate_details(
         elif not errors:
             errors.append("No readable posting details were returned.")
 
+    if candidate_company_is_excluded(candidate):
+        candidate.clear()
+        candidate.update(original_candidate)
+        return {
+            "changed": False,
+            "before_state": before_state,
+            "after_state": before_state,
+            "errors": [],
+            "excluded_company": True,
+        }
     connect_candidate_company(candidate, seen_at=timestamp)
+    candidate_eligibility.require_candidate_eligible(
+        candidate, repository.read_companies(), operation="enrich"
+    )
     score_candidate(candidate, timestamp)
     sync_candidate_source_urls(candidate)
     after = tuple(candidate.get(field, "") for field in [
@@ -2235,6 +2258,8 @@ def run_search(
         repository.read_discovery_candidates()
     )
     unseen_found = []
+    skipped_count = 0
+    excluded_company_identity = discovery_excluded_company_identity()
     for result in found:
         candidate = {field: "" for field in schema.DISCOVERY_CANDIDATE_FIELDS}
         candidate.update(
@@ -2253,6 +2278,10 @@ def run_search(
             )
             if company:
                 candidate["company_id"] = company.get("id", "")
+        if candidate_company_is_excluded(candidate, excluded_company_identity):
+            skipped_count += 1
+            record_reason(skip_reasons, "not-interested-company")
+            continue
         existing = matching_candidate(stored_candidates, candidate)
         if existing:
             known_candidate_ids.add(existing.get("id", ""))
@@ -2263,9 +2292,23 @@ def run_search(
     found = unseen_found
 
     prepared = []
-    skipped_count = 0
     for result in found:
         candidate = {field: "" for field in schema.DISCOVERY_CANDIDATE_FIELDS}
+        candidate.update(
+            {
+                "url": result.get("url", ""),
+                "canonical_url": result.get("url", ""),
+            }
+        )
+        apply_search_result_details(candidate, result)
+        if candidate.get("company"):
+            known_company = companies.matching_company_record(name=candidate.get("company", ""))
+            if known_company:
+                candidate["company_id"] = known_company.get("id", "")
+        if candidate_company_is_excluded(candidate, excluded_company_identity):
+            skipped_count += 1
+            record_reason(skip_reasons, "not-interested-company")
+            continue
         if result.get("provider") == "ats":
             candidate.update(
                 {
@@ -2291,6 +2334,10 @@ def run_search(
         else:
             candidate.update(extracted_candidate(result["url"], fetcher=posting_fetcher))
         apply_search_result_details(candidate, result)
+        if candidate_company_is_excluded(candidate, excluded_company_identity):
+            skipped_count += 1
+            record_reason(skip_reasons, "not-interested-company")
+            continue
         if not candidate.get("description_excerpt"):
             candidate["description_excerpt"] = storage.clean(result.get("snippet", ""))[:4_000]
         if not candidate.get("description_text"):
@@ -2390,7 +2437,6 @@ def run_search(
             continue
         prepared.append(candidate)
 
-    excluded_company_identity = discovery_excluded_company_identity()
     prepared, excluded_company_count = filter_discovery_excluded_companies(
         prepared,
         excluded_company_identity,
@@ -2436,6 +2482,12 @@ def run_search(
                 candidate.get("company_profile_url", ""),
             )
             apply_browser_details(candidate, details)
+            if candidate_company_is_excluded(candidate, excluded_company_identity):
+                if candidate in prepared:
+                    prepared.remove(candidate)
+                skipped_count += 1
+                record_reason(skip_reasons, "not-interested-company")
+                continue
             score_candidate(candidate, timestamp)
             apply_candidate_review_admission(candidate, search=search)
             result = candidate.get("_search_result", {})
@@ -2763,21 +2815,15 @@ def continue_enrichment(
     company_researcher=None,
 ):
     rows = canonicalize_candidate_rows(repository.read_discovery_candidates())
-    companies_by_id = {
-        company.get("id", ""): company
-        for company in repository.read_companies()
-    }
-    chrome_browser = None
-    if browser_detailer is None or company_researcher is None:
-        chrome_browser = browser_discovery.HunterChrome()
-        chrome_browser.find_window()
-        browser_detailer = browser_detailer or chrome_browser.details
-        company_researcher = company_researcher or chrome_browser.company
+    company_rows = repository.read_companies()
+    companies_by_id = candidate_eligibility.companies_by_id(company_rows)
+    excluded_identity = discovery_excluded_company_identity(company_rows)
 
     selected = sorted(
         [
             candidate
             for candidate in rows
+            if not candidate_company_is_excluded(candidate, excluded_identity)
             if enrichment_needed(
                 candidate,
                 companies_by_id.get(candidate.get("company_id", "")),
@@ -2790,6 +2836,13 @@ def continue_enrichment(
         reverse=True,
     )[:max(1, int(limit or CONTINUE_ENRICHMENT_LIMIT))]
 
+    chrome_browser = None
+    if selected and (browser_detailer is None or company_researcher is None):
+        chrome_browser = browser_discovery.HunterChrome()
+        chrome_browser.find_window()
+        browser_detailer = browser_detailer or chrome_browser.details
+        company_researcher = company_researcher or chrome_browser.company
+
     timestamp = now_iso()
     posting_checked_count = 0
     posting_enriched_count = 0
@@ -2798,6 +2851,7 @@ def continue_enrichment(
     errors = []
     researched_company_ids = set()
     for candidate in selected:
+        original_candidate = dict(candidate)
         target_url = candidate.get("canonical_url") or candidate.get("url", "")
         if target_url and (
             candidate.get("processing_status") != "ready"
@@ -2823,6 +2877,10 @@ def continue_enrichment(
                 details = {}
             if details:
                 apply_browser_details(candidate, details)
+                if candidate_company_is_excluded(candidate, excluded_identity):
+                    candidate.clear()
+                    candidate.update(original_candidate)
+                    continue
                 if not candidate.get("freshness_status"):
                     candidate["freshness_status"] = "confirmed-open"
                     candidate["freshness_checked_at"] = timestamp
@@ -2839,6 +2897,10 @@ def continue_enrichment(
                     posting_enriched_count += 1
 
         company = connect_candidate_company(candidate, seen_at=timestamp)
+        if candidate_company_is_excluded(candidate, excluded_identity):
+            candidate.clear()
+            candidate.update(original_candidate)
+            continue
         score_candidate(candidate, timestamp)
         sync_candidate_source_urls(candidate)
         if not company:
@@ -3489,8 +3551,12 @@ def reclassify_candidate_search_memberships():
 def cleanup_candidates():
     original_rows = repository.read_discovery_candidates()
     rows = canonicalize_candidate_rows(original_rows)
+    company_rows = repository.read_companies()
+    excluded_identity = discovery_excluded_company_identity(company_rows)
     linked_count = 0
     for candidate in rows:
+        if candidate_company_is_excluded(candidate, excluded_identity):
+            continue
         previous_company_id = candidate.get("company_id", "")
         company = connect_candidate_company(
             candidate,
@@ -3499,13 +3565,9 @@ def cleanup_candidates():
         if company and candidate.get("company_id", "") != previous_company_id:
             linked_count += 1
 
-    company_by_id = {
-        company.get("id", ""): company
-        for company in repository.read_companies()
-    }
+    company_by_id = candidate_eligibility.companies_by_id(repository.read_companies())
     searches = list_searches()
     search_by_id = {search.get("id", "").upper(): search for search in searches}
-    excluded_identity = discovery_excluded_company_identity(company_by_id.values())
     ignored_company_count = 0
     ignored_exclusion_count = 0
     screened_count = 0
@@ -3516,15 +3578,6 @@ def cleanup_candidates():
             continue
         company = company_by_id.get(candidate.get("company_id", ""))
         if candidate_company_is_excluded(candidate, excluded_identity):
-            candidate["status"] = "ignored"
-            candidate["ignore_reason"] = "company"
-            company_status = (company or {}).get("interest_status", "").lower()
-            candidate["ignore_reason_detail"] = (
-                "Company marked not interested"
-                if company_status == "not-interested"
-                else "Company archived"
-            )
-            candidate["ingested_application_id"] = ""
             ignored_company_count += 1
             continue
 
@@ -3574,7 +3627,8 @@ def recommendation_eligible(candidate, company=None):
     except (TypeError, ValueError):
         fit_score = 0
     return bool(
-        candidate.get("status") == "new"
+        not candidate_eligibility.company_is_excluded(company)
+        and candidate.get("status") == "new"
         and candidate.get("processing_status") == "ready"
         and candidate.get("freshness_status") == "confirmed-open"
         and trust["id"] in {"employer", "network"}
@@ -3697,16 +3751,88 @@ def candidate_payload(candidate, company_by_id=None, searches=None):
     return payload
 
 
-def list_candidates():
+def resolved_candidate_for_review(candidate, company_rows=None):
+    resolved = dict(candidate)
+    if resolved.get("company_id"):
+        return resolved
+    company_rows = list(company_rows) if company_rows is not None else repository.read_companies()
+    company = None
+    wanted_name = companies.normalized_key(resolved.get("company", ""))
+    wanted_profile = companies.normalize_company_profile_url(
+        resolved.get("company_profile_url", "")
+    )
+    wanted_website_domain = companies.company_domain(resolved.get("website", ""))
+    if wanted_name or wanted_profile or wanted_website_domain:
+        for known_company in company_rows:
+            if wanted_name and wanted_name in companies.company_keys(known_company):
+                company = known_company
+                break
+            if wanted_profile and companies.normalize_company_profile_url(
+                known_company.get("company_profile_url", "")
+            ) == wanted_profile:
+                company = known_company
+                break
+            if wanted_website_domain and companies.company_domain(
+                known_company.get("website", "")
+            ) == wanted_website_domain:
+                company = known_company
+                break
+    source_url = resolved.get("canonical_url") or resolved.get("url", "")
+    source_domain = companies.company_domain(source_url)
+    shared_identity = companies.shared_job_board_identity(source_url)
+    if company is None and source_domain:
+        for known_company in company_rows:
+            if shared_identity:
+                matches = companies.company_matches_shared_job_board_identity(
+                    known_company, shared_identity
+                )
+            else:
+                known_domains = [
+                    companies.company_domain(known_company.get(field, ""))
+                    for field in ["website", "careers_url"]
+                ]
+                matches = any(
+                    known_domain
+                    and (
+                        source_domain == known_domain
+                        or source_domain.endswith(f".{known_domain}")
+                        or known_domain.endswith(f".{source_domain}")
+                    )
+                    for known_domain in known_domains
+                )
+            if matches:
+                company = known_company
+                break
+    if company is None:
+        company = matching_company_from_linkedin_job_url(
+            source_url, company_rows=company_rows
+        )
+    if company:
+        resolved["company_id"] = company.get("id", "")
+    return resolved
+
+
+def candidate_review_rows(include_excluded_companies=False):
     collapsed = canonicalize_candidate_rows(repository.read_discovery_candidates())
-    company_by_id = {
-        company.get("id", ""): company
-        for company in repository.read_companies()
-    }
+    company_rows = repository.read_companies()
+    company_by_id = candidate_eligibility.companies_by_id(company_rows)
+    resolved = [resolved_candidate_for_review(candidate, company_rows) for candidate in collapsed]
+    visible, excluded = candidate_eligibility.partition_candidates(
+        resolved,
+        company_rows,
+        include_excluded_companies=include_excluded_companies,
+    )
+    return visible, excluded, company_by_id
+
+
+def list_candidates(include_excluded_companies=False):
+    visible, _excluded, company_by_id = candidate_review_rows(
+        include_excluded_companies=include_excluded_companies
+    )
     searches = list_searches()
     return [
         candidate_payload(candidate, company_by_id, searches)
-        for candidate in collapsed
+        for candidate in visible
         if not ignored_discovery_source(
             candidate.get("canonical_url") or candidate.get("url", "")
         )
@@ -3777,7 +3903,7 @@ def preference_suggestions(candidates=None):
     )[:10]
 
 
-def get_candidate(candidate_id):
+def get_candidate(candidate_id, include_excluded_companies=False):
     wanted = storage.clean(candidate_id).upper()
     row = next(
         (item for item in repository.read_discovery_candidates() if item.get("id", "").upper() == wanted),
@@ -3785,11 +3911,12 @@ def get_candidate(candidate_id):
     )
     if row is None:
         raise ValueError(f"No Discovery candidate found with id {candidate_id}.")
-    company_by_id = {
-        company.get("id", ""): company
-        for company in repository.read_companies()
-    }
-    return candidate_payload(row, company_by_id)
+    company_rows = repository.read_companies()
+    company_by_id = candidate_eligibility.companies_by_id(company_rows)
+    resolved = resolved_candidate_for_review(row, company_rows)
+    if not include_excluded_companies:
+        candidate_eligibility.require_candidate_eligible(resolved, company_by_id)
+    return candidate_payload(resolved, company_by_id)
 
 
 def parse_capture_urls(value):
@@ -4289,9 +4416,21 @@ def capture_candidates(search_id, capture_text, details=None, fetcher=None):
     timestamp = now_iso()
     captured = []
     for url in urls:
+        company_rows = repository.read_companies()
+        known_company = (
+            companies.matching_company_record_from_url(url)
+            or matching_company_from_linkedin_job_url(url, company_rows=company_rows)
+        )
+        if known_company and candidate_eligibility.company_is_excluded(known_company):
+            raise ValueError(
+                f"Cannot capture candidate: company {known_company.get('id', '')} is "
+                f"{known_company.get('interest_status', '')}."
+            )
         candidate = {field: "" for field in schema.DISCOVERY_CANDIDATE_FIELDS}
         candidate.update(extracted_candidate(url, fetcher=fetcher))
         candidate.pop("_posting_evidence", None)
+        if candidate_company_is_excluded(candidate):
+            raise ValueError("Cannot capture candidate: its company is excluded from review.")
         candidate.update(
             {
                 "id": next_id(rows, "DC"),
@@ -4305,6 +4444,8 @@ def capture_candidates(search_id, capture_text, details=None, fetcher=None):
         if len(urls) == 1:
             apply_manual_details(candidate, details or {})
         connect_candidate_company(candidate, seen_at=timestamp)
+        if candidate_company_is_excluded(candidate):
+            raise ValueError("Cannot capture candidate: its company is excluded from review.")
         score_candidate(candidate, timestamp)
         sync_candidate_source_urls(candidate)
         existing = matching_candidate(rows, candidate)
@@ -4337,8 +4478,16 @@ def update_candidate_details(candidate_id, updates):
     row = next((item for item in rows if item.get("id", "").upper() == wanted), None)
     if row is None:
         raise ValueError(f"No Discovery candidate found with id {candidate_id}.")
+    candidate_eligibility.require_candidate_eligible(
+        resolved_candidate_for_review(row), repository.read_companies(), operation="update"
+    )
+    original_row = dict(row)
     apply_manual_details(row, updates or {})
     connect_candidate_company(row, seen_at=now_iso())
+    if candidate_company_is_excluded(row):
+        row.clear()
+        row.update(original_row)
+        raise ValueError("Cannot update candidate: its company is excluded from review.")
     score_candidate(row, now_iso())
     repository.write_discovery_candidates(rows)
     return get_candidate(candidate_id)
@@ -4382,6 +4531,12 @@ def update_candidate_statuses(candidate_ids, status, ignore_reason="", ignore_re
             + ", ".join(sorted(missing_ids))
             + "."
         )
+    company_rows = repository.read_companies()
+    for row in rows:
+        if row.get("id", "").upper() in wanted_ids:
+            candidate_eligibility.require_candidate_eligible(
+                resolved_candidate_for_review(row, company_rows), company_rows, operation="update"
+            )
     for row in rows:
         if row.get("id", "").upper() not in wanted_ids:
             continue
@@ -4408,6 +4563,9 @@ def mark_candidate_duplicate(candidate_id, application_id):
     )
     if candidate is None:
         raise ValueError(f"No Discovery candidate found with id {candidate_id}.")
+    candidate_eligibility.require_candidate_eligible(
+        resolved_candidate_for_review(candidate), repository.read_companies(), operation="mark duplicate"
+    )
 
     wanted_application = storage.clean(application_id).upper()
     posting = next(

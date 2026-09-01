@@ -11,6 +11,8 @@ import sys
 from . import actions as action_store
 from . import app_state
 from . import applications as application_store
+from . import candidate_eligibility
+from . import discovery as discovery_store
 from . import posting_snapshots as posting_snapshot_store
 from . import companies as company_store
 from . import contacts as contact_store
@@ -154,6 +156,31 @@ def compact_company_candidate(candidate, detail=False):
     row = {field: candidate.get(field, "") for field in fields}
     row["notes_preview"] = preview_text(candidate.get("notes", ""))
     return row
+
+
+def compact_discovery_candidate(candidate, detail=False):
+    if detail:
+        return {field: candidate.get(field, "") for field in schema.DISCOVERY_CANDIDATE_FIELDS}
+    fields = [
+        "id", "company_id", "company", "title", "canonical_url", "url", "location",
+        "work_mode", "source_platform", "status", "processing_status", "freshness_status",
+        "fit_score", "fit_summary", "recommendation_eligible", "lane_match", "detail_state",
+    ]
+    row = {field: candidate.get(field, "") for field in fields}
+    row["notes_preview"] = preview_text(candidate.get("notes", ""))
+    return row
+
+
+def compact_discovery_search(search):
+    return {
+        "id": search.get("id", ""),
+        "name": search.get("name", ""),
+        "keywords": search.get("keywords", ""),
+        "role_family_ids": search.get("role_family_ids", []),
+        "lanes": search.get("lanes", []),
+        "last_run_at": search.get("last_run_at", ""),
+        "last_run_summary": search.get("last_run_summary", {}),
+    }
 
 
 def split_tags(value):
@@ -400,10 +427,20 @@ def tool_get_company(args):
         for app in app_state.read_applications()
         if app.get("company_id", "").upper() == company_id
     ]
-    candidates = [
-        compact_company_candidate(candidate)
+    raw_candidates = [
+        candidate
         for candidate in repository.read_company_posting_candidates()
         if candidate.get("company_id", "").upper() == company_id
+    ]
+    include_excluded = args.get("include_excluded_companies") is True
+    eligible_candidates, excluded_candidates = candidate_eligibility.partition_candidates(
+        raw_candidates,
+        [company],
+        include_excluded_companies=include_excluded,
+    )
+    candidates = [
+        compact_company_candidate(candidate)
+        for candidate in eligible_candidates
     ]
     return text_result(
         {
@@ -411,6 +448,7 @@ def tool_get_company(args):
             "linked_contacts": linked_contacts,
             "postings_count": len(postings),
             "candidate_count": len(candidates),
+            "excluded_company_candidate_count": len(excluded_candidates),
             "postings": postings[:posting_limit],
             "candidates": candidates[:candidate_limit],
         }
@@ -498,6 +536,8 @@ def tool_get_company_candidate(args):
     if not candidate:
         raise ValueError(f"No company posting candidate found with id {wanted}.")
     company = company_store.get_company(candidate.get("company_id", ""))
+    if args.get("include_excluded_companies") is not True:
+        candidate_eligibility.require_candidate_eligible(candidate, [company])
     return text_result(
         {
             "candidate": compact_company_candidate(candidate, detail=True),
@@ -523,6 +563,8 @@ def tool_list_company_candidates(args):
         for row in company_store.list_companies()
     }
     scored_rows = []
+    excluded_count = 0
+    include_excluded = args.get("include_excluded_companies") is True
     for candidate in repository.read_company_posting_candidates():
         candidate_company_id = candidate.get("company_id", "").upper()
         if company_id and candidate_company_id != company_id:
@@ -530,13 +572,18 @@ def tool_list_company_candidates(args):
         candidate_status = candidate.get("status", "new").lower()
         if status != "all" and candidate_status != status:
             continue
+        candidate_company = company_by_id.get(candidate_company_id, {})
+        excluded = candidate_eligibility.company_is_excluded(candidate_company)
+        if excluded:
+            excluded_count += 1
+            if not include_excluded:
+                continue
         try:
             fit_score = int(candidate.get("fit_score") or 0)
         except (TypeError, ValueError):
             fit_score = 0
         if fit_score < minimum_fit_score:
             continue
-        candidate_company = company_by_id.get(candidate_company_id, {})
         haystack = " ".join(
             [
                 candidate.get("id", ""),
@@ -555,6 +602,8 @@ def tool_list_company_candidates(args):
                     **compact_company_candidate(candidate),
                     "company": candidate_company.get("name", ""),
                     "recommended": (
+                        not excluded
+                        and
                         candidate_status == "new"
                         and fit_score >= company_store.FIT_RECOMMENDATION_THRESHOLD
                     ),
@@ -573,7 +622,104 @@ def tool_list_company_candidates(args):
         {
             "company": compact_company(company) if company else None,
             "count": len(rows),
+            "excluded_company_candidate_count": excluded_count,
             "candidates": rows[:limit],
+        }
+    )
+
+
+def tool_get_discovery_candidate(args):
+    candidate = discovery_store.get_candidate(
+        args.get("id", ""),
+        include_excluded_companies=args.get("include_excluded_companies") is True,
+    )
+    company = None
+    if candidate.get("company_id"):
+        company = company_store.get_company(candidate.get("company_id", ""))
+    return text_result(
+        {
+            "candidate": compact_discovery_candidate(candidate, detail=True),
+            "company": compact_company(company) if company else None,
+        }
+    )
+
+
+def tool_list_discovery_candidates(args):
+    status = storage.clean(args.get("status", "all")).lower() or "all"
+    if status != "all" and status not in schema.DISCOVERY_CANDIDATE_STATUSES:
+        raise ValueError(f"Unsupported Discovery candidate status: {status}")
+    search = storage.clean(args.get("search", "")).lower()
+    try:
+        minimum_fit_score = max(0, min(100, int(args.get("minimum_fit_score") or 0)))
+    except (TypeError, ValueError):
+        minimum_fit_score = 0
+    include_excluded = args.get("include_excluded_companies") is True
+    _visible, excluded, _company_by_id = discovery_store.candidate_review_rows(
+        include_excluded_companies=include_excluded
+    )
+    rows = []
+    for candidate in discovery_store.list_candidates(
+        include_excluded_companies=include_excluded
+    ):
+        if status != "all" and candidate.get("status", "").lower() != status:
+            continue
+        try:
+            fit_score = int(candidate.get("fit_score") or 0)
+        except (TypeError, ValueError):
+            fit_score = 0
+        if fit_score < minimum_fit_score:
+            continue
+        haystack = " ".join(
+            [candidate.get("id", ""), candidate.get("company", ""), candidate.get("title", "")]
+        ).lower()
+        if search and search not in haystack:
+            continue
+        rows.append((fit_score, compact_discovery_candidate(candidate)))
+    rows.sort(key=lambda item: (-item[0], item[1].get("company", ""), item[1].get("title", "")))
+    limit = requested_limit(args, default=50)
+    candidates = [candidate for _score, candidate in rows]
+    return text_result(
+        {
+            "count": len(candidates),
+            "excluded_company_candidate_count": len(excluded),
+            "candidates": candidates[:limit],
+        }
+    )
+
+
+def tool_list_discovery_searches(_args):
+    searches = [compact_discovery_search(search) for search in discovery_store.list_searches()]
+    return text_result({"count": len(searches), "searches": searches})
+
+
+def tool_run_discovery_search(args):
+    search_id = storage.clean(args.get("id", "")).upper()
+    if not search_id:
+        raise ValueError("id is required.")
+    try:
+        enrichment_limit = max(0, min(250, int(args.get("enrichment_limit", 100))))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("enrichment_limit must be an integer.") from exc
+    result = discovery_store.continue_discovery(
+        search_id,
+        enrichment_limit=enrichment_limit,
+        use_browser_fallback=args.get("use_browser_fallback") is True,
+    )
+    return text_result(
+        {
+            "search": compact_discovery_search(result.get("search", {})),
+            "new_count": result.get("new_count", 0),
+            "updated_count": result.get("updated_count", 0),
+            "associated_count": result.get("associated_count", 0),
+            "duplicate_count": result.get("duplicate_count", 0),
+            "evaluated_count": result.get("evaluated_count", 0),
+            "known_count": result.get("known_count", 0),
+            "screened_count": result.get("screened_count", 0),
+            "needs_details_count": result.get("needs_details_count", 0),
+            "enrichment": result.get("enrichment", {}),
+            "sources": result.get("sources", []),
+            "errors": result.get("errors", []),
+            "captured": [compact_discovery_candidate(candidate) for candidate in result.get("captured", [])],
         }
     )
 
@@ -885,13 +1031,14 @@ TOOLS = {
         "handler": tool_list_companies,
     },
     "hunter_get_company": {
-        "description": "Get one Hunter company with counts plus capped associated postings and posting candidates. Use hunter_get_company_candidate for full candidate detail.",
+        "description": "Get one Hunter company with counts plus capped associated postings and eligible posting candidates. Candidates from not-interested or archived companies are omitted unless explicitly included.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "id": {"type": "string"},
                 "posting_limit": {"type": "integer", "minimum": 1, "maximum": 100},
                 "candidate_limit": {"type": "integer", "minimum": 1, "maximum": 100},
+                "include_excluded_companies": {"type": "boolean", "default": False},
             },
             "required": ["id"],
         },
@@ -998,16 +1145,19 @@ TOOLS = {
         "handler": tool_check_company_postings,
     },
     "hunter_get_company_candidate": {
-        "description": "Get full detail for one company posting candidate.",
+        "description": "Get full detail for one eligible company posting candidate. Excluded companies require explicit opt-in.",
         "inputSchema": {
             "type": "object",
-            "properties": {"id": {"type": "string"}},
+            "properties": {
+                "id": {"type": "string"},
+                "include_excluded_companies": {"type": "boolean", "default": False},
+            },
             "required": ["id"],
         },
         "handler": tool_get_company_candidate,
     },
     "hunter_list_company_candidates": {
-        "description": "List company posting candidates with optional company, review-status, search, and minimum-fit filters.",
+        "description": "List eligible company posting candidates with optional filters. Not-interested and archived companies are omitted by default and counted compactly.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -1016,9 +1166,57 @@ TOOLS = {
                 "search": {"type": "string"},
                 "minimum_fit_score": {"type": "integer", "minimum": 0, "maximum": 100},
                 "limit": {"type": "integer", "minimum": 1, "maximum": 100},
+                "include_excluded_companies": {"type": "boolean", "default": False},
             },
         },
         "handler": tool_list_company_candidates,
+    },
+    "hunter_get_discovery_candidate": {
+        "description": "Get full detail for one eligible Discovery candidate. Excluded companies require explicit opt-in.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "id": {"type": "string"},
+                "include_excluded_companies": {"type": "boolean", "default": False},
+            },
+            "required": ["id"],
+        },
+        "handler": tool_get_discovery_candidate,
+    },
+    "hunter_list_discovery_candidates": {
+        "description": "List eligible Discovery candidates. Not-interested and archived companies are omitted by default and counted compactly.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "status": {"type": "string", "enum": ["all", *sorted(schema.DISCOVERY_CANDIDATE_STATUSES)]},
+                "search": {"type": "string"},
+                "minimum_fit_score": {"type": "integer", "minimum": 0, "maximum": 100},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 100},
+                "include_excluded_companies": {"type": "boolean", "default": False},
+            },
+        },
+        "handler": tool_list_discovery_candidates,
+    },
+    "hunter_list_discovery_searches": {
+        "description": "List the configured local Discovery searches and their last-run summaries.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {},
+        },
+        "handler": tool_list_discovery_searches,
+    },
+    "hunter_run_discovery_search": {
+        "description": "Run one configured Discovery search with its saved role families, lanes, and exclusions. Captures eligible candidates and performs normal detail enrichment without changing review decisions.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "id": {"type": "string", "description": "Configured Discovery search id."},
+                "enrichment_limit": {"type": "integer", "minimum": 0, "maximum": 250, "default": 100},
+                "use_browser_fallback": {"type": "boolean", "default": False},
+            },
+            "required": ["id"],
+        },
+        "handler": tool_run_discovery_search,
     },
     "hunter_update_company_candidate": {
         "description": "Update a company posting candidate's review status, such as ignoring it or returning it to new.",

@@ -2534,8 +2534,8 @@ class HunterDiscoveryTest(unittest.TestCase):
         self.assertEqual(result["ignored_company_count"], 1)
         self.assertEqual(result["ignored_exclusion_count"], 1)
         self.assertEqual(result["screened_count"], 2)
-        self.assertEqual(changed["DC0001"]["status"], "ignored")
-        self.assertEqual(changed["DC0001"]["ignore_reason"], "company")
+        self.assertEqual(changed["DC0001"]["status"], "new")
+        self.assertEqual(changed["DC0001"]["ignore_reason"], "")
         self.assertEqual(changed["DC0002"]["status"], "ignored")
         self.assertEqual(changed["DC0002"]["ignore_reason"], "search-exclusion")
         self.assertEqual(changed["DC0003"]["status"], discovery.SCREENED_STATUS)
@@ -2544,11 +2544,11 @@ class HunterDiscoveryTest(unittest.TestCase):
         self.assertEqual(changed["DC0006"]["status"], "new")
 
         second_result = discovery.cleanup_candidates()
-        self.assertEqual(second_result["ignored_company_count"], 0)
+        self.assertEqual(second_result["ignored_company_count"], 1)
         self.assertEqual(second_result["ignored_exclusion_count"], 0)
         self.assertEqual(second_result["screened_count"], 0)
 
-    def test_cleanup_links_company_from_employer_hostname_before_ignoring(self):
+    def test_cleanup_does_not_mutate_candidate_from_excluded_employer_hostname(self):
         company = companies.upsert_company(
             "",
             {"name": "Walmart", "interest_status": "not-interested"},
@@ -2571,8 +2571,60 @@ class HunterDiscoveryTest(unittest.TestCase):
         self.assertEqual(result["linked_count"], 1)
         self.assertEqual(result["ignored_company_count"], 1)
         self.assertEqual(candidate["company_id"], company["id"])
-        self.assertEqual(candidate["status"], "ignored")
-        self.assertEqual(candidate["ignore_reason"], "company")
+        self.assertEqual(candidate["status"], "new")
+        self.assertEqual(candidate["ignore_reason"], "")
+
+    def test_excluded_discovery_candidate_is_not_fetched_or_mutated(self):
+        search = self.save_search("TPM", "technical program manager")
+        company = companies.upsert_company(
+            "",
+            {
+                "name": "Excluded Inc",
+                "interest_status": "not-interested",
+                "website": "https://excluded.example",
+            },
+        )
+        called = []
+
+        with self.assertRaisesRegex(ValueError, "not-interested"):
+            discovery.capture_candidates(
+                search["id"],
+                "https://excluded.example/jobs/tpm",
+                fetcher=lambda url: called.append(url),
+            )
+
+        self.assertEqual(called, [])
+        self.assertEqual(repository.read_discovery_candidates(), [])
+        self.assertEqual(companies.get_company(company["id"])["interest_status"], "not-interested")
+
+    def test_excluded_discovery_candidate_cannot_be_opened_reopened_or_pursued(self):
+        company = companies.upsert_company(
+            "", {"name": "Archived Inc", "interest_status": "archived"}
+        )
+        candidate = {field: "" for field in schema.DISCOVERY_CANDIDATE_FIELDS}
+        candidate.update(
+            {
+                "id": "DC0001",
+                "company_id": company["id"],
+                "company": company["name"],
+                "title": "Technical Program Manager",
+                "status": "ignored",
+                "description_text": "This full posting must not enter default review.",
+            }
+        )
+        repository.write_discovery_candidates([candidate])
+
+        with self.assertRaisesRegex(ValueError, "archived"):
+            discovery.get_candidate("DC0001")
+        with self.assertRaisesRegex(ValueError, "archived"):
+            discovery.update_candidate_status("DC0001", "new")
+        with self.assertRaisesRegex(ValueError, "archived"):
+            discovery.pursue_candidate("DC0001")
+
+        opted_in = discovery.get_candidate("DC0001", include_excluded_companies=True)
+        self.assertEqual(opted_in["id"], "DC0001")
+        self.assertFalse(opted_in["recommendation_eligible"])
+        self.assertEqual(repository.read_discovery_candidates()[0]["status"], "ignored")
 
     def test_cleanup_repairs_company_misattributed_through_shared_greenhouse_host(self):
         anthropic = companies.upsert_company(

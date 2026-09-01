@@ -512,6 +512,12 @@ export type Workflow = {
   outcomes: string[];
 };
 
+export type CandidateReviewAudit = {
+  excluded_company_candidate_count: number;
+  discovery_excluded_company_candidate_count: number;
+  tracked_company_excluded_company_candidate_count: number;
+};
+
 export type AppState = {
   generated_at: string;
   generated_date: string;
@@ -526,6 +532,7 @@ export type AppState = {
   company_career_sources: CompanyCareerSource[];
   company_posting_candidates: CompanyPostingCandidate[];
   company_career_scans: CompanyCareerScan[];
+  candidate_review_audit: CandidateReviewAudit;
   discovery_searches: DiscoverySearch[];
   discovery_candidates: DiscoveryCandidate[];
   discovery_preference_suggestions: DiscoveryPreferenceSuggestion[];

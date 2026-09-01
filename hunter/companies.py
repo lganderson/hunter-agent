@@ -14,7 +14,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
 from urllib.request import Request, urlopen
 
-from . import applications, paths, repository, schema, settings as settings_store, storage
+from . import applications, candidate_eligibility, paths, repository, schema, settings as settings_store, storage
 
 
 EDITABLE_FIELDS = {
@@ -5823,6 +5823,11 @@ def career_sources_equivalent(left, right):
 
 def check_company_postings(company_id, fetcher=None):
     company = get_company(company_id)
+    if candidate_eligibility.company_is_excluded(company):
+        raise ValueError(
+            f"Cannot check candidate postings: company {company.get('id', '')} is "
+            f"{company.get('interest_status', '')}."
+        )
     if company.get("tracking_status", "").lower() != "tracked":
         raise ValueError("Track this discovered company before checking its careers page.")
     careers_url = storage.clean(company.get("careers_url", ""))
@@ -6110,13 +6115,19 @@ def update_check_status(company_id, checked_at, status):
     raise ValueError(f"No company found with id {company_id}.")
 
 
-def candidates_for_company(company_id):
+def candidates_for_company(company_id, include_excluded_companies=False):
     wanted = storage.clean(company_id).upper()
-    return [
+    rows = [
         row
         for row in repository.read_company_posting_candidates()
         if row.get("company_id", "").upper() == wanted
     ]
+    visible, _excluded = candidate_eligibility.partition_candidates(
+        rows,
+        [get_company(wanted)],
+        include_excluded_companies=include_excluded_companies,
+    )
+    return visible
 
 
 def update_candidate_status(candidate_id, status):
@@ -6146,6 +6157,12 @@ def update_candidate_statuses(candidate_ids, status):
             + ", ".join(sorted(missing_ids))
             + "."
         )
+    company_rows = repository.read_companies()
+    for row in candidates:
+        if row.get("id", "").upper() in wanted_ids:
+            candidate_eligibility.require_candidate_eligible(
+                row, company_rows, operation="update"
+            )
     for row in candidates:
         if row.get("id", "").upper() in wanted_ids:
             row["status"] = status
@@ -6165,7 +6182,9 @@ def pursue_candidate(candidate_id):
     )
     if not candidate:
         raise ValueError(f"No company posting candidate found with id {candidate_id}.")
-    company = get_company(candidate.get("company_id", ""))
+    company = candidate_eligibility.require_candidate_eligible(
+        candidate, repository.read_companies(), operation="pursue"
+    )
     command = [
         sys.executable,
         str(paths.ROOT / "scripts" / "ingest_postings.py"),
