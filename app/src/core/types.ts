@@ -205,6 +205,7 @@ export type CandidateEnrichmentResult = {
   ready_count: number;
   needs_input_count: number;
   remaining_count: number;
+  manual_review_count: number;
   state_counts: Record<DiscoveryDetailState, number>;
   errors: string[];
 };

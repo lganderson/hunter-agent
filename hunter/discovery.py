@@ -1524,6 +1524,46 @@ def greenhouse_job_reference(url):
     return board_token, job_id.group(0)
 
 
+def lever_job_reference(url):
+    normalized = companies.normalize_url(url)
+    parsed = urlparse(normalized)
+    if parsed.netloc.lower() not in {"jobs.lever.co", "jobs.eu.lever.co"}:
+        return None
+    parts = [part for part in parsed.path.split("/") if part]
+    if len(parts) < 2:
+        return None
+    board_token, job_id = parts[:2]
+    if not board_token or not job_id:
+        return None
+    api_host = "api.eu.lever.co" if parsed.netloc.lower() == "jobs.eu.lever.co" else "api.lever.co"
+    return urlunparse(
+        parsed._replace(
+            netloc=api_host,
+            path=f"/v0/postings/{board_token}/{job_id}",
+            query="",
+            fragment="",
+        )
+    )
+
+
+def lever_job_description(job):
+    sections = [
+        storage.clean(str(job.get(field, "") or ""))
+        for field in ["descriptionPlain", "descriptionBodyPlain", "additionalPlain", "openingPlain"]
+        if storage.clean(str(job.get(field, "") or ""))
+    ]
+    for item in job.get("lists") or []:
+        if not isinstance(item, dict):
+            continue
+        heading = storage.clean(str(item.get("text", "") or ""))
+        content = companies.clean_html_text(str(item.get("content", "") or ""))
+        if heading:
+            sections.append(heading)
+        if content:
+            sections.append(content)
+    return "\n\n".join(dict.fromkeys(sections))[:MAX_DESCRIPTION_CHARS]
+
+
 def provider_candidate_details(url, fetcher=None):
     reference = greenhouse_job_reference(url)
     if reference:
@@ -1553,6 +1593,34 @@ def provider_candidate_details(url, fetcher=None):
             ) or companies.normalize_url(url),
             "location": location,
             "work_mode": work_mode_from_text(location, description),
+            "description_text": description,
+            "availability_status": "open",
+        }, ""
+
+    lever_api_url = lever_job_reference(url)
+    if lever_api_url:
+        fetched = (fetcher or companies.fetch_careers_page)(lever_api_url)
+        if fetched.get("error") or not fetched.get("html"):
+            return {}, storage.clean(fetched.get("error", "")) or "Lever returned no job details."
+        try:
+            job = json.loads(fetched.get("html", "") or "{}")
+        except json.JSONDecodeError:
+            return {}, "Lever returned an unreadable job response."
+        title = storage.clean(str(job.get("text", "") or "")) if isinstance(job, dict) else ""
+        description = lever_job_description(job) if isinstance(job, dict) else ""
+        if not title or not meaningful_description(description):
+            return {}, "Lever did not return an individual job."
+        categories = job.get("categories") or {}
+        if not isinstance(categories, dict):
+            categories = {}
+        location = storage.clean(str(categories.get("location", "") or ""))
+        workplace_type = storage.clean(str(job.get("workplaceType", "") or "")).lower()
+        work_modes = {"remote": "Remote", "hybrid": "Hybrid", "on-site": "On-site", "onsite": "On-site"}
+        return {
+            "title": title,
+            "canonical_url": companies.normalize_url(job.get("hostedUrl", "")) or companies.normalize_url(url),
+            "location": location,
+            "work_mode": work_modes.get(workplace_type, "") or work_mode_from_text(location, description),
             "description_text": description,
             "availability_status": "open",
         }, ""
@@ -1715,13 +1783,16 @@ def resolve_candidate_details(
     )
     score_candidate(candidate, timestamp)
     sync_candidate_source_urls(candidate)
+    if candidate_review_state(candidate) == "needs-freshness" and errors:
+        candidate["freshness_status"] = "needs-review"
+        candidate["freshness_checked_at"] = timestamp
     after = tuple(candidate.get(field, "") for field in [
         "company_id", "title", "canonical_url", "location", "work_mode", "description_text", "warnings",
         "status", "freshness_status", "freshness_checked_at",
     ])
     after_state = candidate_detail_state(candidate)
     after_review_state = candidate_review_state(candidate)
-    if after_state != "ready" and errors:
+    if after_review_state != "ready" and errors:
         candidate["detail_last_error"] = "; ".join(dict.fromkeys(error for error in errors if error))
     return {
         "changed": before != after or before_state != after_state or before_review_state != after_review_state,
@@ -3214,6 +3285,7 @@ def enrich_candidate_backlog(
         company = refreshed_companies_by_id.get(candidate.get("company_id", "").upper(), {})
         return (
             candidate.get("status") == "new"
+            and (not candidate_id or candidate.get("id", "").upper() == candidate_id.upper())
             and (not search_id or candidate_belongs_to_search(candidate, search_id))
             and not ignored_discovery_source(candidate.get("canonical_url") or candidate.get("url", ""))
             and company.get("interest_status", "").lower() not in DISCOVERY_EXCLUDED_COMPANY_INTEREST_STATUSES
@@ -3235,13 +3307,24 @@ def enrich_candidate_backlog(
         )
         for state in ["ready", "needs-detail", "needs-freshness", "failed-extraction"]
     }
+    remaining_targets = detail_enrichment_targets(
+        rows=[candidate for candidate in refreshed if candidate_in_scope(candidate)],
+        company_rows=list(refreshed_companies_by_id.values()),
+    )
+    manual_review_count = sum(
+        candidate_in_scope(candidate)
+        and candidate_review_state(candidate) != "ready"
+        and candidate not in remaining_targets
+        for candidate in refreshed
+    )
     return {
         "target_count": len(selected),
         "processed_count": len(selected),
         "changed_count": changed_count,
         "ready_count": ready_count,
         "needs_input_count": needs_input_count,
-        "remaining_count": review_states["needs-detail"] + review_states["needs-freshness"],
+        "remaining_count": len(remaining_targets),
+        "manual_review_count": manual_review_count,
         "state_counts": states,
         "review_state_counts": review_states,
         "errors": errors,
@@ -4192,6 +4275,11 @@ def individual_posting_evidence(
         return False
     if platform in DIRECT_ATS_PLATFORMS and not individual_ats_posting_url(url, platform):
         return False
+    # A complete JobPosting object is stronger evidence than challenge-related
+    # words embedded in an ATS script bundle. Ashby pages, for example, include
+    # CAPTCHA code even when the role itself is fully readable and available.
+    if job:
+        return bool(storage.clean(str(job.get("title", ""))) and job_description(job))
     text = storage.clean(f"{title} {description} {companies.clean_html_text(page_html)[:12000]}").lower()
     blocked_markers = [
         "access denied",
@@ -4206,8 +4294,6 @@ def individual_posting_evidence(
     ]
     if any(marker in text for marker in blocked_markers):
         return False
-    if job:
-        return bool(storage.clean(str(job.get("title", ""))) and job_description(job))
     if len(description) < 250:
         return False
     generic_title = re.fullmatch(

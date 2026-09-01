@@ -1446,6 +1446,58 @@ class HunterDiscoveryTest(unittest.TestCase):
         self.assertEqual(details["availability_status"], "open")
         self.assertEqual(requested, ["https://boards-api.greenhouse.io/v1/boards/example/jobs/1234567?content=true"])
 
+    def test_ashby_provider_trusts_structured_job_despite_captcha_script(self):
+        page = """
+        <html><head>
+          <title>Principal Product Manager @ Example</title>
+          <script type="application/ld+json">{
+            "@type": "JobPosting",
+            "title": "Principal Product Manager",
+            "description": "Lead product strategy, requirements, delivery, and cross-functional execution for a complex platform role.",
+            "jobLocation": {"address": {"addressLocality": "Remote", "addressCountry": "US"}}
+          }</script>
+          <script>window.captchaProvider = "available";</script>
+        </head><body><p>Apply now</p></body></html>
+        """
+
+        details, error = discovery.provider_candidate_details(
+            "https://jobs.ashbyhq.com/example/59a468ef-aef4-41a1-8bf2-5c920524e5d0",
+            fetcher=lambda _url: {"html": page, "error": ""},
+        )
+
+        self.assertEqual(error, "")
+        self.assertEqual(details["title"], "Principal Product Manager")
+        self.assertEqual(details["availability_status"], "open")
+
+    def test_lever_provider_uses_individual_posting_api(self):
+        requested = []
+        details, error = discovery.provider_candidate_details(
+            "https://jobs.lever.co/arcadia/8d01e985-fc84-4097-ab31-ca2a328d8e11",
+            fetcher=lambda url: requested.append(url) or {
+                "html": json.dumps({
+                    "id": "8d01e985-fc84-4097-ab31-ca2a328d8e11",
+                    "text": "Principal Product Manager, AI Product",
+                    "hostedUrl": "https://jobs.lever.co/arcadia/8d01e985-fc84-4097-ab31-ca2a328d8e11",
+                    "categories": {"location": "Remote (USA)"},
+                    "workplaceType": "remote",
+                    "descriptionPlain": "Lead product strategy and delivery across engineering and design teams. " * 8,
+                    "lists": [{"text": "Requirements", "content": "<li>Own complex platform programs.</li>"}],
+                }),
+                "error": "",
+            },
+        )
+
+        self.assertEqual(error, "")
+        self.assertEqual(details["title"], "Principal Product Manager, AI Product")
+        self.assertEqual(details["location"], "Remote (USA)")
+        self.assertEqual(details["work_mode"], "Remote")
+        self.assertEqual(details["availability_status"], "open")
+        self.assertIn("Requirements", details["description_text"])
+        self.assertEqual(
+            requested,
+            ["https://api.lever.co/v0/postings/arcadia/8d01e985-fc84-4097-ab31-ca2a328d8e11"],
+        )
+
     def test_requisition_identity_deduplicates_cross_domain_workday_role(self):
         direct = {
             "company": "Danaher",
@@ -2853,6 +2905,35 @@ class HunterDiscoveryTest(unittest.TestCase):
         self.assertEqual(discovery.candidate_review_state(needs_freshness), "needs-freshness")
         self.assertEqual(discovery.candidate_review_state(failed), "failed-extraction")
 
+    def test_failed_freshness_check_is_recorded_for_review_ready_detail(self):
+        company = companies.upsert_company("", {"name": "Example"})
+        candidate = {field: "" for field in schema.DISCOVERY_CANDIDATE_FIELDS}
+        candidate.update({
+            "id": "DC0001",
+            "company_id": company["id"],
+            "title": "Senior Product Manager",
+            "canonical_url": "https://jobs.example.com/roles/123",
+            "location": "Remote; United States",
+            "description_text": "Responsibilities and requirements. " * 30,
+            "processing_status": "ready",
+            "status": "new",
+        })
+
+        result = discovery.resolve_candidate_details(
+            candidate,
+            fetcher=lambda _url: {"html": "<html><title>Jobs</title></html>", "error": ""},
+            company_rows=[company],
+            company_candidates=[],
+        )
+
+        self.assertEqual(result["after_review_state"], "needs-freshness")
+        self.assertEqual(candidate["freshness_status"], "needs-review")
+        self.assertTrue(candidate["freshness_checked_at"])
+        self.assertEqual(
+            candidate["detail_last_error"],
+            "The posting page did not provide verifiable job details.",
+        )
+
     def test_ready_candidate_missing_freshness_enters_enrichment_backlog(self):
         company = companies.upsert_company("", {"name": "Example"})
         candidate = {field: "" for field in schema.DISCOVERY_CANDIDATE_FIELDS}
@@ -2898,6 +2979,35 @@ class HunterDiscoveryTest(unittest.TestCase):
         )
 
         self.assertEqual([row["id"] for row in targets], ["DC0002"])
+
+    def test_targeted_enrichment_reports_only_the_target_remaining(self):
+        company = companies.upsert_company("", {"name": "Example"})
+        candidates = []
+        for candidate_id in ["DC0001", "DC0002"]:
+            candidate = {field: "" for field in schema.DISCOVERY_CANDIDATE_FIELDS}
+            candidate.update({
+                "id": candidate_id,
+                "company_id": company["id"],
+                "title": "Senior Product Manager",
+                "canonical_url": f"https://jobs.example.com/roles/{candidate_id.lower()}",
+                "location": "Remote; United States",
+                "description_text": "Responsibilities and requirements. " * 30,
+                "processing_status": "ready",
+                "status": "new",
+            })
+            candidates.append(candidate)
+        repository.write_discovery_candidates(candidates)
+
+        result = discovery.enrich_candidate_backlog(
+            candidate_id="DC0001",
+            limit=1,
+            fetcher=lambda _url: {"html": "<html><title>Jobs</title></html>", "error": ""},
+        )
+
+        self.assertEqual(result["target_count"], 1)
+        self.assertEqual(result["remaining_count"], 1)
+        self.assertEqual(result["manual_review_count"], 0)
+        self.assertEqual(result["review_state_counts"]["needs-freshness"], 1)
 
     def test_distinct_requisitions_are_not_canonicalized_or_matched_to_posting(self):
         company = companies.upsert_company("", {"name": "Waymo"})

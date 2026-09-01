@@ -1198,7 +1198,10 @@ export function DiscoveryMode({ data, refresh, applyDiscoveryCandidateUpdate, en
                   </span>
                 </td>
                 <td>
-                  <span className={`pill freshness-${candidate.freshness_status || "unchecked"}`}>
+                  <span
+                    className={`pill freshness-${candidate.freshness_status || "unchecked"}`}
+                    title={candidate.detail_last_error || freshnessLabel(candidate)}
+                  >
                     {freshnessShortLabel(candidate)}
                   </span>
                   <span className="cell-subtle">
@@ -1219,13 +1222,17 @@ export function DiscoveryMode({ data, refresh, applyDiscoveryCandidateUpdate, en
                         title={candidate.review_state === "ready" ? "Add to Postings in Considering" : candidate.review_next_action}
                         onClick={() => candidate.review_state === "ready"
                           ? void pursueCandidate(candidate)
-                          : void enrichPendingCandidates(candidate.id)}
+                          : candidate.freshness_status === "needs-review"
+                            ? setReviewCandidateId(candidate.id)
+                            : void enrichPendingCandidates(candidate.id)}
                       >
                         {rowPending || refreshingCandidateId === candidate.id
                           ? "Working…"
                           : candidate.review_state === "ready"
                             ? "Consider"
-                            : candidate.review_state === "needs-freshness" ? "Check" : "Resolve"}
+                            : candidate.freshness_status === "needs-review"
+                              ? "Review"
+                              : candidate.review_state === "needs-freshness" ? "Check" : "Resolve"}
                       </button>
                     ) : null}
                     {candidate.status === "new" ? (
@@ -1300,7 +1307,7 @@ function FitBrief({ candidate, company }: { candidate: DiscoveryCandidate; compa
       {candidate.review_state !== "ready" ? (
         <div className="discovery-review-warning" role="note">
           <strong>{processingLabel(candidate)}</strong>
-          <span>{candidate.review_next_action || "Confirm the posting details before adding it to Considering."}</span>
+          <span>{candidate.detail_last_error || candidate.review_next_action || "Confirm the posting details before adding it to Considering."}</span>
         </div>
       ) : null}
       <div className="discovery-fit-columns">
@@ -1497,7 +1504,11 @@ function CandidateReviewModal({
             </button>
             {candidate.review_state === "needs-freshness" || candidate.review_state === "needs-detail" ? (
               <button className="button primary" type="button" disabled={pending} onClick={refresh}>
-                <RefreshIcon size={15} /> {pending ? "Checking…" : candidate.review_state === "needs-freshness" ? "Check posting" : "Resolve details"}
+                <RefreshIcon size={15} /> {pending
+                  ? "Checking…"
+                  : candidate.freshness_status === "needs-review"
+                    ? "Check again"
+                    : candidate.review_state === "needs-freshness" ? "Check posting" : "Resolve details"}
               </button>
             ) : (
               <button className="button primary" type="button" disabled={pending || candidate.review_state !== "ready"} onClick={() => { setDecision("pursued"); consider(); }}>{pending && decision === "pursued" ? "Saving…" : "Consider"}</button>
@@ -2045,6 +2056,7 @@ function candidateMatchesExclusionTerms(candidate: DiscoveryCandidate, terms: st
 function processingLabel(candidate: DiscoveryCandidate) {
   if (candidate.review_state === "ready") return "Ready";
   if (candidate.review_state === "needs-detail") return "Needs detail";
+  if (candidate.freshness_status === "needs-review") return "Freshness could not be verified";
   if (candidate.review_state === "needs-freshness") return "Needs freshness";
   return "Failed extraction";
 }

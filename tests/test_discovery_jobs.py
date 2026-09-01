@@ -29,6 +29,7 @@ class HunterDiscoveryJobsTest(unittest.TestCase):
             "ready_count": 1,
             "needs_input_count": 1,
             "remaining_count": 0,
+            "manual_review_count": 1,
             "state_counts": {
                 "ready": 1,
                 "pending-enrichment": 0,
@@ -66,7 +67,7 @@ class HunterDiscoveryJobsTest(unittest.TestCase):
         self.assertEqual(completed["status"], "completed")
         self.assertEqual(completed["result"]["ready_count"], 1)
         self.assertIn("company worker unavailable", completed["result"]["errors"][0])
-        self.assertIn("1 need your input", completed["message"])
+        self.assertIn("1 need manual review", completed["message"])
         self.assertTrue(discovery_jobs.job_path().exists())
 
     def test_background_enrichment_defaults_to_complete_backlog(self):

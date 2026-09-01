@@ -190,8 +190,8 @@ def _run_job(job_id, request):
         phase="complete",
         message=(
             f"Posting checks complete: {result['ready_count']} ready for review, "
-            f"{result['remaining_count']} still need automatic checks, and "
-            f"{result['state_counts']['needs-input']} need your input."
+            f"{result['remaining_count']} can still be checked automatically, and "
+            f"{result.get('manual_review_count', result['state_counts']['needs-input'])} need manual review."
         ),
         completed_steps=max(1, result["processed_count"]),
         total_steps=max(1, result["target_count"]),
