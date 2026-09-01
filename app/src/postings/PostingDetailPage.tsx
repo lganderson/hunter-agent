@@ -1020,6 +1020,8 @@ function blankApplication(data: AppState): Application {
     next_action_id: "",
     next_action: "",
     next_action_date: "",
+    open_action_count: 0,
+    next_action_warning: "Considering requires exactly one open next action; found 0.",
     contact: "",
     resume_version: "",
     cover_letter: "",

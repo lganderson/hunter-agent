@@ -1860,6 +1860,12 @@ class HunterDiscoveryTest(unittest.TestCase):
                 ),
             },
         )
+        discovery.continue_enrichment(
+            limit=1,
+            browser_detailer=lambda _url: {"availability_status": "open"},
+            company_researcher=lambda *_args: {},
+        )
+        candidate = discovery.get_candidate(candidate["id"])
         ingested = discovery.ingest_candidate(candidate["id"])
 
         self.assertEqual(candidate["processing_status"], "ready")
@@ -2370,6 +2376,10 @@ class HunterDiscoveryTest(unittest.TestCase):
             "processing_status": "ready",
             "fit_score": "80",
             "freshness_status": "confirmed-open",
+            "company": "Example",
+            "title": "Senior Product Manager",
+            "location": "Remote; United States",
+            "description_text": "Responsibilities and requirements. " * 30,
         }
         employer = discovery.candidate_payload(
             {
@@ -2817,6 +2827,111 @@ class HunterDiscoveryTest(unittest.TestCase):
         self.assertEqual([lane["location"] for lane in search["lanes"]], ["Minnesota", "United States"])
         self.assertEqual(search["lanes"][0]["work_modes"], ["on-site", "hybrid", "remote"])
         self.assertEqual(search["lanes"][1]["work_modes"], ["remote"])
+
+    def test_review_state_distinguishes_detail_freshness_and_extraction_failure(self):
+        base = {field: "" for field in schema.DISCOVERY_CANDIDATE_FIELDS}
+        base.update({
+            "company_id": "CO0001",
+            "title": "Senior Product Manager",
+            "canonical_url": "https://example.com/jobs/123",
+            "location": "Remote; United States",
+            "description_text": "Responsibilities and requirements. " * 30,
+            "processing_status": "ready",
+            "freshness_status": "confirmed-open",
+        })
+        ready = dict(base)
+        needs_detail = {**base, "description_text": "Too short", "processing_status": "partial"}
+        needs_freshness = {**base, "freshness_status": "", "freshness_checked_at": ""}
+        failed = {
+            **needs_detail,
+            "detail_attempt_count": str(discovery.MAX_DETAIL_ATTEMPTS),
+            "detail_last_error": "No readable posting details were returned.",
+        }
+
+        self.assertEqual(discovery.candidate_review_state(ready), "ready")
+        self.assertEqual(discovery.candidate_review_state(needs_detail), "needs-detail")
+        self.assertEqual(discovery.candidate_review_state(needs_freshness), "needs-freshness")
+        self.assertEqual(discovery.candidate_review_state(failed), "failed-extraction")
+
+    def test_ready_candidate_missing_freshness_enters_enrichment_backlog(self):
+        company = companies.upsert_company("", {"name": "Example"})
+        candidate = {field: "" for field in schema.DISCOVERY_CANDIDATE_FIELDS}
+        candidate.update({
+            "id": "DC0001",
+            "company_id": company["id"],
+            "title": "Senior Product Manager",
+            "canonical_url": "https://example.com/jobs/123",
+            "location": "Remote; United States",
+            "description_text": "Responsibilities and requirements. " * 30,
+            "processing_status": "ready",
+            "status": "new",
+        })
+
+        targets = discovery.detail_enrichment_targets(
+            rows=[candidate],
+            company_rows=[company],
+        )
+
+        self.assertEqual([row["id"] for row in targets], ["DC0001"])
+
+    def test_distinct_requisitions_are_not_canonicalized_or_matched_to_posting(self):
+        company = companies.upsert_company("", {"name": "Waymo"})
+        posting = {field: "" for field in schema.APPLICATION_FIELDS}
+        posting.update({
+                "id": "A0064",
+                "company": "Waymo",
+                "company_id": company["id"],
+                "role": "Senior Technical Program Manager, Simulation",
+                "source_url": "https://careers.withwaymo.com/jobs?gh_jid=8026543",
+                "stage": "considering",
+        })
+        repository.write_applications([posting])
+        rows = []
+        for candidate_id, requisition, title in [
+            ("DC0001", "8109626", "Senior Product Manager, Autonomous Vehicle Reliability"),
+            ("DC0002", "8026543", "Senior Technical Program Manager, Simulation"),
+        ]:
+            candidate = {field: "" for field in schema.DISCOVERY_CANDIDATE_FIELDS}
+            candidate.update({
+                "id": candidate_id,
+                "company_id": company["id"],
+                "title": title,
+                "url": "https://careers.withwaymo.com/jobs",
+                "canonical_url": f"https://careers.withwaymo.com/jobs?gh_jid={requisition}",
+                "source_urls_json": json.dumps([
+                    "https://careers.withwaymo.com/jobs",
+                    f"https://careers.withwaymo.com/jobs?gh_jid={requisition}",
+                ]),
+                "status": "new",
+            })
+            rows.append(candidate)
+
+        canonical = discovery.canonicalize_candidate_rows(rows)
+
+        self.assertEqual(len(canonical), 2)
+        self.assertIsNone(discovery.matching_application(rows[0]))
+        self.assertEqual(discovery.matching_application(rows[1])["id"], "A0064")
+
+    def test_unavailable_status_synchronizes_freshness_and_reopen_clears_closed(self):
+        company = companies.upsert_company("", {"name": "GitHub"})
+        candidate = {field: "" for field in schema.DISCOVERY_CANDIDATE_FIELDS}
+        candidate.update({
+            "id": "DC0570",
+            "company_id": company["id"],
+            "title": "Senior Product Operations Manager",
+            "status": "new",
+            "freshness_status": "confirmed-open",
+            "freshness_checked_at": "2026-08-20T11:04:12",
+        })
+        repository.write_discovery_candidates([candidate])
+
+        unavailable = discovery.update_candidate_status("DC0570", "unavailable")
+        reopened = discovery.update_candidate_status("DC0570", "new")
+
+        self.assertEqual(unavailable["freshness_status"], "closed")
+        self.assertTrue(unavailable["freshness_checked_at"])
+        self.assertEqual(reopened["freshness_status"], "")
+        self.assertEqual(reopened["freshness_checked_at"], "")
 
 
 if __name__ == "__main__":

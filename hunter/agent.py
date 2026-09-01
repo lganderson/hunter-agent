@@ -39,6 +39,8 @@ MUTATING_TOOLS = {
     "hunter_ingest_company_candidate",
     "hunter_update_company_candidate",
     "hunter_update_settings",
+    "hunter_run_discovery_search",
+    "hunter_run_discovery_searches",
 }
 MAX_TOOL_ROUNDS = 6
 

@@ -118,6 +118,7 @@ export function CandidatesPage({ data, refresh, applyCompanyCandidateUpdates, ap
       if (!matchesSelection(candidate.company_id, companyIds, companyOptions.map(item => item.id))) return false;
       if (latestOnly && !isCurrentNewCandidate(candidate, row.latestCheckAt)) return false;
       if (searchScopeOnly && !candidate.lane_match) return false;
+      if (["strong", "recommended"].includes(fitFilter) && candidate.review_state !== "ready") return false;
       if (!matchesFitFilter(fitScore, fitFilter)) return false;
       if (query) {
         const haystack = [
@@ -181,6 +182,7 @@ export function CandidatesPage({ data, refresh, applyCompanyCandidateUpdates, ap
   );
   const selectedIngestCandidates = selectedRows.filter(
     row => !["pursued", "unavailable"].includes(row.candidate.status)
+      && row.candidate.review_state === "ready"
   );
   const selectedIgnoreCandidates = selectedRows.filter(row => row.candidate.status === "new");
   const selectedRestoreCandidates = selectedRows.filter(row => row.candidate.status === "ignored");
@@ -561,6 +563,7 @@ export function CandidatesPage({ data, refresh, applyCompanyCandidateUpdates, ap
                   </td>
                   <td className="candidate-score-cell">
                     <span className={`pill fit-${fitBand(candidate)}`}>{candidate.fit_score || "0"}</span>
+                    <span className="cell-subtle">{candidateReviewStateLabel(candidate.review_state)}</span>
                   </td>
                   <td>{titleCase(candidate.status)}</td>
                   <td>
@@ -569,7 +572,7 @@ export function CandidatesPage({ data, refresh, applyCompanyCandidateUpdates, ap
                   <td>
                     <div className="table-actions">
                       <a className="button compact" href={candidate.url} target="_blank" rel="noreferrer"><ExternalIcon size={15} /> Open</a>
-                      <button className="button compact" type="button" disabled={candidate.status === "pursued" || operationPending} onClick={() => pursueCandidate(candidate.id)}>Pursue</button>
+                      <button className="button compact" type="button" disabled={candidate.status === "pursued" || candidate.review_state !== "ready" || operationPending} title={candidate.review_state === "ready" ? "Add to Considering" : candidateReviewStateLabel(candidate.review_state)} onClick={() => pursueCandidate(candidate.id)}>Pursue</button>
                       {candidate.status === "ignored"
                         ? <button className="button compact" type="button" disabled={operationPending} onClick={() => setCandidateStatus(candidate.id, "new")}>Needs decision</button>
                         : <button className="button compact" type="button" disabled={candidate.status === "pursued" || operationPending} onClick={() => setCandidateStatus(candidate.id, "ignored")}>Ignore</button>}
@@ -684,6 +687,13 @@ function matchesFitFilter(score: number, filter: string) {
   if (filter === "recommended") return score >= RECOMMENDED_FIT_SCORE;
   if (filter === "low") return score < RECOMMENDED_FIT_SCORE;
   return true;
+}
+
+function candidateReviewStateLabel(value: CompanyPostingCandidate["review_state"]) {
+  if (value === "ready") return "Ready";
+  if (value === "needs-detail") return "Needs detail";
+  if (value === "needs-freshness") return "Needs freshness";
+  return "Failed extraction";
 }
 
 function fitFilterLabel(value: string) {

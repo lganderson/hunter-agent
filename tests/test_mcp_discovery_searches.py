@@ -1,5 +1,7 @@
 import json
+import subprocess
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from hunter import mcp_server
@@ -56,6 +58,49 @@ class McpDiscoverySearchesTest(unittest.TestCase):
         )
         self.assertEqual(payload["new_count"], 2)
         self.assertEqual(payload["captured"][0]["id"], "DC0001")
+
+    def test_run_searches_isolates_timeout_retries_and_continues(self):
+        searches = [
+            {"id": "DS0001", "name": "Stuck search"},
+            {"id": "DS0002", "name": "Healthy search"},
+        ]
+        calls = []
+
+        def run(command, **kwargs):
+            calls.append((command, kwargs))
+            if "DS0001" in command:
+                raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+            return SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps({
+                    "id": "DS0002",
+                    "name": "Healthy search",
+                    "status": "completed",
+                    "evaluated_count": 4,
+                    "new_count": 1,
+                    "errors": [],
+                }),
+                stderr="",
+            )
+
+        with (
+            patch("hunter.mcp_server.discovery_store.list_searches", return_value=searches),
+            patch("hunter.mcp_server.subprocess.run", side_effect=run),
+        ):
+            response = mcp_server.call_named_tool(
+                "hunter_run_discovery_searches",
+                {"timeout_seconds": 5, "retry_count": 1},
+            )
+
+        payload = json.loads(response["content"][0]["text"])
+        self.assertEqual(payload["search_count"], 2)
+        self.assertEqual(payload["completed_count"], 1)
+        self.assertEqual(payload["failed_count"], 1)
+        self.assertEqual(payload["results"][0]["status"], "timed-out")
+        self.assertEqual(payload["results"][0]["attempt_count"], 2)
+        self.assertEqual(payload["results"][1]["status"], "completed")
+        self.assertEqual(len(calls), 3)
+        self.assertTrue(all(call[1]["timeout"] == 5 for call in calls))
 
 
 if __name__ == "__main__":

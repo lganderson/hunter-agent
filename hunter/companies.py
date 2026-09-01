@@ -73,6 +73,7 @@ JIBE_API_LIMIT = 10
 FIT_RECOMMENDATION_THRESHOLD = 45
 RECOMMENDED_CANDIDATE_LIMIT = 25
 CANDIDATE_DETAIL_VERIFY_LIMIT = 25
+MIN_REVIEW_DESCRIPTION_CHARS = 500
 CAREER_SEARCH_MODEL = "gpt-5.6-luna"
 SEARCH_ROLE_TERM_MIN_WEIGHT = 20
 SEARCH_SENIORITY_TERM_MIN_WEIGHT = 5
@@ -1011,6 +1012,32 @@ def posting_identity_keys(url):
     return keys
 
 
+def normalized_requisition_ids(url):
+    """Return provider-independent requisition identifiers from a posting URL."""
+    normalized = normalize_url(url)
+    if not normalized:
+        return set()
+    parsed = urlparse(normalized)
+    values = {
+        storage.clean(value).lower()
+        for key, value in parse_qsl(parsed.query, keep_blank_values=False)
+        if key.lower() in JOB_ID_QUERY_KEYS and storage.clean(value)
+    }
+    for key in posting_identity_keys(normalized):
+        if key.startswith(("greenhouse:", "apple:", "microsoft:", "smartrecruiters:")):
+            values.add(key.rsplit(":", 1)[-1])
+    return values
+
+
+def posting_identity_match(left_url, right_url):
+    """Compare requisitions before considering lower-confidence URL identity keys."""
+    left_requisitions = normalized_requisition_ids(left_url)
+    right_requisitions = normalized_requisition_ids(right_url)
+    if left_requisitions and right_requisitions:
+        return bool(left_requisitions & right_requisitions)
+    return bool(posting_identity_keys(left_url) & posting_identity_keys(right_url))
+
+
 def application_matches_company(app, company):
     company_id = company.get("id", "").upper()
     if app.get("company_id", "").upper() == company_id:
@@ -1018,23 +1045,72 @@ def application_matches_company(app, company):
     return normalized_key(app.get("company", "")) in company_keys(company)
 
 
-def tracked_posting_context(company):
-    url_keys = set()
-    title_keys = set()
-    for app in repository.read_applications():
-        url_keys.update(posting_identity_keys(app.get("source_url", "")))
-        if application_matches_company(app, company):
-            title_key = normalized_key(app.get("role", ""))
-            if title_key:
-                title_keys.add(title_key)
-    return {"url_keys": url_keys, "title_keys": title_keys}
+def tracked_posting_context(company, application_rows=None):
+    postings = []
+    for app in application_rows if application_rows is not None else repository.read_applications():
+        if not application_matches_company(app, company):
+            continue
+        source_url = app.get("source_url", "")
+        postings.append(
+            {
+                "id": app.get("id", ""),
+                "url": source_url,
+                "identity_keys": posting_identity_keys(source_url),
+                "requisition_ids": normalized_requisition_ids(source_url),
+                "title_key": normalized_key(app.get("role", "")),
+            }
+        )
+    return {
+        "postings": postings,
+        # Retained for callers that use the context for display or diagnostics.
+        "url_keys": set().union(*(posting["identity_keys"] for posting in postings)) if postings else set(),
+        "title_keys": {posting["title_key"] for posting in postings if posting["title_key"]},
+    }
 
 
 def candidate_is_tracked(item, tracked):
-    if posting_identity_keys(item.get("url", "")) & tracked["url_keys"]:
-        return True
+    candidate_url = item.get("url", "")
+    candidate_requisitions = normalized_requisition_ids(candidate_url)
+    candidate_keys = posting_identity_keys(candidate_url)
     title_key = normalized_key(item.get("title", ""))
-    return bool(title_key and title_key in tracked["title_keys"])
+    postings = tracked.get("postings")
+    if postings is None:
+        if candidate_keys & tracked.get("url_keys", set()):
+            return True
+        return bool(title_key and title_key in tracked.get("title_keys", set()))
+    for posting in postings:
+        posting_requisitions = posting.get("requisition_ids", set())
+        if candidate_requisitions and posting_requisitions:
+            if candidate_requisitions & posting_requisitions:
+                return True
+            # Distinct explicit requisitions override shared career URLs and titles.
+            continue
+        if candidate_keys & posting.get("identity_keys", set()):
+            return True
+        if title_key and title_key == posting.get("title_key", ""):
+            return True
+    return False
+
+
+def matching_tracked_posting_ids(item, company=None, tracked=None):
+    company = company or get_company(item.get("company_id", ""))
+    context = tracked or tracked_posting_context(company)
+    candidate_url = item.get("canonical_url") or item.get("url", "")
+    candidate_requisitions = normalized_requisition_ids(candidate_url)
+    candidate_keys = posting_identity_keys(candidate_url)
+    title_key = normalized_key(item.get("title", ""))
+    matches = []
+    for posting in context["postings"]:
+        posting_requisitions = posting["requisition_ids"]
+        if candidate_requisitions and posting_requisitions:
+            matched = bool(candidate_requisitions & posting_requisitions)
+        else:
+            matched = bool(candidate_keys & posting["identity_keys"])
+            if not matched and title_key:
+                matched = title_key == posting["title_key"]
+        if matched:
+            matches.append(posting["id"])
+    return matches
 
 
 def host_allowed(url, base_url):
@@ -1074,6 +1150,27 @@ def split_list_text(value):
         if cleaned and cleaned.lower() not in {item.lower() for item in values}:
             values.append(cleaned)
     return values
+
+
+def posting_work_mode(location, description, current=""):
+    current = storage.clean(current)
+    if current:
+        return current
+    text = storage.clean(f"{location} {description}").lower()
+    remote_patterns = [
+        r"\bremotely\s+in\s+(?:the\s+)?united states\b",
+        r"\bremote(?:ly)?\s+(?:from|within|in)\s+(?:the\s+)?u\.?s\.?(?:a\.)?\b",
+        r"\b(?:role|position|job)\s+(?:is|may be|can be)\s+(?:held\s+)?remote\b",
+        r"\bremote[- ]first\b",
+        r"\bfully remote\b",
+    ]
+    if any(re.search(pattern, text, re.I) for pattern in remote_patterns):
+        return "Remote"
+    if re.search(r"\bhybrid\b", text, re.I):
+        return "Hybrid"
+    if re.search(r"\b(?:on[- ]site|onsite)\b", text, re.I):
+        return "On-site"
+    return ""
 
 
 def candidate_source_job_id(url):
@@ -1142,6 +1239,7 @@ def normalized_candidate(item, platform_type, score_context=None):
     candidate["matched_queries"] = ", ".join(split_list_text(candidate.get("matched_queries", "")))
     description = clean_html_text(str(candidate.get("description", "") or ""))
     candidate["description"] = description
+    candidate["work_mode"] = posting_work_mode(location, description, candidate.get("work_mode", ""))
     candidate["description_excerpt"] = description[:1000]
     candidate["description_hash"] = hashlib.sha256(description.encode("utf-8")).hexdigest() if description else ""
     warnings = []
@@ -1625,11 +1723,39 @@ def candidate_fit_score(candidate):
         return 0
 
 
+def candidate_review_state(candidate):
+    description = storage.clean(candidate.get("description_excerpt", ""))
+    if len(description) < MIN_REVIEW_DESCRIPTION_CHARS:
+        source_platform = storage.clean(candidate.get("source_platform", "")).lower()
+        extraction_failed = (
+            not description
+            and source_platform
+            and source_platform not in {
+                "generic_html",
+                "official_web_search",
+                "avature_web_search",
+                "avature_waf_blocked",
+            }
+        )
+        if (
+            extraction_failed
+            or candidate.get("scan_state", "").lower() == "error"
+            or "failed-extraction" in storage.clean(candidate.get("normalization_warnings", "")).lower()
+        ):
+            return "failed-extraction"
+        return "needs-detail"
+    if candidate.get("scan_state", "").lower() != "current":
+        return "needs-freshness"
+    return "ready"
+
+
 def recommended_candidates(candidates):
     rows = [
         candidate
         for candidate in candidates
-        if candidate.get("status") == "new" and candidate_fit_score(candidate) >= FIT_RECOMMENDATION_THRESHOLD
+        if candidate.get("status") == "new"
+        and candidate_review_state(candidate) == "ready"
+        and candidate_fit_score(candidate) >= FIT_RECOMMENDATION_THRESHOLD
     ]
     return sorted(rows, key=lambda candidate: (-candidate_fit_score(candidate), candidate.get("title", ""), candidate.get("url", "")))[:RECOMMENDED_CANDIDATE_LIMIT]
 
@@ -6185,6 +6311,11 @@ def pursue_candidate(candidate_id):
     company = candidate_eligibility.require_candidate_eligible(
         candidate, repository.read_companies(), operation="pursue"
     )
+    review_state = candidate_review_state(candidate)
+    if review_state != "ready":
+        raise ValueError(
+            f"Candidate is {review_state}; complete posting detail and freshness checks before pursuing."
+        )
     command = [
         sys.executable,
         str(paths.ROOT / "scripts" / "ingest_postings.py"),
@@ -6202,12 +6333,11 @@ def pursue_candidate(candidate_id):
     if result.returncode:
         raise ValueError((result.stderr or result.stdout or "candidate ingest failed").strip())
 
-    wanted_url_keys = posting_identity_keys(candidate.get("url", ""))
     app = next(
         (
             row
             for row in repository.read_applications()
-            if posting_identity_keys(row.get("source_url", "")) & wanted_url_keys
+            if posting_identity_match(candidate.get("url", ""), row.get("source_url", ""))
         ),
         None,
     )

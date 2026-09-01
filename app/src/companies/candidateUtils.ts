@@ -18,7 +18,9 @@ export function candidateRank(status: string) {
 }
 
 export function isRecommendedCandidate(candidate: CompanyPostingCandidate, latestCheckAt: string) {
-  return isCurrentNewCandidate(candidate, latestCheckAt) && candidateFitScore(candidate) >= RECOMMENDED_FIT_SCORE;
+  return candidate.review_state === "ready"
+    && isCurrentNewCandidate(candidate, latestCheckAt)
+    && candidateFitScore(candidate) >= RECOMMENDED_FIT_SCORE;
 }
 
 export function isCurrentNewCandidate(candidate: CompanyPostingCandidate, latestCheckAt: string) {

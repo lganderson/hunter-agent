@@ -95,6 +95,9 @@ def compact_application(app, detail=False):
             ]
         )
     row = {field: app.get(field, "") for field in fields}
+    row["requisition_ids"] = sorted(company_store.normalized_requisition_ids(app.get("source_url", "")))
+    row["open_action_count"] = int(app.get("open_action_count", 0) or 0)
+    row["next_action_warning"] = app.get("next_action_warning", "")
     if not detail:
         row["notes_preview"] = preview_text(app.get("notes", ""))
     return row
@@ -137,7 +140,10 @@ def compact_company(company, detail=False):
 
 def compact_company_candidate(candidate, detail=False):
     if detail:
-        return {field: candidate.get(field, "") for field in schema.COMPANY_POSTING_CANDIDATE_FIELDS}
+        row = {field: candidate.get(field, "") for field in schema.COMPANY_POSTING_CANDIDATE_FIELDS}
+        row["review_state"] = company_store.candidate_review_state(candidate)
+        row["requisition_ids"] = sorted(company_store.normalized_requisition_ids(candidate.get("url", "")))
+        return row
     fields = [
         "id",
         "company_id",
@@ -154,17 +160,29 @@ def compact_company_candidate(candidate, detail=False):
         "fit_summary",
     ]
     row = {field: candidate.get(field, "") for field in fields}
+    row["review_state"] = company_store.candidate_review_state(candidate)
+    row["requisition_ids"] = sorted(company_store.normalized_requisition_ids(candidate.get("url", "")))
     row["notes_preview"] = preview_text(candidate.get("notes", ""))
     return row
 
 
 def compact_discovery_candidate(candidate, detail=False):
     if detail:
-        return {field: candidate.get(field, "") for field in schema.DISCOVERY_CANDIDATE_FIELDS}
+        row = {field: candidate.get(field, "") for field in schema.DISCOVERY_CANDIDATE_FIELDS}
+        for field in [
+            "review_state",
+            "review_next_action",
+            "requisition_ids",
+            "matching_posting_ids",
+            "recommendation_eligible",
+        ]:
+            row[field] = candidate.get(field, [] if field.endswith("_ids") else "")
+        return row
     fields = [
         "id", "company_id", "company", "title", "canonical_url", "url", "location",
         "work_mode", "source_platform", "status", "processing_status", "freshness_status",
         "fit_score", "fit_summary", "recommendation_eligible", "lane_match", "detail_state",
+        "review_state", "review_next_action", "requisition_ids", "matching_posting_ids",
     ]
     row = {field: candidate.get(field, "") for field in fields}
     row["notes_preview"] = preview_text(candidate.get("notes", ""))
@@ -540,7 +558,13 @@ def tool_get_company_candidate(args):
         candidate_eligibility.require_candidate_eligible(candidate, [company])
     return text_result(
         {
-            "candidate": compact_company_candidate(candidate, detail=True),
+            "candidate": {
+                **compact_company_candidate(candidate, detail=True),
+                "matching_posting_ids": company_store.matching_tracked_posting_ids(
+                    candidate,
+                    company=company,
+                ),
+            },
             "company": compact_company(company),
         }
     )
@@ -552,6 +576,9 @@ def tool_list_company_candidates(args):
     if status != "all" and status not in schema.COMPANY_POSTING_CANDIDATE_STATUSES:
         raise ValueError(f"Unsupported company posting candidate status: {status}")
     search = storage.clean(args.get("search", "")).lower()
+    tracking_status = storage.clean(args.get("tracking_status", "tracked")).lower() or "tracked"
+    if tracking_status not in {"all", *schema.COMPANY_TRACKING_STATUSES}:
+        raise ValueError(f"Unsupported company tracking status: {tracking_status}")
     try:
         minimum_fit_score = max(0, min(100, int(args.get("minimum_fit_score") or 0)))
     except (TypeError, ValueError):
@@ -562,8 +589,17 @@ def tool_list_company_candidates(args):
         row.get("id", "").upper(): row
         for row in company_store.list_companies()
     }
+    application_rows = repository.read_applications()
+    tracked_context_by_company_id = {
+        candidate_company_id: company_store.tracked_posting_context(
+            candidate_company,
+            application_rows=application_rows,
+        )
+        for candidate_company_id, candidate_company in company_by_id.items()
+    }
     scored_rows = []
     excluded_count = 0
+    other_tracking_status_count = 0
     include_excluded = args.get("include_excluded_companies") is True
     for candidate in repository.read_company_posting_candidates():
         candidate_company_id = candidate.get("company_id", "").upper()
@@ -573,6 +609,12 @@ def tool_list_company_candidates(args):
         if status != "all" and candidate_status != status:
             continue
         candidate_company = company_by_id.get(candidate_company_id, {})
+        if (
+            tracking_status != "all"
+            and candidate_company.get("tracking_status", "").lower() != tracking_status
+        ):
+            other_tracking_status_count += 1
+            continue
         excluded = candidate_eligibility.company_is_excluded(candidate_company)
         if excluded:
             excluded_count += 1
@@ -601,10 +643,16 @@ def tool_list_company_candidates(args):
                 {
                     **compact_company_candidate(candidate),
                     "company": candidate_company.get("name", ""),
+                    "matching_posting_ids": company_store.matching_tracked_posting_ids(
+                        candidate,
+                        company=candidate_company,
+                        tracked=tracked_context_by_company_id.get(candidate_company_id),
+                    ),
                     "recommended": (
                         not excluded
                         and
                         candidate_status == "new"
+                        and company_store.candidate_review_state(candidate) == "ready"
                         and fit_score >= company_store.FIT_RECOMMENDATION_THRESHOLD
                     ),
                 },
@@ -621,8 +669,10 @@ def tool_list_company_candidates(args):
     return text_result(
         {
             "company": compact_company(company) if company else None,
+            "tracking_status": tracking_status,
             "count": len(rows),
             "excluded_company_candidate_count": excluded_count,
+            "other_tracking_status_candidate_count": other_tracking_status_count,
             "candidates": rows[:limit],
         }
     )
@@ -720,6 +770,116 @@ def tool_run_discovery_search(args):
             "sources": result.get("sources", []),
             "errors": result.get("errors", []),
             "captured": [compact_discovery_candidate(candidate) for candidate in result.get("captured", [])],
+        }
+    )
+
+
+def _isolated_discovery_command(search_id, enrichment_limit, use_browser_fallback):
+    command = [
+        sys.executable,
+        str(paths.ROOT / "scripts" / "run_discovery_search.py"),
+        search_id,
+        "--enrichment-limit",
+        str(enrichment_limit),
+    ]
+    if use_browser_fallback:
+        command.append("--use-browser-fallback")
+    return command
+
+
+def tool_run_discovery_searches(args):
+    configured = {search["id"]: search for search in discovery_store.list_searches()}
+    requested_ids = [
+        storage.clean(value).upper()
+        for value in (args.get("ids") or configured.keys())
+        if storage.clean(value)
+    ]
+    if not requested_ids:
+        raise ValueError("At least one configured Discovery search is required.")
+    try:
+        enrichment_limit = max(0, min(250, int(args.get("enrichment_limit", 100))))
+        timeout_seconds = max(1, min(600, int(args.get("timeout_seconds", 180))))
+        retry_count = max(0, min(2, int(args.get("retry_count", 1))))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("enrichment_limit, timeout_seconds, and retry_count must be integers.") from exc
+
+    results = []
+    for search_id in dict.fromkeys(requested_ids):
+        if search_id not in configured:
+            results.append(
+                {
+                    "id": search_id,
+                    "name": "",
+                    "status": "failed",
+                    "attempt_count": 0,
+                    "errors": [f"No Discovery search found with id {search_id}."],
+                }
+            )
+            continue
+        result = None
+        attempt_errors = []
+        for attempt in range(1, retry_count + 2):
+            try:
+                completed = subprocess.run(
+                    _isolated_discovery_command(
+                        search_id,
+                        enrichment_limit,
+                        args.get("use_browser_fallback") is True,
+                    ),
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=timeout_seconds,
+                )
+                output_lines = [line for line in completed.stdout.splitlines() if line.strip()]
+                payload = json.loads(output_lines[-1]) if output_lines else {}
+                if not isinstance(payload, dict):
+                    payload = {}
+                if completed.returncode and not payload.get("errors"):
+                    payload["errors"] = [
+                        storage.clean(completed.stderr or completed.stdout) or "Search subprocess failed."
+                    ]
+                payload.setdefault("id", search_id)
+                payload.setdefault("name", configured[search_id].get("name", ""))
+                payload.setdefault("status", "failed" if completed.returncode else "completed")
+                payload["attempt_count"] = attempt
+                result = payload
+            except subprocess.TimeoutExpired:
+                attempt_errors.append(
+                    f"Timed out after {timeout_seconds} seconds on attempt {attempt}."
+                )
+                result = {
+                    "id": search_id,
+                    "name": configured[search_id].get("name", ""),
+                    "status": "timed-out",
+                    "attempt_count": attempt,
+                    "errors": list(attempt_errors),
+                }
+            except (OSError, json.JSONDecodeError) as exc:
+                attempt_errors.append(storage.clean(str(exc)))
+                result = {
+                    "id": search_id,
+                    "name": configured[search_id].get("name", ""),
+                    "status": "failed",
+                    "attempt_count": attempt,
+                    "errors": list(attempt_errors),
+                }
+            if result.get("status") not in {"failed", "timed-out"}:
+                break
+        results.append(result)
+
+    return text_result(
+        {
+            "search_count": len(results),
+            "completed_count": sum(
+                result.get("status") in {"completed", "completed-with-errors"}
+                for result in results
+            ),
+            "failed_count": sum(
+                result.get("status") in {"failed", "timed-out"}
+                for result in results
+            ),
+            "results": results,
         }
     )
 
@@ -1157,11 +1317,16 @@ TOOLS = {
         "handler": tool_get_company_candidate,
     },
     "hunter_list_company_candidates": {
-        "description": "List eligible company posting candidates with optional filters. Not-interested and archived companies are omitted by default and counted compactly.",
+        "description": "List eligible posting candidates for explicitly tracked companies by default. Use tracking_status=all to audit discovered-company candidates too. Not-interested and archived companies are omitted by default and counted compactly.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "company_id": {"type": "string"},
+                "tracking_status": {
+                    "type": "string",
+                    "enum": ["tracked", "discovered", "all"],
+                    "default": "tracked",
+                },
                 "status": {"type": "string", "enum": ["all", *sorted(schema.COMPANY_POSTING_CANDIDATE_STATUSES)]},
                 "search": {"type": "string"},
                 "minimum_fit_score": {"type": "integer", "minimum": 0, "maximum": 100},
@@ -1217,6 +1382,24 @@ TOOLS = {
             "required": ["id"],
         },
         "handler": tool_run_discovery_search,
+    },
+    "hunter_run_discovery_searches": {
+        "description": "Run saved Discovery searches independently. Every search gets its own subprocess timeout, retry budget, and completion result so one stuck search cannot block the rest.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Search ids to run. Omit to run every configured search.",
+                },
+                "enrichment_limit": {"type": "integer", "minimum": 0, "maximum": 250, "default": 100},
+                "use_browser_fallback": {"type": "boolean", "default": False},
+                "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 600, "default": 180},
+                "retry_count": {"type": "integer", "minimum": 0, "maximum": 2, "default": 1},
+            },
+        },
+        "handler": tool_run_discovery_searches,
     },
     "hunter_update_company_candidate": {
         "description": "Update a company posting candidate's review status, such as ignoring it or returning it to new.",

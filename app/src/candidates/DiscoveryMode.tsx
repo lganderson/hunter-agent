@@ -469,7 +469,7 @@ export function DiscoveryMode({ data, refresh, applyDiscoveryCandidateUpdate, en
       await refresh();
       if (result.candidate.detail_state === "ready") {
         setEditingCandidate(null);
-        setOperationStatus("Role details verified and fit rescored.");
+        setOperationStatus(result.candidate.review_next_action || "Role details verified and fit rescored.");
       } else {
         setEditingCandidate(result.candidate);
         setOperationStatus(result.candidate.detail_next_action || "Changes saved. Hunter will continue automatic detail checks.");
@@ -1155,7 +1155,7 @@ export function DiscoveryMode({ data, refresh, applyDiscoveryCandidateUpdate, en
                   ) : (
                     <span className="pill fit-pending" title={candidate.detail_next_action || undefined}>Needs review</span>
                   )}
-                  <span className="cell-subtle">{candidate.detail_state === "ready" ? processingLabel(candidate) : `⚠ ${processingLabel(candidate)}`}</span>
+                  <span className="cell-subtle">{candidate.review_state === "ready" ? processingLabel(candidate) : `⚠ ${processingLabel(candidate)}`}</span>
                 </td>
                 <td>
                   <span
@@ -1183,7 +1183,7 @@ export function DiscoveryMode({ data, refresh, applyDiscoveryCandidateUpdate, en
                       <button className="button compact" type="button" disabled={pending || rowPending} onClick={() => setReviewCandidateId(candidate.id)}>Review</button>
                     ) : null}
                     {candidate.status === "new" ? (
-                      <button className="button compact primary" type="button" disabled={pending || rowPending || candidate.detail_state !== "ready"} title={candidate.detail_state === "ready" ? "Add to Postings in Considering" : candidate.detail_next_action} onClick={() => void pursueCandidate(candidate)}>{rowPending ? "Saving…" : "Pursue"}</button>
+                      <button className="button compact primary" type="button" disabled={pending || rowPending || candidate.review_state !== "ready"} title={candidate.review_state === "ready" ? "Add to Postings in Considering" : candidate.review_next_action} onClick={() => void pursueCandidate(candidate)}>{rowPending ? "Saving…" : "Pursue"}</button>
                     ) : null}
                     {candidate.status === "new" ? (
                       <button className="button compact" type="button" disabled={pending || rowPending} onClick={() => void setCandidateStatus(candidate, "ignored")}>Ignore</button>
@@ -1253,10 +1253,10 @@ function FitBrief({ candidate, company }: { candidate: DiscoveryCandidate; compa
         <div><span>Source</span><strong>{candidate.source_trust_label}</strong></div>
         <div><span>Freshness</span><strong>{freshnessShortLabel(candidate)}</strong></div>
       </div>
-      {candidate.detail_state !== "ready" ? (
+      {candidate.review_state !== "ready" ? (
         <div className="discovery-review-warning" role="note">
           <strong>{processingLabel(candidate)}</strong>
-          <span>{candidate.detail_next_action || "Confirm the posting details before pursuing."}</span>
+          <span>{candidate.review_next_action || "Confirm the posting details before pursuing."}</span>
         </div>
       ) : null}
       <div className="discovery-fit-columns">
@@ -1449,7 +1449,7 @@ function CandidateReviewModal({
             <button className="button" type="button" disabled={pending || !applications.length} onClick={() => setDuplicateOpen(true)}>
               Mark duplicate
             </button>
-            <button className="button primary" type="button" disabled={pending || candidate.detail_state !== "ready"} onClick={() => { setDecision("pursued"); pursue(); }}>{pending && decision === "pursued" ? "Saving…" : "Pursue"}</button>
+            <button className="button primary" type="button" disabled={pending || candidate.review_state !== "ready"} onClick={() => { setDecision("pursued"); pursue(); }}>{pending && decision === "pursued" ? "Saving…" : "Pursue"}</button>
           </div>
         </div>
       </article>
@@ -1991,10 +1991,10 @@ function candidateMatchesExclusionTerms(candidate: DiscoveryCandidate, terms: st
 }
 
 function processingLabel(candidate: DiscoveryCandidate) {
-  if (candidate.detail_state === "ready") return "Verified";
-  if (candidate.detail_state === "pending-enrichment") return "Enriching";
-  if (candidate.detail_state === "source-verification") return "Verify source";
-  return "Needs input";
+  if (candidate.review_state === "ready") return "Ready";
+  if (candidate.review_state === "needs-detail") return "Needs detail";
+  if (candidate.review_state === "needs-freshness") return "Needs freshness";
+  return "Failed extraction";
 }
 
 function discoveryCandidateIncludes(candidate: DiscoveryCandidate, company: Company | undefined, search: string) {

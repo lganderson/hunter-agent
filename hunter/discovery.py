@@ -1397,6 +1397,47 @@ def candidate_detail_next_action(candidate):
     return "Hunter can continue automatic detail enrichment"
 
 
+def candidate_review_state(candidate):
+    """Return the explicit gate state used by review and recommendation queues."""
+    detail_state = candidate_detail_state(candidate)
+    if detail_state != "ready":
+        if detail_state == "needs-input" and any(
+            gap["id"] == "missing-description" for gap in candidate_detail_gaps(candidate)
+        ):
+            return "failed-extraction"
+        return "needs-detail"
+    if candidate.get("freshness_status") != "confirmed-open":
+        return "needs-freshness"
+    return "ready"
+
+
+def candidate_review_next_action(candidate):
+    state = candidate_review_state(candidate)
+    if state == "ready":
+        return "Ready for review"
+    if state == "needs-freshness":
+        return "Confirm the employer posting is still open"
+    if state == "failed-extraction":
+        return "Add a direct posting or complete requirements after extraction failed"
+    return candidate_detail_next_action(candidate)
+
+
+def sync_candidate_status_fields(candidate, checked_at=None):
+    """Keep review status and freshness evidence from contradicting each other."""
+    status = storage.clean(candidate.get("status", "")).lower()
+    freshness = storage.clean(candidate.get("freshness_status", "")).lower()
+    if status == "unavailable":
+        if freshness != "closed":
+            candidate["freshness_status"] = "closed"
+            candidate["freshness_checked_at"] = checked_at or ""
+        elif checked_at:
+            candidate["freshness_checked_at"] = checked_at
+    elif status == "new" and freshness == "closed":
+        candidate["freshness_status"] = ""
+        candidate["freshness_checked_at"] = ""
+    return candidate
+
+
 def apply_browser_details(candidate, details):
     updates = {
         "company": storage.clean((details or {}).get("company", "")),
@@ -1519,6 +1560,7 @@ def provider_candidate_details(url, fetcher=None):
     generic = extracted_candidate(url, fetcher=fetcher)
     posting_evidence = generic.pop("_posting_evidence", "")
     if posting_evidence == "individual":
+        generic["availability_status"] = "open"
         return generic, ""
     error = "; ".join(
         line
@@ -1618,8 +1660,10 @@ def resolve_candidate_details(
 
     timestamp = now_iso()
     before_state = candidate_detail_state(candidate)
+    before_review_state = candidate_review_state(candidate)
     before = tuple(candidate.get(field, "") for field in [
-        "company_id", "title", "canonical_url", "location", "work_mode", "description_text", "warnings"
+        "company_id", "title", "canonical_url", "location", "work_mode", "description_text", "warnings",
+        "status", "freshness_status", "freshness_checked_at",
     ])
     candidate["detail_attempt_count"] = str(detail_attempt_count(candidate) + 1)
     candidate["detail_last_attempt_at"] = timestamp
@@ -1638,7 +1682,11 @@ def resolve_candidate_details(
     elif provider_error:
         errors.append(provider_error)
 
-    if candidate_detail_gaps(candidate) and browser_detailer is not None and target_url:
+    if (
+        candidate_review_state(candidate) != "ready"
+        and browser_detailer is not None
+        and target_url
+    ):
         try:
             browser_details = browser_detailer(target_url) or {}
         except (browser_discovery.BrowserDiscoveryError, RuntimeError) as exc:
@@ -1656,6 +1704,8 @@ def resolve_candidate_details(
             "changed": False,
             "before_state": before_state,
             "after_state": before_state,
+            "before_review_state": before_review_state,
+            "after_review_state": before_review_state,
             "errors": [],
             "excluded_company": True,
         }
@@ -1666,15 +1716,19 @@ def resolve_candidate_details(
     score_candidate(candidate, timestamp)
     sync_candidate_source_urls(candidate)
     after = tuple(candidate.get(field, "") for field in [
-        "company_id", "title", "canonical_url", "location", "work_mode", "description_text", "warnings"
+        "company_id", "title", "canonical_url", "location", "work_mode", "description_text", "warnings",
+        "status", "freshness_status", "freshness_checked_at",
     ])
     after_state = candidate_detail_state(candidate)
+    after_review_state = candidate_review_state(candidate)
     if after_state != "ready" and errors:
         candidate["detail_last_error"] = "; ".join(dict.fromkeys(error for error in errors if error))
     return {
-        "changed": before != after or before_state != after_state,
+        "changed": before != after or before_state != after_state or before_review_state != after_review_state,
         "before_state": before_state,
         "after_state": after_state,
+        "before_review_state": before_review_state,
+        "after_review_state": after_review_state,
         "errors": errors,
     }
 
@@ -1961,12 +2015,18 @@ def canonicalize_candidate_rows(rows):
 
     for original in rows:
         candidate = dict(original)
+        sync_candidate_status_fields(candidate)
         sync_candidate_source_urls(candidate)
         set_candidate_search_ids(candidate, candidate_search_ids(candidate))
         candidate_keys = candidate_identity_keys(candidate)
         possible_indices = set()
         for key in candidate_keys:
             possible_indices.update(identity_indices.get(key, set()))
+        possible_indices = {
+            index
+            for index in possible_indices
+            if not candidates_have_conflicting_requisitions(canonical[index], candidate)
+        }
         company_key = normalized_candidate_company(candidate)
         for index in company_indices.get(company_key, set()):
             if candidates_semantically_match(canonical[index], candidate):
@@ -3042,7 +3102,7 @@ def detail_enrichment_targets(rows=None, search_id="", company_rows=None):
         for candidate in candidates
         if candidate.get("status") == "new"
         and (not wanted_search or candidate_belongs_to_search(candidate, wanted_search))
-        and candidate_detail_state(candidate) in {"pending-enrichment", "source-verification"}
+        and candidate_review_state(candidate) in {"needs-detail", "needs-freshness"}
         and detail_attempt_count(candidate) < MAX_DETAIL_ATTEMPTS
         and not ignored_discovery_source(candidate.get("canonical_url") or candidate.get("url", ""))
         and (
@@ -3112,9 +3172,9 @@ def enrich_candidate_backlog(
         )
         if result["changed"]:
             changed_count += 1
-        if result["after_state"] == "ready":
+        if result["after_review_state"] == "ready":
             ready_count += 1
-        elif result["after_state"] == "needs-input":
+        elif result["after_review_state"] == "failed-extraction":
             needs_input_count += 1
         errors.extend(
             f"{candidate.get('title') or candidate.get('id')}: {error}"
@@ -3157,14 +3217,23 @@ def enrich_candidate_backlog(
         )
         for state in ["ready", "pending-enrichment", "source-verification", "needs-input"]
     }
+    review_states = {
+        state: sum(
+            candidate_in_scope(candidate)
+            and candidate_review_state(candidate) == state
+            for candidate in refreshed
+        )
+        for state in ["ready", "needs-detail", "needs-freshness", "failed-extraction"]
+    }
     return {
         "target_count": len(selected),
         "processed_count": len(selected),
         "changed_count": changed_count,
         "ready_count": ready_count,
         "needs_input_count": needs_input_count,
-        "remaining_count": states["pending-enrichment"] + states["source-verification"],
+        "remaining_count": review_states["needs-detail"] + review_states["needs-freshness"],
         "state_counts": states,
+        "review_state_counts": review_states,
         "errors": errors,
     }
 
@@ -3658,8 +3727,7 @@ def recommendation_eligible(candidate, company=None):
     return bool(
         not candidate_eligibility.company_is_excluded(company)
         and candidate.get("status") == "new"
-        and candidate.get("processing_status") == "ready"
-        and candidate.get("freshness_status") == "confirmed-open"
+        and candidate_review_state(candidate) == "ready"
         and trust["id"] in {"employer", "network"}
         and fit_score >= companies.FIT_RECOMMENDATION_THRESHOLD
     )
@@ -3755,7 +3823,7 @@ def candidate_lane_match(candidate, searches=None):
     return ", ".join(matches[:2])
 
 
-def candidate_payload(candidate, company_by_id=None, searches=None):
+def candidate_payload(candidate, company_by_id=None, searches=None, tracked_context_by_company_id=None):
     payload = dict(candidate)
     company = (company_by_id or {}).get(candidate.get("company_id", ""))
     source_trust = candidate_source_trust(candidate, company)
@@ -3777,6 +3845,18 @@ def candidate_payload(candidate, company_by_id=None, searches=None):
     payload["detail_state"] = candidate_detail_state(candidate)
     payload["detail_gaps"] = candidate_detail_gaps(candidate)
     payload["detail_next_action"] = candidate_detail_next_action(candidate)
+    payload["review_state"] = candidate_review_state(candidate)
+    payload["review_next_action"] = candidate_review_next_action(candidate)
+    payload["requisition_ids"] = sorted(candidate_requisition_ids(candidate))
+    payload["matching_posting_ids"] = (
+        companies.matching_tracked_posting_ids(
+            candidate,
+            company=company,
+            tracked=(tracked_context_by_company_id or {}).get(candidate.get("company_id", "")),
+        )
+        if company
+        else []
+    )
     return payload
 
 
@@ -3859,8 +3939,13 @@ def list_candidates(include_excluded_companies=False):
         include_excluded_companies=include_excluded_companies
     )
     searches = list_searches()
+    application_rows = repository.read_applications()
+    tracked_context_by_company_id = {
+        company_id: companies.tracked_posting_context(company, application_rows=application_rows)
+        for company_id, company in company_by_id.items()
+    }
     return [
-        candidate_payload(candidate, company_by_id, searches)
+        candidate_payload(candidate, company_by_id, searches, tracked_context_by_company_id)
         for candidate in visible
         if not ignored_discovery_source(
             candidate.get("canonical_url") or candidate.get("url", "")
@@ -4308,6 +4393,19 @@ def candidate_identity_keys(candidate):
     return keys
 
 
+def candidate_requisition_ids(candidate):
+    values = set()
+    for url in candidate_source_urls(candidate):
+        values.update(companies.normalized_requisition_ids(url))
+    return values
+
+
+def candidates_have_conflicting_requisitions(left, right):
+    left_ids = candidate_requisition_ids(left)
+    right_ids = candidate_requisition_ids(right)
+    return bool(left_ids and right_ids and not (left_ids & right_ids))
+
+
 def normalized_candidate_company(candidate):
     company_id = storage.clean(candidate.get("company_id", "")).upper()
     if company_id:
@@ -4323,6 +4421,8 @@ def normalized_candidate_title(candidate):
 
 
 def candidates_semantically_match(left, right):
+    if candidates_have_conflicting_requisitions(left, right):
+        return False
     left_company = normalized_candidate_company(left)
     right_company = normalized_candidate_company(right)
     if not left_company or left_company != right_company:
@@ -4350,6 +4450,8 @@ def candidates_semantically_match(left, right):
 def matching_candidate(rows, candidate):
     candidate_keys = candidate_identity_keys(candidate)
     for row in rows:
+        if candidates_have_conflicting_requisitions(row, candidate):
+            continue
         if candidate_keys & candidate_identity_keys(row):
             return row
         if candidates_semantically_match(row, candidate):
@@ -4456,8 +4558,12 @@ def capture_candidates(search_id, capture_text, details=None, fetcher=None):
                 f"{known_company.get('interest_status', '')}."
             )
         candidate = {field: "" for field in schema.DISCOVERY_CANDIDATE_FIELDS}
-        candidate.update(extracted_candidate(url, fetcher=fetcher))
-        candidate.pop("_posting_evidence", None)
+        extracted = extracted_candidate(url, fetcher=fetcher)
+        posting_evidence = extracted.pop("_posting_evidence", "")
+        candidate.update(extracted)
+        if posting_evidence == "individual":
+            candidate["freshness_status"] = "confirmed-open"
+            candidate["freshness_checked_at"] = timestamp
         if candidate_company_is_excluded(candidate):
             raise ValueError("Cannot capture candidate: its company is excluded from review.")
         candidate.update(
@@ -4566,10 +4672,12 @@ def update_candidate_statuses(candidate_ids, status, ignore_reason="", ignore_re
             candidate_eligibility.require_candidate_eligible(
                 resolved_candidate_for_review(row, company_rows), company_rows, operation="update"
             )
+    status_checked_at = now_iso()
     for row in rows:
         if row.get("id", "").upper() not in wanted_ids:
             continue
         row["status"] = cleaned_status
+        sync_candidate_status_fields(row, checked_at=status_checked_at)
         if cleaned_status in {"new", "ignored", "unavailable"}:
             row["ingested_application_id"] = ""
         if cleaned_status == "ignored":
@@ -4619,21 +4727,29 @@ def matching_company(company_name):
 
 
 def matching_application(candidate):
-    wanted_keys = candidate_identity_keys(candidate)
-    return next(
-        (
-            application
-            for application in repository.read_applications()
-            if wanted_keys & companies.posting_identity_keys(application.get("source_url", ""))
-        ),
-        None,
-    )
+    candidate_urls = candidate_source_urls(candidate)
+    candidate_requisitions = candidate_requisition_ids(candidate)
+    for application in repository.read_applications():
+        source_url = application.get("source_url", "")
+        application_requisitions = companies.normalized_requisition_ids(source_url)
+        if candidate_requisitions and application_requisitions:
+            if candidate_requisitions & application_requisitions:
+                return application
+            continue
+        if any(companies.posting_identity_match(url, source_url) for url in candidate_urls):
+            return application
+    return None
 
 
 def pursue_candidate(candidate_id):
     candidate = get_candidate(candidate_id)
     if not candidate.get("company_id") or not candidate.get("title"):
         raise ValueError("Link a company and add the role title before ingesting this Discovery result.")
+    review_state = candidate_review_state(candidate)
+    if review_state != "ready":
+        raise ValueError(
+            f"Candidate is {review_state}; complete posting detail and freshness checks before pursuing."
+        )
     existing = matching_application(candidate)
     if existing:
         updated = update_candidate_status(candidate_id, "pursued")

@@ -20,6 +20,14 @@ def read_applications():
             for action in all_actions
             if action.get("application_id", "").upper() == normalized.get("id", "").upper()
         ]
+        open_related_actions = action_store.open_actions(related_actions)
+        normalized["open_action_count"] = len(open_related_actions)
+        normalized["next_action_warning"] = ""
+        if normalized.get("stage", "").lower() == "considering" and len(open_related_actions) != 1:
+            normalized["next_action_warning"] = (
+                "Considering requires exactly one open next action; "
+                f"found {len(open_related_actions)}."
+            )
         if normalized.get("stage", "").lower() == "closed":
             normalized["next_action_id"] = ""
             normalized["next_action"] = ""
@@ -81,15 +89,7 @@ def enrich_companies(company_rows, discovery_candidates, company_candidates=None
             summary["ignored"] += 1
         elif status == "pursued":
             summary["pursued"] += 1
-        try:
-            fit_score = int(candidate.get("fit_score", "") or 0)
-        except (TypeError, ValueError):
-            fit_score = 0
-        if (
-            candidate.get("status", "") == "new"
-            and candidate.get("processing_status", "") == "ready"
-            and fit_score >= 45
-        ):
+        if candidate.get("recommendation_eligible"):
             summary["recommended"] += 1
 
     for candidate in company_candidates or []:
@@ -148,22 +148,51 @@ def enrich_companies(company_rows, discovery_candidates, company_candidates=None
 
 
 def enrich_company_candidates(candidate_rows, discovery_candidates, searches):
-    discovery_by_identity = {}
-    for candidate in discovery_candidates:
-        if candidate.get("status") not in {"new", "pursued", "ignored", "duplicate"}:
+    company_by_id = {
+        company.get("id", "").upper(): company
+        for company in repository.read_companies()
+    }
+    application_rows = repository.read_applications()
+    tracked_context_by_company_id = {
+        company_id: company_store.tracked_posting_context(
+            company,
+            application_rows=application_rows,
+        )
+        for company_id, company in company_by_id.items()
+    }
+    discovery_entries_by_company_id = {}
+    for discovery_candidate in discovery_candidates:
+        if discovery_candidate.get("status") not in {"new", "pursued", "ignored", "duplicate"}:
             continue
-        urls = [
-            candidate.get("canonical_url", ""),
-            candidate.get("url", ""),
-            *(candidate.get("source_urls", []) or []),
-        ]
-        for url in urls:
-            for identity in company_store.posting_identity_keys(url):
-                discovery_by_identity.setdefault(identity, candidate.get("id", ""))
-
+        discovery_company_id = discovery_candidate.get("company_id", "").upper()
+        identity_keys = set()
+        for url in discovery_store.candidate_source_urls(discovery_candidate):
+            identity_keys.update(company_store.posting_identity_keys(url))
+        discovery_entries_by_company_id.setdefault(discovery_company_id, []).append(
+            {
+                "id": discovery_candidate.get("id", ""),
+                "requisition_ids": set(discovery_candidate.get("requisition_ids", [])),
+                "identity_keys": identity_keys,
+            }
+        )
     enriched = []
     for candidate in candidate_rows:
         payload = dict(candidate)
+        payload["review_state"] = company_store.candidate_review_state(candidate)
+        payload["requisition_ids"] = sorted(
+            company_store.normalized_requisition_ids(candidate.get("url", ""))
+        )
+        candidate_company_id = candidate.get("company_id", "").upper()
+        company = company_by_id.get(candidate_company_id)
+        payload["matching_posting_ids"] = (
+            company_store.matching_tracked_posting_ids(
+                candidate,
+                company=company,
+                tracked=tracked_context_by_company_id.get(candidate_company_id),
+            )
+            if company
+            else []
+        )
         payload["lane_match"] = discovery_store.candidate_lane_match(
             {
                 **candidate,
@@ -171,14 +200,18 @@ def enrich_company_candidates(candidate_rows, discovery_candidates, searches):
             },
             searches,
         )
-        payload["discovery_candidate_id"] = next(
-            (
-                discovery_by_identity[identity]
-                for identity in company_store.posting_identity_keys(candidate.get("url", ""))
-                if discovery_by_identity.get(identity)
-            ),
-            "",
-        )
+        candidate_requisitions = set(payload["requisition_ids"])
+        candidate_keys = company_store.posting_identity_keys(candidate.get("url", ""))
+        payload["discovery_candidate_id"] = ""
+        for discovery_entry in discovery_entries_by_company_id.get(candidate_company_id, []):
+            discovery_requisitions = discovery_entry["requisition_ids"]
+            if candidate_requisitions and discovery_requisitions:
+                matched = bool(candidate_requisitions & discovery_requisitions)
+            else:
+                matched = bool(candidate_keys & discovery_entry["identity_keys"])
+            if matched:
+                payload["discovery_candidate_id"] = discovery_entry["id"]
+                break
         enriched.append(payload)
     return enriched
 

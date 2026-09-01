@@ -3418,6 +3418,11 @@
       min-width: 42px;
     }
 
+    .candidate-score-cell .cell-subtle {
+      min-width: 72px;
+      white-space: normal;
+    }
+
     .cell-subtle {
       display: block;
       margin-top: 3px;
@@ -3705,6 +3710,14 @@
       display: block;
       margin-top: 2px;
       font-size: 12px;
+    }
+
+    .next-action-cell .warning-text {
+      color: var(--warning-strong, #9a5b00);
+      display: block;
+      font-size: 0.75rem;
+      margin-top: 0.2rem;
+      max-width: 24rem;
     }
 
     .empty-state {

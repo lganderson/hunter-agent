@@ -143,6 +143,7 @@ export function PostingsPage({ data }: { data: AppState }) {
                     <td className="next-action-cell">
                       <strong>{app.next_action || "None"}</strong>
                       <span className={`due ${dueClass}`}>{dueLabel(app) || "No due date"}</span>
+                      {app.next_action_warning ? <span className="warning-text">{app.next_action_warning}</span> : null}
                     </td>
                   </tr>
                 );

@@ -17,6 +17,8 @@ export type Application = {
   next_action_id: string;
   next_action: string;
   next_action_date: string;
+  open_action_count: number;
+  next_action_warning: string;
   contact: string;
   resume_version: string;
   cover_letter: string;
@@ -298,6 +300,9 @@ export type CompanyPostingCandidate = {
   notes: string;
   lane_match: string;
   discovery_candidate_id: string;
+  review_state: "ready" | "needs-detail" | "needs-freshness" | "failed-extraction";
+  requisition_ids: string[];
+  matching_posting_ids: string[];
 };
 
 export type CompanyCareerScan = {
@@ -389,6 +394,10 @@ export type DiscoveryCandidate = {
   detail_state: DiscoveryDetailState;
   detail_gaps: DiscoveryDetailGap[];
   detail_next_action: string;
+  review_state: "ready" | "needs-detail" | "needs-freshness" | "failed-extraction";
+  review_next_action: string;
+  requisition_ids: string[];
+  matching_posting_ids: string[];
   fit_score: string;
   fit_summary: string;
   fit_checked_at: string;

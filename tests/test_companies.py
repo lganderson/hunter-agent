@@ -345,6 +345,9 @@ class HunterCompaniesTest(unittest.TestCase):
                     "status": "new",
                     "processing_status": "ready",
                     "fit_score": "70",
+                    "location": "Remote; United States",
+                    "description_text": "Responsibilities and requirements. " * 30,
+                    "freshness_status": "confirmed-open",
                 }
             )
             rows.append(row)
@@ -711,6 +714,8 @@ class HunterCompaniesTest(unittest.TestCase):
             "url": "https://example.com/jobs/product-manager-ai-platform",
             "location": "Remote; United States",
             "status": "new",
+            "description_excerpt": "Responsibilities and requirements. " * 30,
+            "scan_state": "current",
         })
         repository.write_company_posting_candidates([candidate])
 
@@ -864,6 +869,66 @@ class HunterCompaniesTest(unittest.TestCase):
             "url": "https://jobs.smartrecruiters.com/Ubisoft2/744000133930119-technical-program-manager-ai-initiatives",
         }, tracked))
 
+    def test_distinct_requisitions_override_shared_company_and_careers_url(self):
+        sqlite_store.initialize()
+        waymo = companies.upsert_company("", {"name": "Waymo"})
+        best_buy = companies.upsert_company("", {"name": "Best Buy"})
+        repository.write_applications([
+            application_row({
+                "id": "A0064",
+                "company": "Waymo",
+                "company_id": waymo["id"],
+                "role": "Senior Technical Program Manager, Simulation",
+                "source_url": "https://careers.withwaymo.com/jobs?gh_jid=8026543",
+            }),
+            application_row({
+                "id": "A0009",
+                "company": "Best Buy",
+                "company_id": best_buy["id"],
+                "role": "Senior Product Manager - Customer Data and AI Enablement",
+                "source_url": "https://jobs.bestbuy.com/bby?id=job_details&req_id=1024774BR",
+            }),
+        ])
+
+        self.assertFalse(companies.candidate_is_tracked(
+            {
+                "title": "Senior Product Manager, Autonomous Vehicle Reliability",
+                "url": "https://careers.withwaymo.com/jobs?gh_jid=8109626",
+            },
+            companies.tracked_posting_context(waymo),
+        ))
+        self.assertFalse(companies.candidate_is_tracked(
+            {
+                "title": "Senior Product Manager - Recommendations and Personalization",
+                "url": "https://jobs.bestbuy.com/bby?id=job_details&req_id=1039998BR",
+            },
+            companies.tracked_posting_context(best_buy),
+        ))
+        self.assertEqual(
+            companies.normalized_requisition_ids(
+                "https://jobs.bestbuy.com/bby?id=job_details&req_id=1039998BR"
+            ),
+            {"1039998br"},
+        )
+
+    def test_work_mode_uses_explicit_remote_language_in_posting_body(self):
+        candidate = companies.normalized_candidate(
+            {
+                "title": "Design Program Manager, Context Platform",
+                "url": "https://job-boards.greenhouse.io/figma/jobs/6135395004?gh_jid=6135395004",
+                "location": "San Francisco, CA; New York, NY; United States",
+                "description": (
+                    "This role can be held from one of our US hubs or remotely in the United States. "
+                    "New hires attend in-person onboarding. "
+                    "Responsibilities include leading cross-functional design programs."
+                ),
+            },
+            "greenhouse_board",
+        )
+
+        self.assertEqual(candidate["work_mode"], "Remote")
+        self.assertEqual(candidate["location"], "San Francisco, CA; New York, NY; United States")
+
     def test_check_company_postings_skips_existing_company_title_when_url_shape_changes(self):
         sqlite_store.initialize()
         company = companies.upsert_company("", {"name": "Example", "careers_url": "https://example.com/careers"})
@@ -904,12 +969,17 @@ class HunterCompaniesTest(unittest.TestCase):
             fetcher=lambda _url: {"status": 200, "final_url": "https://example.com/careers", "html": html, "error": ""},
         )
 
-        recommended = result["recommended"]
         candidates = result["candidates"]
+        best_fit = next(
+            candidate
+            for candidate in candidates
+            if candidate["title"] == "Senior Technical Program Manager, AI Platform"
+        )
         low_fit = next(candidate for candidate in candidates if candidate["title"] == "Account Executive")
-        self.assertEqual(recommended[0]["title"], "Senior Technical Program Manager, AI Platform")
-        self.assertGreater(int(recommended[0]["fit_score"]), int(low_fit["fit_score"] or "0"))
-        self.assertIn("technical program manager", recommended[0]["fit_summary"])
+        self.assertEqual(result["recommended"], [])
+        self.assertEqual(companies.candidate_review_state(best_fit), "needs-detail")
+        self.assertGreater(int(best_fit["fit_score"]), int(low_fit["fit_score"] or "0"))
+        self.assertIn("technical program manager", best_fit["fit_summary"])
         self.assertEqual(low_fit["fit_score"], "0")
 
     def test_extract_candidate_links_skips_non_job_careers_and_blog_links(self):
@@ -2281,7 +2351,16 @@ class HunterCompaniesTest(unittest.TestCase):
                                 "slug": "5315",
                                 "req_id": "5315",
                                 "title": "Staff Product Manager",
-                                "description": "Lead GitHub Copilot AI platform strategy for developer tools.",
+                                "description": (
+                                    "Lead GitHub Copilot AI platform strategy for developer tools and partner APIs. "
+                                    "Define the product vision, roadmap, success measures, and launch plans with "
+                                    "engineering, design, research, security, and go-to-market partners. Candidates "
+                                    "should have extensive product management experience delivering developer-facing "
+                                    "platforms, strong technical judgment about APIs and AI systems, and demonstrated "
+                                    "ability to turn customer research into prioritized requirements. The role owns "
+                                    "cross-functional execution, executive communication, risk management, adoption "
+                                    "measurement, and continuous improvement across a globally distributed team."
+                                ),
                                 "country": "United States",
                                 "full_location": "Remote, United States",
                                 "categories": [{"name": "Product"}],
@@ -2373,7 +2452,8 @@ class HunterCompaniesTest(unittest.TestCase):
         self.assertEqual(calls, ["https://jobs.ashbyhq.com/openai"])
         self.assertEqual([row["title"] for row in result["new"]], ["Product Manager, API Agents"])
         self.assertEqual(result["new"][0]["url"], "https://jobs.ashbyhq.com/openai/pm-1")
-        self.assertEqual(result["recommended"][0]["title"], "Product Manager, API Agents")
+        self.assertEqual(companies.candidate_review_state(result["new"][0]), "failed-extraction")
+        self.assertEqual(result["recommended"], [])
 
     def test_branded_careers_page_resolves_embedded_ashby_board(self):
         sqlite_store.initialize()
@@ -3233,7 +3313,7 @@ class HunterCompaniesTest(unittest.TestCase):
 
         self.assertGreaterEqual(int(scored["fit_score"]), companies.FIT_RECOMMENDATION_THRESHOLD)
 
-    def test_check_company_postings_recommends_only_latest_seen_candidates(self):
+    def test_check_company_postings_does_not_recommend_latest_candidate_without_detail(self):
         sqlite_store.initialize()
         resume = "Senior Technical Program Manager with AI platform experience."
         settings.save_resume_upload("resume.txt", base64.b64encode(resume.encode()).decode())
@@ -3256,7 +3336,9 @@ class HunterCompaniesTest(unittest.TestCase):
             fetcher=lambda _url: {"status": 200, "final_url": "https://example.com/careers", "html": html, "error": ""},
         )
 
-        self.assertEqual([row["title"] for row in result["recommended"]], ["Senior Technical Program Manager, Current Search"])
+        self.assertEqual(result["recommended"], [])
+        current = next(row for row in result["candidates"] if row["title"].endswith("Current Search"))
+        self.assertEqual(companies.candidate_review_state(current), "needs-detail")
 
     def test_recommended_candidates_are_limited_for_review(self):
         rows = []
@@ -3267,6 +3349,8 @@ class HunterCompaniesTest(unittest.TestCase):
                 "url": f"https://example.com/jobs/{index}",
                 "status": "new",
                 "fit_score": "90",
+                "description_excerpt": "Detailed role requirements and responsibilities. " * 20,
+                "scan_state": "current",
             })
 
         recommended = companies.recommended_candidates(rows)
@@ -3438,6 +3522,8 @@ class HunterCompaniesTest(unittest.TestCase):
                 "url": f"https://example.com/jobs/{candidate_id.lower()}",
                 "status": status,
                 "fit_score": fit_score,
+                "description_excerpt": "Responsibilities and requirements. " * 30,
+                "scan_state": "current",
             })
             candidates.append(candidate)
         repository.write_company_posting_candidates(candidates)
@@ -3452,6 +3538,68 @@ class HunterCompaniesTest(unittest.TestCase):
         self.assertEqual(payload["count"], 1)
         self.assertEqual(payload["candidates"][0]["id"], "CP0001")
         self.assertTrue(payload["candidates"][0]["recommended"])
+
+    def test_mcp_company_candidates_default_to_tracked_companies(self):
+        sqlite_store.initialize()
+        tracked = companies.upsert_company(
+            "", {"name": "Tracked", "tracking_status": "tracked"}
+        )
+        discovered = companies.upsert_company(
+            "", {"name": "Discovered", "tracking_status": "discovered"}
+        )
+        candidates = []
+        for index, company in enumerate([tracked, discovered], start=1):
+            candidate = {field: "" for field in schema.COMPANY_POSTING_CANDIDATE_FIELDS}
+            candidate.update({
+                "id": f"CP{index:04d}",
+                "company_id": company["id"],
+                "title": f"Role {index}",
+                "url": f"https://example.com/jobs/{index}",
+                "status": "new",
+                "description_excerpt": "Responsibilities and requirements. " * 30,
+                "scan_state": "current",
+            })
+            candidates.append(candidate)
+        repository.write_company_posting_candidates(candidates)
+
+        default_payload = json.loads(
+            mcp_server.tool_list_company_candidates({})["content"][0]["text"]
+        )
+        all_payload = json.loads(
+            mcp_server.tool_list_company_candidates({"tracking_status": "all"})["content"][0]["text"]
+        )
+
+        self.assertEqual(default_payload["tracking_status"], "tracked")
+        self.assertEqual([row["company_id"] for row in default_payload["candidates"]], [tracked["id"]])
+        self.assertEqual(default_payload["other_tracking_status_candidate_count"], 1)
+        self.assertEqual({row["company_id"] for row in all_payload["candidates"]}, {tracked["id"], discovered["id"]})
+
+    def test_company_recommendations_require_usable_detail_and_current_freshness(self):
+        base = {
+            "status": "new",
+            "fit_score": "90",
+            "description_excerpt": "Responsibilities and requirements. " * 30,
+            "scan_state": "current",
+        }
+        ready = {**base, "id": "CP0001", "title": "Ready"}
+        needs_detail = {**base, "id": "CP0002", "title": "Needs detail", "description_excerpt": "Too short"}
+        needs_freshness = {**base, "id": "CP0003", "title": "Needs freshness", "scan_state": "not-seen"}
+        failed = {
+            **base,
+            "id": "CP0004",
+            "title": "Failed extraction",
+            "description_excerpt": "",
+            "source_platform": "ashby",
+        }
+
+        self.assertEqual(companies.candidate_review_state(ready), "ready")
+        self.assertEqual(companies.candidate_review_state(needs_detail), "needs-detail")
+        self.assertEqual(companies.candidate_review_state(needs_freshness), "needs-freshness")
+        self.assertEqual(companies.candidate_review_state(failed), "failed-extraction")
+        self.assertEqual(
+            [row["id"] for row in companies.recommended_candidates([ready, needs_detail, needs_freshness, failed])],
+            ["CP0001"],
+        )
 
     def test_candidate_review_contract_gates_company_interest_statuses(self):
         sqlite_store.initialize()

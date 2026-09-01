@@ -436,6 +436,26 @@ class HunterWorkflowTest(unittest.TestCase):
         self.assertIn('"next_action": ""', payload)
         self.assertIn('"next_action_date": ""', payload)
 
+    def test_considering_posting_warns_unless_exactly_one_action_is_open(self):
+        sqlite_store.initialize()
+        repository.write_applications([
+            application_row({"id": "A0001", "stage": "considering"}),
+            application_row({"id": "A0002", "stage": "considering"}),
+            application_row({"id": "A0003", "stage": "applied"}),
+        ])
+        repository.write_actions([
+            action_row({"id": "T0001", "application_id": "A0002", "title": "First"}),
+            action_row({"id": "T0002", "application_id": "A0002", "title": "Second"}),
+        ])
+
+        rows = {row["id"]: row for row in app_state.read_applications()}
+
+        self.assertEqual(rows["A0001"]["open_action_count"], 0)
+        self.assertIn("found 0", rows["A0001"]["next_action_warning"])
+        self.assertEqual(rows["A0002"]["open_action_count"], 2)
+        self.assertIn("found 2", rows["A0002"]["next_action_warning"])
+        self.assertEqual(rows["A0003"]["next_action_warning"], "")
+
     def test_mcp_ingest_posting_keeps_cwd_unset_for_safe_macos_spawn(self):
         completed = Mock(returncode=0, stdout="Ingested A0001", stderr="")
 
