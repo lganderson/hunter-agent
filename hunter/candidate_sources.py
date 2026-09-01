@@ -2,18 +2,16 @@
 
 import json
 import re
-import threading
 from urllib.parse import urlencode, urlparse
 
 from . import agent, api_usage, candidate_eligibility, companies, repository, settings, storage
 
 
-OPENAI_RESULT_LIMIT = 50
-OPENAI_RESULTS_PER_FAMILY = 20
+OPENAI_RESULTS_PER_FAMILY = 10
+OPENAI_FALLBACK_MIN_RESULTS_PER_FAMILY = 5
+OPENAI_DISCOVERY_MODEL = "gpt-5.6-luna"
 ADZUNA_RESULTS_PER_QUERY = 25
 ADZUNA_QUERY_LIMIT = 20
-OPENAI_DISCOVERY_ATTEMPTS = 2
-OPENAI_DISCOVERY_ATTEMPT_TIMEOUT_SECONDS = 15
 OPENAI_BLOCKED_HOSTS = {
     "adzuna.com",
     "glassdoor.com",
@@ -28,7 +26,7 @@ OPENAI_RESPONSE_SCHEMA = {
     "properties": {
         "roles": {
             "type": "array",
-            "maxItems": OPENAI_RESULT_LIMIT,
+            "maxItems": OPENAI_RESULTS_PER_FAMILY,
             "items": {
                 "type": "object",
                 "additionalProperties": False,
@@ -85,56 +83,6 @@ def provider_bundle(search, family_definitions, *, fetcher=None, openai_requeste
     )
     _progress(progress, "Searching direct company career sources…", 1, 3, "direct-ats")
 
-    try:
-        openai_results = _openai_results_with_retry(
-            search,
-            family_definitions,
-            requester=openai_requester,
-        )
-        results.extend(openai_results)
-        selected_ids = set(search.get("role_family_ids", []))
-        selected_families = [
-            family
-            for family in family_definitions
-            if not selected_ids or family.get("id") in selected_ids
-        ]
-        for family in selected_families:
-            family_id = family.get("id", "")
-            sources.append(
-                {
-                    "source": "openai-web",
-                    "label": "OpenAI source-backed web search",
-                    "query_family": family_id,
-                    "query_family_label": family.get("label", family_id),
-                    "lane_id": "all",
-                    "lane_label": "All configured locations",
-                    "query": search.get("name", ""),
-                    "found_count": sum(
-                        family_id in result.get("role_family_ids", [])
-                        for result in openai_results
-                    ),
-                    "page_count": 1,
-                    "engine": "openai-web-search",
-                }
-            )
-    except (RuntimeError, ValueError, TimeoutError, OSError) as exc:
-        errors.append(f"OpenAI web search: {storage.clean(str(exc))}")
-        sources.append(
-            {
-                "source": "openai-web",
-                "label": "OpenAI source-backed web search",
-                "query_family": "all",
-                "query_family_label": "All selected role families",
-                "lane_id": "all",
-                "lane_label": "All configured locations",
-                "query": search.get("name", ""),
-                "found_count": 0,
-                "page_count": 0,
-                "engine": "openai-web-search",
-            }
-        )
-    _progress(progress, "Searching the web for direct employer postings…", 2, 3, "openai-web")
-
     credentials = settings.adzuna_credentials()
     if credentials["app_id"] and credentials["app_key"]:
         adzuna_results, adzuna_sources, adzuna_errors = adzuna_role_results(
@@ -162,53 +110,85 @@ def provider_bundle(search, family_definitions, *, fetcher=None, openai_requeste
             }
         )
         errors.append("Adzuna is not configured. Add its App ID and App Key in Settings to include those results.")
-    _progress(progress, "Searching Jobs by Adzuna…", 3, 3, "adzuna")
+    _progress(progress, "Searching Jobs by Adzuna…", 2, 3, "adzuna")
+
+    selected_families = _selected_families(search, family_definitions)
+    fallback_families = _undercovered_families(selected_families, results)
+    fallback_ids = {family.get("id", "") for family in fallback_families}
+    openai_results = []
+    if fallback_families:
+        fallback_search = {
+            **search,
+            "role_family_ids": [family.get("id", "") for family in fallback_families],
+        }
+        try:
+            # Do not retry automatically: a timed-out request may still be running and billable.
+            openai_results = openai_role_results(
+                fallback_search,
+                family_definitions,
+                requester=openai_requester,
+            )
+            results.extend(openai_results)
+        except (RuntimeError, ValueError, TimeoutError, OSError) as exc:
+            errors.append(f"OpenAI web search: {storage.clean(str(exc))}")
+
+    for family in selected_families:
+        family_id = family.get("id", "")
+        attempted = family_id in fallback_ids
+        sources.append(
+            {
+                "source": "openai-web",
+                "label": "OpenAI source-backed web search",
+                "query_family": family_id,
+                "query_family_label": family.get("label", family_id),
+                "lane_id": "all",
+                "lane_label": "All configured locations",
+                "query": search.get("name", ""),
+                "found_count": sum(
+                    family_id in result.get("role_family_ids", [])
+                    for result in openai_results
+                ),
+                "page_count": 1 if attempted and not any(
+                    error.startswith("OpenAI web search:") for error in errors
+                ) else 0,
+                "engine": "openai-web-search" if attempted else "skipped-sufficient-coverage",
+                "skipped": not attempted,
+            }
+        )
+    _progress(
+        progress,
+        "Filling uncovered role families from direct employer postings…",
+        3,
+        3,
+        "openai-web",
+    )
     return {"results": results, "sources": sources, "errors": errors}
 
 
-def _openai_results_with_retry(search, family_definitions, *, requester=None):
-    last_error = None
-    for attempt in range(OPENAI_DISCOVERY_ATTEMPTS):
-        try:
-            return _run_openai_results_attempt(
-                search,
-                family_definitions,
-                requester=requester,
-            )
-        except (TimeoutError, OSError) as exc:
-            last_error = exc
-        except RuntimeError as exc:
-            if "could not be completed" not in str(exc).lower():
-                raise
-            last_error = exc
-        if attempt + 1 < OPENAI_DISCOVERY_ATTEMPTS:
+def _selected_families(search, family_definitions):
+    selected_ids = set(search.get("role_family_ids", []))
+    return [
+        family
+        for family in family_definitions
+        if not selected_ids or family.get("id") in selected_ids
+    ]
+
+
+def _undercovered_families(selected_families, results):
+    urls_by_family = {family.get("id", ""): set() for family in selected_families}
+    for result in results:
+        url = companies.normalize_url(result.get("url", ""))
+        if not url:
             continue
-    raise last_error
-
-
-def _run_openai_results_attempt(search, family_definitions, *, requester=None):
-    outcome = {}
-
-    def run():
-        try:
-            outcome["results"] = openai_role_results(
-                search,
-                family_definitions,
-                requester=requester,
-            )
-        except BaseException as exc:  # noqa: BLE001 - preserve provider errors for the caller.
-            outcome["error"] = exc
-
-    worker = threading.Thread(target=run, name="hunter-openai-discovery", daemon=True)
-    worker.start()
-    worker.join(OPENAI_DISCOVERY_ATTEMPT_TIMEOUT_SECONDS)
-    if worker.is_alive():
-        raise TimeoutError(
-            f"OpenAI web search exceeded {OPENAI_DISCOVERY_ATTEMPT_TIMEOUT_SECONDS} seconds."
-        )
-    if "error" in outcome:
-        raise outcome["error"]
-    return outcome.get("results", [])
+        for family_id in result.get("role_family_ids", []):
+            if family_id in urls_by_family:
+                urls_by_family[family_id].add(url)
+    return [
+        family
+        for family in selected_families
+        if len(urls_by_family.get(family.get("id", ""), set()))
+        < OPENAI_FALLBACK_MIN_RESULTS_PER_FAMILY
+    ]
 
 
 def ats_inventory_results(search, family_definitions):
@@ -305,12 +285,7 @@ def matching_family_ids(title, search, family_definitions):
 
 def openai_role_results(search, family_definitions, requester=None):
     config = agent._settings()
-    selected_ids = set(search.get("role_family_ids", []))
-    selected_families = [
-        family
-        for family in family_definitions
-        if not selected_ids or family.get("id") in selected_ids
-    ]
+    selected_families = _selected_families(search, family_definitions)
     lane_lines = "\n".join(
         f"- {lane.get('id')}: {lane.get('location')} ({', '.join(lane.get('work_modes', []))})"
         for lane in search.get("lanes", [])
@@ -337,11 +312,11 @@ def openai_role_results(search, family_definitions, requester=None):
             f"Excluded title terms: {excluded}\n"
         )
         payload = {
-            "model": config["model"],
+            "model": OPENAI_DISCOVERY_MODEL,
             "input": prompt,
-            "tools": [{"type": "web_search", "search_context_size": "medium"}],
+            "tools": [{"type": "web_search", "search_context_size": "low"}],
             "tool_choice": "required",
-            "max_tool_calls": 8,
+            "max_tool_calls": 4,
             "include": ["web_search_call.action.sources"],
             "text": {
                 "format": {
@@ -351,7 +326,7 @@ def openai_role_results(search, family_definitions, requester=None):
                     "schema": OPENAI_RESPONSE_SCHEMA,
                 }
             },
-            "max_output_tokens": 10_000,
+            "max_output_tokens": 5_000,
             "reasoning": {"effort": "low"},
             "store": False,
             "metadata": {
@@ -367,9 +342,13 @@ def openai_role_results(search, family_definitions, requester=None):
         )
         api_usage.log_usage(
             "candidate-discovery",
-            response.get("model") or config["model"],
+            response.get("model") or OPENAI_DISCOVERY_MODEL,
             response,
             operation="openai-web-search",
+            context={
+                "search_id": search.get("id", ""),
+                "role_family_id": family_id,
+            },
         )
         try:
             decoded = json.loads(agent._output_text(response))

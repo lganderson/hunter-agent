@@ -81,7 +81,7 @@ one as next, use hunter_make_next_action instead of editing the posting."""
 
 CONTEXT_TEXT_CHARS = 240
 CONTEXT_QUERY_LIMIT = 12
-DISCOVERY_REQUEST_TIMEOUT_SECONDS = 20
+DISCOVERY_REQUEST_TIMEOUT_SECONDS = 60
 
 
 def _settings():

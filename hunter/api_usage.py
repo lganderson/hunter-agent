@@ -41,6 +41,7 @@ def log_usage(
     tool_round=0,
     tool_call_count=0,
     prompt_cache_key="",
+    context=None,
 ):
     metrics = usage_metrics(response)
     search_calls = web_search_call_count(response)
@@ -59,6 +60,12 @@ def log_usage(
         "tool_call_count": int(tool_call_count or 0),
         "web_search_call_count": search_calls,
         "prompt_cache_key": storage.clean(prompt_cache_key),
+        "response_id": storage.clean((response or {}).get("id", "")),
+        "context": {
+            storage.clean(key): storage.clean(value)
+            for key, value in (context or {}).items()
+            if storage.clean(key) and storage.clean(value)
+        },
         **metrics,
         "uncached_input_tokens": uncached,
     }

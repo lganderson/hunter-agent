@@ -1,5 +1,4 @@
 import json
-import time
 import unittest
 from urllib.parse import parse_qs, urlparse
 from unittest.mock import patch
@@ -55,36 +54,86 @@ class CandidateSourcesTest(unittest.TestCase):
         self.assertIn("OpenAI web search: read timed out", bundle["errors"])
         self.assertEqual(
             [source["engine"] for source in bundle["sources"]],
-            ["direct-ats", "openai-web-search", "not-configured"],
+            ["direct-ats", "not-configured", "openai-web-search"],
         )
 
-    def test_provider_bundle_retries_one_transient_openai_failure(self):
+    def test_provider_bundle_does_not_retry_a_timed_out_openai_request(self):
         ats_result = {"provider": "ats", "url": "https://jobs.example.com/jobs/123", "title": "TPM"}
         with (
             patch("hunter.candidate_sources.ats_inventory_results", return_value=[ats_result]),
             patch("hunter.candidate_sources.settings.adzuna_credentials", return_value={"app_id": "", "app_key": ""}),
             patch(
                 "hunter.candidate_sources.openai_role_results",
-                side_effect=[TimeoutError("read timed out"), []],
+                side_effect=TimeoutError("read timed out"),
             ) as search,
         ):
             bundle = candidate_sources.provider_bundle(SEARCH, FAMILIES)
 
-        self.assertEqual(search.call_count, 2)
+        self.assertEqual(search.call_count, 1)
         self.assertEqual(bundle["results"], [ats_result])
-        self.assertEqual(bundle["errors"], ["Adzuna is not configured. Add its App ID and App Key in Settings to include those results."])
+        self.assertIn("OpenAI web search: read timed out", bundle["errors"])
 
-    def test_openai_attempt_watchdog_returns_without_waiting_for_stuck_request(self):
-        def blocked_search(*_args, **_kwargs):
-            time.sleep(1)
-            return []
+    def test_provider_bundle_skips_openai_when_cheap_sources_cover_family(self):
+        ats_results = [
+            {
+                "provider": "ats",
+                "url": f"https://jobs.example.com/jobs/{index}",
+                "title": "Technical Program Manager",
+                "role_family_ids": ["technical-program"],
+            }
+            for index in range(candidate_sources.OPENAI_FALLBACK_MIN_RESULTS_PER_FAMILY)
+        ]
 
         with (
-            patch("hunter.candidate_sources.openai_role_results", side_effect=blocked_search),
-            patch("hunter.candidate_sources.OPENAI_DISCOVERY_ATTEMPT_TIMEOUT_SECONDS", 0.01),
+            patch("hunter.candidate_sources.ats_inventory_results", return_value=ats_results),
+            patch("hunter.candidate_sources.settings.adzuna_credentials", return_value={"app_id": "", "app_key": ""}),
+            patch("hunter.candidate_sources.openai_role_results") as search,
         ):
-            with self.assertRaises(TimeoutError):
-                candidate_sources._run_openai_results_attempt(SEARCH, FAMILIES)
+            bundle = candidate_sources.provider_bundle(SEARCH, FAMILIES)
+
+        search.assert_not_called()
+        self.assertEqual(bundle["results"], ats_results)
+        self.assertEqual(bundle["sources"][-1]["engine"], "skipped-sufficient-coverage")
+        self.assertTrue(bundle["sources"][-1]["skipped"])
+
+    def test_provider_bundle_uses_openai_only_for_undercovered_families(self):
+        product_family = {
+            "id": "product-platform",
+            "label": "Product platform leadership",
+            "terms": ["product manager"],
+            "strong_terms": ["product manager"],
+        }
+        search_config = {
+            **SEARCH,
+            "role_family_ids": ["technical-program", "product-platform"],
+        }
+        ats_results = [
+            {
+                "provider": "ats",
+                "url": f"https://jobs.example.com/jobs/{index}",
+                "title": "Technical Program Manager",
+                "role_family_ids": ["technical-program"],
+            }
+            for index in range(candidate_sources.OPENAI_FALLBACK_MIN_RESULTS_PER_FAMILY)
+        ]
+
+        with (
+            patch("hunter.candidate_sources.ats_inventory_results", return_value=ats_results),
+            patch("hunter.candidate_sources.settings.adzuna_credentials", return_value={"app_id": "", "app_key": ""}),
+            patch("hunter.candidate_sources.openai_role_results", return_value=[]) as openai_results,
+        ):
+            bundle = candidate_sources.provider_bundle(
+                search_config,
+                [*FAMILIES, product_family],
+            )
+
+        fallback_search = openai_results.call_args.args[0]
+        self.assertEqual(fallback_search["role_family_ids"], ["product-platform"])
+        openai_sources = [source for source in bundle["sources"] if source["source"] == "openai-web"]
+        self.assertEqual(
+            [source["engine"] for source in openai_sources],
+            ["skipped-sufficient-coverage", "openai-web-search"],
+        )
 
     def test_ats_inventory_reuses_current_direct_candidates(self):
         candidates = [
@@ -196,7 +245,16 @@ class CandidateSourcesTest(unittest.TestCase):
         self.assertEqual([row["url"] for row in results], [direct_url])
         self.assertEqual(results[0]["provider"], "openai")
         self.assertEqual(captured["payload"]["metadata"]["feature"], "candidate-discovery")
+        self.assertEqual(captured["payload"]["model"], "gpt-5.6-luna")
+        self.assertEqual(captured["payload"]["tools"][0]["search_context_size"], "low")
+        self.assertEqual(captured["payload"]["max_tool_calls"], 4)
+        self.assertEqual(captured["payload"]["max_output_tokens"], 5_000)
+        self.assertIn("Return at most 10 roles", captured["payload"]["input"])
         log_usage.assert_called_once()
+        self.assertEqual(
+            log_usage.call_args.kwargs["context"],
+            {"search_id": "DS0001", "role_family_id": "technical-program"},
+        )
 
     def test_adzuna_queries_precisely_and_preserves_redirect_url(self):
         captured = {}
