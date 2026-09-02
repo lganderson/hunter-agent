@@ -40,10 +40,8 @@ export function ActionsPage({ data, refresh }: ActionsPageProps) {
         action.role,
         action.type,
         action.title,
-        action.description,
         action.status,
-        action.priority,
-        action.notes
+        action.priority
       ].join(" ").toLowerCase();
       const query = search.toLowerCase();
       if (query && !haystack.includes(query)) return false;
@@ -83,14 +81,14 @@ export function ActionsPage({ data, refresh }: ActionsPageProps) {
   }
 
   return (
-    <section className="view-section" id="actions-view" aria-label="Actions">
+    <section className="view-section" id="actions-view" aria-labelledby="actions-title">
       <article className="panel">
-        <div className="panel-header"><h2 className="panel-title">Actions</h2></div>
+        <div className="panel-header"><h1 className="panel-title" id="actions-title">Actions</h1></div>
         <div className="toolbar" aria-label="Action filters">
           <label className="search">
             <span className="sr-only">Search actions</span>
             <SearchIcon />
-            <input value={search} onChange={event => updateViewParams({ q: event.target.value || null })} type="search" placeholder="Search actions, companies, notes..." />
+            <input value={search} onChange={event => updateViewParams({ q: event.target.value || null })} type="search" placeholder="Search actions and companies..." />
           </label>
           <Filter label="Type" value={type} values={unique(data.actions, "type")} onChange={value => updateViewParams({ type: value === "all" ? null : value })} />
           <Filter label="Status" value={status} values={["open", ...unique(data.actions, "status").filter(item => item !== "open")]} onChange={value => updateViewParams({ status: value === "open" ? null : value })} />

@@ -1516,6 +1516,69 @@ TOOLS = {
 }
 
 
+READ_ONLY_TOOLS = {
+    "hunter_list_postings",
+    "hunter_get_posting",
+    "hunter_list_actions",
+    "hunter_get_resume_text",
+    "hunter_get_settings",
+    "hunter_list_contacts",
+    "hunter_list_companies",
+    "hunter_get_company",
+    "hunter_get_company_candidate",
+    "hunter_list_company_candidates",
+    "hunter_get_discovery_candidate",
+    "hunter_list_discovery_candidates",
+    "hunter_list_discovery_searches",
+}
+
+OPEN_WORLD_TOOLS = {
+    "hunter_ingest_posting",
+    "hunter_research_company",
+    "hunter_check_company_postings",
+    "hunter_run_discovery_search",
+    "hunter_run_discovery_searches",
+    "hunter_refresh_discovery_candidates",
+}
+
+ADDITIVE_TOOLS = {
+    "hunter_create_action",
+    "hunter_link_contact",
+    "hunter_link_company_contact",
+}
+
+IDEMPOTENT_TOOLS = {
+    "hunter_update_action",
+    "hunter_update_action_fields",
+    "hunter_make_next_action",
+    "hunter_update_application",
+    "hunter_update_settings",
+    "hunter_link_contact",
+    "hunter_unlink_contact",
+    "hunter_archive_company",
+    "hunter_restore_company",
+    "hunter_track_company",
+    "hunter_untrack_company",
+    "hunter_update_company_candidate",
+    "hunter_link_company_contact",
+    "hunter_unlink_company_contact",
+}
+
+
+def tool_annotations(name):
+    """Return conservative MCP behavior hints for a trusted local server."""
+    if name not in TOOLS:
+        raise KeyError(f"Unknown Hunter tool: {name}")
+    read_only = name in READ_ONLY_TOOLS
+    return {
+        "title": name.removeprefix("hunter_").replace("_", " ").title(),
+        "readOnlyHint": read_only,
+        "destructiveHint": False if read_only else name not in ADDITIVE_TOOLS,
+        "idempotentHint": False if read_only else name in IDEMPOTENT_TOOLS,
+        "openWorldHint": name in OPEN_WORLD_TOOLS,
+    }
+
+
 def initialize_result(params):
     sqlite_store.initialize()
     client_version = (params or {}).get("protocolVersion")
@@ -1534,6 +1597,7 @@ def list_tools_result():
                 "name": name,
                 "description": definition["description"],
                 "inputSchema": definition["inputSchema"],
+                "annotations": tool_annotations(name),
             }
         )
     return {"tools": tools}

@@ -9,6 +9,7 @@ import subprocess
 import sys
 import unicodedata
 from datetime import datetime
+from functools import lru_cache
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
@@ -106,6 +107,7 @@ def now_scan_iso():
     return datetime.now().isoformat(timespec="microseconds")
 
 
+@lru_cache(maxsize=16_384)
 def normalized_key(value):
     return re.sub(r"[^a-z0-9]+", " ", storage.clean(value).lower()).strip()
 
@@ -271,13 +273,15 @@ def upsert_company(company_id="", updates=None):
         row = next((item for item in rows if item.get("id", "").upper() == wanted), None)
         if row is None:
             raise ValueError(f"No company found with id {company_id}.")
-    if row is None:
+    is_new = row is None
+    if is_new:
         row = {field: "" for field in schema.COMPANY_FIELDS}
         row["id"] = next_company_id(rows)
         row["interest_status"] = schema.DEFAULT_COMPANY_INTEREST_STATUS
         row["tracking_status"] = schema.DEFAULT_COMPANY_TRACKING_STATUS
         row["company_metadata_suggestions_json"] = "[]"
         rows.append(row)
+    original = dict(row)
 
     metadata_changed_fields = set()
     for field, value in (updates or {}).items():
@@ -327,7 +331,16 @@ def upsert_company(company_id="", updates=None):
             sort_keys=True,
         )
 
-    repository.write_companies(rows)
+    if is_new:
+        row = repository.insert_companies([row])[0]
+    else:
+        changed = {
+            field: row.get(field, "")
+            for field in schema.COMPANY_FIELDS
+            if field != "id" and row.get(field, "") != original.get(field, "")
+        }
+        if changed:
+            repository.update_company_fields(row.get("id", ""), changed)
     associate_matching_postings(row.get("id", ""))
     return get_company(row.get("id", ""))
 
@@ -373,6 +386,7 @@ def update_company_metadata(company_id, metadata=None, source_url="", checked_at
     row = next((item for item in rows if item.get("id", "").upper() == wanted), None)
     if row is None:
         raise ValueError(f"No company found with id {company_id}.")
+    original = dict(row)
 
     incoming = metadata or {}
     normalized = {
@@ -420,10 +434,18 @@ def update_company_metadata(company_id, metadata=None, source_url="", checked_at
             ensure_ascii=False,
             sort_keys=True,
         )
-        repository.write_companies(rows)
+        repository.update_company_fields(
+            row.get("id", ""),
+            {
+                field: row.get(field, "")
+                for field in schema.COMPANY_FIELDS
+                if field != "id" and row.get(field, "") != original.get(field, "")
+            },
+        )
     return get_company(row.get("id", ""))
 
 
+@lru_cache(maxsize=16_384)
 def company_domain(value):
     host = urlparse(normalize_url(value)).netloc.lower().removeprefix("www.")
     return host
@@ -705,11 +727,7 @@ def merge_companies(keep_company_id, merge_company_id):
     ]
     keep["notes"] = "\n".join(dict.fromkeys(value for value in notes if value))
 
-    repository.merge_company_references(keep_id, merge_id, keep.get("name", ""))
-    repository.write_companies(
-        [row for row in rows if row.get("id", "").upper() != merge_id]
-    )
-    return get_company(keep_id)
+    return repository.merge_companies_atomic(keep, merge_id)
 
 
 def record_discovered_company(metadata, seen_at=""):
@@ -735,7 +753,13 @@ def record_discovered_company(metadata, seen_at=""):
     row = next(item for item in rows if item.get("id", "") == company.get("id", ""))
     row["discovered_at"] = row.get("discovered_at", "") or timestamp
     row["last_seen_at"] = max(row.get("last_seen_at", ""), timestamp)
-    repository.write_companies(rows)
+    repository.update_company_fields(
+        row.get("id", ""),
+        {
+            "discovered_at": row.get("discovered_at", ""),
+            "last_seen_at": row.get("last_seen_at", ""),
+        },
+    )
     return update_company_metadata(
         company.get("id", ""),
         metadata,
@@ -763,7 +787,17 @@ def set_company_research_status(company_id, status, checked_at=""):
     row["company_research_status"] = storage.clean(status)
     if storage.clean(checked_at):
         row["company_metadata_checked_at"] = storage.clean(checked_at)
-    repository.write_companies(rows)
+    repository.update_company_fields(
+        row.get("id", ""),
+        {
+            "company_research_status": row.get("company_research_status", ""),
+            **(
+                {"company_metadata_checked_at": row.get("company_metadata_checked_at", "")}
+                if storage.clean(checked_at)
+                else {}
+            ),
+        },
+    )
     return get_company(row.get("id", ""))
 
 
@@ -855,7 +889,21 @@ def resolve_company_metadata_suggestion(company_id, suggestion_id, action):
         ensure_ascii=False,
         sort_keys=True,
     )
-    repository.write_companies(rows)
+    repository.update_company_fields(
+        row.get("id", ""),
+        {
+            field: row.get(field, "")
+            for field in [
+                "industry",
+                "company_size",
+                "company_profile_url",
+                "website",
+                "company_metadata_source",
+                "company_metadata_checked_at",
+                "company_metadata_suggestions_json",
+            ]
+        },
+    )
     return get_company(row.get("id", ""))
 
 
@@ -907,6 +955,7 @@ def unlink_contact(company_id, contact_id):
     return repository.unlink_company_contact(company_id, contact_id)
 
 
+@lru_cache(maxsize=16_384)
 def normalize_url(value):
     cleaned = (value or "").strip()
     if not cleaned:
@@ -951,10 +1000,8 @@ def job_board_family(host):
     return re.sub(r"^www\.", "", host)
 
 
-def posting_identity_keys(url):
-    normalized = normalize_url(url)
-    if not normalized:
-        return set()
+@lru_cache(maxsize=16_384)
+def _posting_identity_keys_cached(normalized):
     parsed = urlparse(normalized)
     family = job_board_family(parsed.netloc)
     keys = {f"url:{normalized}"}
@@ -1009,7 +1056,29 @@ def posting_identity_keys(url):
             keys.add(f"path:{family}:{cleaned_part}")
             if jobish_path:
                 keys.add(f"job-id:{cleaned_part}")
-    return keys
+    return frozenset(keys)
+
+
+def posting_identity_keys(url):
+    normalized = normalize_url(url)
+    if not normalized:
+        return set()
+    # Keep the public return type mutable without exposing cached shared state.
+    return set(_posting_identity_keys_cached(normalized))
+
+
+@lru_cache(maxsize=16_384)
+def _normalized_requisition_ids_cached(normalized):
+    parsed = urlparse(normalized)
+    values = {
+        storage.clean(value).lower()
+        for key, value in parse_qsl(parsed.query, keep_blank_values=False)
+        if key.lower() in JOB_ID_QUERY_KEYS and storage.clean(value)
+    }
+    for key in _posting_identity_keys_cached(normalized):
+        if key.startswith(("greenhouse:", "apple:", "microsoft:", "smartrecruiters:")):
+            values.add(key.rsplit(":", 1)[-1])
+    return frozenset(values)
 
 
 def normalized_requisition_ids(url):
@@ -1017,16 +1086,7 @@ def normalized_requisition_ids(url):
     normalized = normalize_url(url)
     if not normalized:
         return set()
-    parsed = urlparse(normalized)
-    values = {
-        storage.clean(value).lower()
-        for key, value in parse_qsl(parsed.query, keep_blank_values=False)
-        if key.lower() in JOB_ID_QUERY_KEYS and storage.clean(value)
-    }
-    for key in posting_identity_keys(normalized):
-        if key.startswith(("greenhouse:", "apple:", "microsoft:", "smartrecruiters:")):
-            values.add(key.rsplit(":", 1)[-1])
-    return values
+    return set(_normalized_requisition_ids_cached(normalized))
 
 
 def posting_identity_match(left_url, right_url):
@@ -3169,23 +3229,16 @@ def save_company_career_source(company_id, source_url, platform_type, config=Non
             "notes": storage.clean(notes),
         }
     )
-    repository.write_company_career_sources(rows)
-    return source
+    return repository.upsert_company_career_source(source)
 
 
 def mark_company_career_source_verified(company_id, status="verified"):
     source = get_company_career_source(company_id)
     if not source:
         return None
-    rows = repository.read_company_career_sources()
-    for row in rows:
-        if row.get("company_id", "").upper() == source.get("company_id", "").upper():
-            row["last_verified_at"] = now_iso()
-            row["status"] = storage.clean(status)
-            source = row
-            break
-    repository.write_company_career_sources(rows)
-    return source
+    source["last_verified_at"] = now_iso()
+    source["status"] = storage.clean(status)
+    return repository.upsert_company_career_source(source)
 
 
 def custom_workday_locale(careers_url, config):
@@ -6052,6 +6105,11 @@ def check_company_postings(company_id, fetcher=None):
     resume_text = fit_context_text()
     tracked = tracked_posting_context(company)
     candidates = repository.read_company_posting_candidates()
+    original_by_id = {
+        row.get("id", ""): dict(row)
+        for row in candidates
+        if row.get("id", "")
+    }
     existing_by_url = {
         (row.get("company_id", "").upper(), normalize_url(row.get("url", ""))): row
         for row in candidates
@@ -6183,7 +6241,41 @@ def check_company_postings(company_id, fetcher=None):
     annotate_candidate_fit(candidates, company.get("id", ""), checked_at, only_missing=True)
     current_candidates = [row for row in company_candidates if row.get("last_seen_at") == checked_at]
     recommended = recommended_candidates(current_candidates)
-    repository.write_company_posting_candidates(candidates)
+    field_updates = {}
+    status_updates = []
+    for candidate in candidates:
+        candidate_id = candidate.get("id", "")
+        original = original_by_id.get(candidate_id)
+        if original is None:
+            continue
+        changed = {
+            field: candidate.get(field, "")
+            for field in schema.COMPANY_POSTING_CANDIDATE_FIELDS
+            if field not in {"id", "company_id", "notes"}
+            and candidate.get(field, "") != original.get(field, "")
+        }
+        if "status" in changed:
+            status_change = {"status": changed.pop("status")}
+            if "scan_state" in changed:
+                status_change["scan_state"] = changed.pop("scan_state")
+            status_updates.append(
+                (candidate_id, {"status": original.get("status", "")}, status_change)
+            )
+        if changed:
+            field_updates[candidate_id] = changed
+    if field_updates:
+        repository.bulk_update_company_posting_candidate_fields(field_updates)
+    for candidate_id, expected, updates in status_updates:
+        repository.compare_and_update_company_posting_candidate_fields(
+            candidate_id,
+            expected,
+            updates,
+        )
+    if new_rows:
+        pending_new_rows = new_rows
+        new_rows = repository.insert_company_posting_candidates(pending_new_rows)
+        for pending, saved in zip(pending_new_rows, new_rows):
+            pending["id"] = saved.get("id", "")
     scan_status = "partial" if errors else "ok"
     status = (
         f"{scan_status}: {len(new_rows)} new, {len(extracted)} found, "
@@ -6285,10 +6377,13 @@ def update_check_status(company_id, checked_at, status):
     wanted = storage.clean(company_id).upper()
     for row in rows:
         if row.get("id", "").upper() == wanted:
-            row["last_checked_at"] = checked_at
-            row["last_check_status"] = storage.clean(status)
-            repository.write_companies(rows)
-            return row
+            return repository.update_company_fields(
+                row.get("id", ""),
+                {
+                    "last_checked_at": checked_at,
+                    "last_check_status": storage.clean(status),
+                },
+            )
     raise ValueError(f"No company found with id {company_id}.")
 
 
@@ -6340,10 +6435,7 @@ def update_candidate_statuses(candidate_ids, status):
             candidate_eligibility.require_candidate_eligible(
                 row, company_rows, operation="update"
             )
-    for row in candidates:
-        if row.get("id", "").upper() in wanted_ids:
-            row["status"] = status
-    repository.write_company_posting_candidates(candidates)
+    repository.update_company_posting_candidate_statuses(wanted_ids, status)
     sync_linked_discovery_candidate_statuses(
         [row for row in candidates if row.get("id", "").upper() in wanted_ids],
         status,
@@ -6366,14 +6458,22 @@ def sync_linked_discovery_candidate_statuses(company_candidates, status):
         row.get("id", "").upper(): row
         for row in repository.read_companies()
     }
-    changed = False
+    updates = {}
     for company_candidate in company_candidates:
         for discovery_candidate in matching_discovery_candidates(
             company_candidate, discovery_candidates
         ):
+            before = {
+                field: discovery_candidate.get(field, "")
+                for field in [
+                    "status",
+                    "ingested_application_id",
+                    "ignore_reason",
+                    "ignore_reason_detail",
+                ]
+            }
             if discovery_candidate.get("status") != status:
                 discovery_candidate["status"] = status
-                changed = True
             if status == "pursued":
                 company = company_rows.get(
                     company_candidate.get("company_id", "").upper()
@@ -6391,14 +6491,24 @@ def sync_linked_discovery_candidate_statuses(company_candidates, status):
                 )
                 if matching_ids and discovery_candidate.get("ingested_application_id") != matching_ids[0]:
                     discovery_candidate["ingested_application_id"] = matching_ids[0]
-                    changed = True
             if status != "ignored":
                 if discovery_candidate.get("ignore_reason") or discovery_candidate.get("ignore_reason_detail"):
                     discovery_candidate["ignore_reason"] = ""
                     discovery_candidate["ignore_reason_detail"] = ""
-                    changed = True
-    if changed:
-        repository.write_discovery_candidates(discovery_candidates)
+            after = {
+                "status": discovery_candidate.get("status", ""),
+                "ingested_application_id": discovery_candidate.get(
+                    "ingested_application_id", ""
+                ),
+                "ignore_reason": discovery_candidate.get("ignore_reason", ""),
+                "ignore_reason_detail": discovery_candidate.get(
+                    "ignore_reason_detail", ""
+                ),
+            }
+            if after != before:
+                updates[discovery_candidate.get("id", "")] = after
+    if updates:
+        repository.bulk_update_discovery_candidate_fields(updates)
 
 
 def pursue_candidate(candidate_id):

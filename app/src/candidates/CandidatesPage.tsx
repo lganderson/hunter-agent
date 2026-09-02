@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import { BriefcaseIcon, ExternalIcon, FilterIcon, SearchIcon, XIcon } from "../components/Icons";
 import { SortableHeader } from "../components/Primitives";
@@ -27,6 +28,15 @@ import {
 import { DiscoveryMode } from "./DiscoveryMode";
 import { CandidateBulkActions, CandidateSelectionCheckbox } from "./CandidateBulkActions";
 import { canonicalCandidateRows } from "./candidateCanonicalization";
+import {
+  companyListItemToLegacyCandidate,
+  discoveryListItemToLegacyCandidate
+} from "../core/readModelAdapters";
+import {
+  useCompanyCandidateList,
+  useDiscoveryCandidateList
+} from "../core/readModelQueries";
+import { readModelQueryKeys } from "../core/queryKeys";
 
 type CandidateReviewPageProps = {
   data: AppState;
@@ -51,11 +61,50 @@ const MAX_BULK_INGEST = 25;
 type CandidateSortKey = "title" | "company" | "fit" | "status" | "last_seen";
 const CANDIDATE_SORT_KEYS: CandidateSortKey[] = ["title", "company", "fit", "status", "last_seen"];
 
-export function CandidatesPage({ data, refresh, applyCompanyCandidateUpdates, applyDiscoveryCandidateUpdate, enrichmentJob = null, startDiscoveryJob, startEnrichmentJob }: CandidateReviewPageProps) {
+function legacyDiscoveryFilterForQuery(value: string | null) {
+  if (value === "recommended" || value === "new") return "needs-decision";
+  return value || "needs-decision";
+}
+
+export function CandidatesPage({ data: shellData, refresh, applyCompanyCandidateUpdates, applyDiscoveryCandidateUpdate, enrichmentJob = null, startDiscoveryJob, startEnrichmentJob }: CandidateReviewPageProps) {
   const { params: viewParams, updateParams: updateViewParams } = usePersistentViewParams("candidates");
   const mode = viewParams.get("mode") === "discovery" ? "discovery" : "companies";
   const search = viewParams.get("q") || "";
   const candidateFilter = candidateFilterFromQuery(viewParams.get("status"));
+  const queryClient = useQueryClient();
+  const companyCandidatesQuery = useCompanyCandidateList({
+    search,
+    status: candidateFilter === "needs-decision" ? "new" : candidateFilter,
+    trackingStatus: "tracked"
+  }, mode === "companies");
+  const discoveryResultFilter = legacyDiscoveryFilterForQuery(viewParams.get("discovery_status"));
+  const discoveryCandidatesQuery = useDiscoveryCandidateList({
+    search: viewParams.get("discovery_q") || "",
+    status: discoveryResultFilter === "needs-decision" ? "new" : discoveryResultFilter
+  }, {
+    searchId: viewParams.get("search_id") || ""
+  }, mode === "discovery");
+  const data = useMemo<AppState>(() => ({
+    ...shellData,
+    company_posting_candidates: (companyCandidatesQuery.data?.pages || [])
+      .flatMap(page => page.items.map(companyListItemToLegacyCandidate)),
+    discovery_candidates: (discoveryCandidatesQuery.data?.pages || [])
+      .flatMap(page => page.items.map(discoveryListItemToLegacyCandidate))
+  }), [companyCandidatesQuery.data?.pages, discoveryCandidatesQuery.data?.pages, shellData]);
+  const refreshCompanyCandidates = async () => {
+    const [next] = await Promise.all([
+      refresh(),
+      queryClient.invalidateQueries({ queryKey: readModelQueryKeys.candidateLists("company") })
+    ]);
+    return next;
+  };
+  const refreshDiscoveryCandidates = async () => {
+    const [next] = await Promise.all([
+      refresh(),
+      queryClient.invalidateQueries({ queryKey: readModelQueryKeys.candidateLists("discovery") })
+    ]);
+    return next;
+  };
   const interestStatuses = selectionFromParam(viewParams.get("interest"), INTEREST_VALUES, INTEREST_VALUES);
   const [operationStatus, setOperationStatus] = useState("");
   const [operationPending, setOperationPending] = useState(false);
@@ -73,10 +122,11 @@ export function CandidatesPage({ data, refresh, applyCompanyCandidateUpdates, ap
     () => data.companies
       .filter(company => (
         company.tracking_status === "tracked"
-        && data.company_posting_candidates.some(candidate => candidate.company_id === company.id)
+        && (companyCandidatesQuery.data?.pages[0]?.facets.companies || [])
+          .some(facet => facet.value === company.id)
       ))
       .sort((a, b) => a.name.localeCompare(b.name)),
-    [data.companies, data.company_posting_candidates]
+    [companyCandidatesQuery.data?.pages, data.companies]
   );
   const companyOptionIds = companyOptions.map(company => company.id);
   const companyIds = selectionFromParam(viewParams.get("companies"), companyOptionIds, companyOptionIds);
@@ -148,12 +198,18 @@ export function CandidatesPage({ data, refresh, applyCompanyCandidateUpdates, ap
   );
 
   const candidateCounts = useMemo(
-    () => ({
-      "needs-decision": rowsBeforeStatus.filter(row => row.candidate.status === "new").length,
-      ignored: rowsBeforeStatus.filter(row => row.candidate.status === "ignored").length,
-      pursued: rowsBeforeStatus.filter(row => row.candidate.status === "pursued").length
-    }),
-    [rowsBeforeStatus]
+    () => {
+      const statusCounts = new Map(
+        (companyCandidatesQuery.data?.pages[0]?.facets.statuses || [])
+          .map(facet => [facet.value, facet.count])
+      );
+      return {
+        "needs-decision": statusCounts.get("new") ?? rowsBeforeStatus.filter(row => row.candidate.status === "new").length,
+        ignored: statusCounts.get("ignored") ?? rowsBeforeStatus.filter(row => row.candidate.status === "ignored").length,
+        pursued: statusCounts.get("pursued") ?? rowsBeforeStatus.filter(row => row.candidate.status === "pursued").length
+      };
+    },
+    [companyCandidatesQuery.data?.pages, rowsBeforeStatus]
   );
 
   const rows = useMemo(
@@ -203,7 +259,7 @@ export function CandidatesPage({ data, refresh, applyCompanyCandidateUpdates, ap
     setOperationStatus(status === "ignored" ? "Ignoring candidate..." : "Updating candidate...");
     try {
       await updateCompanyCandidate(candidateId, status);
-      await refresh();
+      await refreshCompanyCandidates();
       setOperationStatus(status === "ignored" ? "Candidate ignored." : "Candidate returned to Needs decision.");
     } catch (error) {
       setOperationStatus(`Could not update candidate. ${error instanceof Error ? error.message : String(error)}`);
@@ -219,7 +275,7 @@ export function CandidatesPage({ data, refresh, applyCompanyCandidateUpdates, ap
     setOperationStatus("Adding role to Considering...");
     try {
       const result = await pursueCompanyCandidate(candidateId);
-      await refresh();
+      await refreshCompanyCandidates();
       setIngestedPostingId(result.posting?.id || "");
       setOperationStatus("Role added to Considering.");
     } catch (error) {
@@ -256,7 +312,7 @@ export function CandidatesPage({ data, refresh, applyCompanyCandidateUpdates, ap
             failureCount += 1;
           }
         }
-        await refresh();
+        await refreshCompanyCandidates();
         setIngestedPostingId(successCount === 1 ? postingId : "");
         setOperationStatus(
           `${successCount} candidate${successCount === 1 ? "" : "s"} added to Considering.`
@@ -273,7 +329,7 @@ export function CandidatesPage({ data, refresh, applyCompanyCandidateUpdates, ap
           eligibleRows.map(row => row.candidate.id),
           status
         );
-        await refresh();
+        await refreshCompanyCandidates();
         setOperationStatus(
           action === "ignored"
             ? `${eligibleRows.length} candidates ignored.`
@@ -347,7 +403,7 @@ export function CandidatesPage({ data, refresh, applyCompanyCandidateUpdates, ap
           }
         }
       }
-      await refresh();
+      await refreshCompanyCandidates();
       if (canceled) {
         setOperationStatus(`Canceled after checking ${totals.checked + totals.errors} of ${companiesToCheck.length} companies.`);
         return;
@@ -395,19 +451,61 @@ export function CandidatesPage({ data, refresh, applyCompanyCandidateUpdates, ap
     updateViewParams({ mode: nextMode === "discovery" ? "discovery" : null });
   }
 
-  if (mode === "discovery") {
+  const activeQuery = mode === "discovery" ? discoveryCandidatesQuery : companyCandidatesQuery;
+  if (activeQuery.isPending) {
     return (
-      <section className="view-section" id="candidates-view" aria-label="Discovery candidates">
+      <section className="view-section" id="candidates-view" aria-labelledby="candidates-title">
+        <h1 className="sr-only" id="candidates-title">{mode === "discovery" ? "Discovery candidates" : "Tracked company candidates"}</h1>
         <article className="panel">
           <CandidateModeSwitch mode={mode} chooseMode={chooseMode} />
-          <DiscoveryMode data={data} refresh={refresh} applyDiscoveryCandidateUpdate={applyDiscoveryCandidateUpdate} enrichmentJob={enrichmentJob} startDiscoveryJob={startDiscoveryJob} startEnrichmentJob={startEnrichmentJob} />
+          <div className="empty-state" style={{ display: "block" }}>Loading candidates…</div>
+        </article>
+      </section>
+    );
+  }
+
+  if (activeQuery.error) {
+    return (
+      <section className="view-section" id="candidates-view" aria-labelledby="candidates-title">
+        <h1 className="sr-only" id="candidates-title">{mode === "discovery" ? "Discovery candidates" : "Tracked company candidates"}</h1>
+        <article className="panel">
+          <CandidateModeSwitch mode={mode} chooseMode={chooseMode} />
+          <div className="empty-state" style={{ display: "block" }}>Could not load candidates. {activeQuery.error.message}</div>
+        </article>
+      </section>
+    );
+  }
+
+  if (mode === "discovery") {
+    return (
+      <section className="view-section" id="candidates-view" aria-labelledby="candidates-title">
+        <h1 className="sr-only" id="candidates-title">Discovery candidates</h1>
+        <article className="panel">
+          <CandidateModeSwitch mode={mode} chooseMode={chooseMode} />
+          <DiscoveryMode
+            data={data}
+            refresh={refreshDiscoveryCandidates}
+            applyDiscoveryCandidateUpdate={applyDiscoveryCandidateUpdate}
+            enrichmentJob={enrichmentJob}
+            startDiscoveryJob={startDiscoveryJob}
+            startEnrichmentJob={startEnrichmentJob}
+            hasNextPage={Boolean(discoveryCandidatesQuery.hasNextPage)}
+            isFetchingNextPage={discoveryCandidatesQuery.isFetchingNextPage}
+            loadMore={() => void discoveryCandidatesQuery.fetchNextPage()}
+            statusCounts={Object.fromEntries(
+              (discoveryCandidatesQuery.data?.pages[0]?.facets.statuses || [])
+                .map(facet => [facet.value, facet.count])
+            )}
+            filteredTotal={discoveryCandidatesQuery.data?.pages[0]?.counts.filtered}
+          />
         </article>
       </section>
     );
   }
 
   return (
-    <section className="view-section" id="candidates-view" aria-label="Posting candidates">
+    <section className="view-section" id="candidates-view" aria-labelledby="candidates-title">
+      <h1 className="sr-only" id="candidates-title">Tracked company candidates</h1>
       <article className="panel">
         <CandidateModeSwitch mode={mode} chooseMode={chooseMode} />
         <div className="toolbar" aria-label="Candidate filters">
@@ -515,7 +613,7 @@ export function CandidatesPage({ data, refresh, applyCompanyCandidateUpdates, ap
         ) : (
           <div className="candidate-review-summary">
             <strong>{rows.length}</strong>
-            <span>shown from {data.company_posting_candidates.length} total candidates</span>
+            <span>shown from {companyCandidatesQuery.data?.pages[0]?.counts.filtered ?? data.company_posting_candidates.length} matching candidates</span>
           </div>
         )}
 
@@ -580,14 +678,30 @@ export function CandidatesPage({ data, refresh, applyCompanyCandidateUpdates, ap
               ))}
             </tbody>
           </table>
-          <div className="empty-state" style={{ display: rows.length ? "none" : "block" }}>No posting candidates match the current filters.</div>
+          <div className="empty-state" style={{ display: rows.length ? "none" : "block" }}>
+            {companyCandidatesQuery.hasNextPage
+              ? "No loaded candidates match the client-side filters. Load more to continue searching this result set."
+              : "No posting candidates match the current filters."}
+          </div>
         </div>
+        {companyCandidatesQuery.hasNextPage ? (
+          <div className="candidate-load-more">
+            <button
+              className="button"
+              type="button"
+              disabled={companyCandidatesQuery.isFetchingNextPage}
+              onClick={() => void companyCandidatesQuery.fetchNextPage()}
+            >
+              {companyCandidatesQuery.isFetchingNextPage ? "Loading…" : "Load more candidates"}
+            </button>
+          </div>
+        ) : null}
       </article>
     </section>
   );
 }
 
-function CandidateModeSwitch({
+export function CandidateModeSwitch({
   mode,
   chooseMode
 }: {
@@ -595,9 +709,9 @@ function CandidateModeSwitch({
   chooseMode: (mode: "companies" | "discovery") => void;
 }) {
   return (
-    <div className="candidate-mode-switch" role="tablist" aria-label="Candidate source mode">
-      <button className={mode === "companies" ? "active" : ""} type="button" role="tab" aria-selected={mode === "companies"} onClick={() => chooseMode("companies")}>Tracked Companies</button>
-      <button className={mode === "discovery" ? "active" : ""} type="button" role="tab" aria-selected={mode === "discovery"} onClick={() => chooseMode("discovery")}>Discovery</button>
+    <div className="candidate-mode-switch" role="group" aria-label="Candidate source mode">
+      <button className={mode === "companies" ? "active" : ""} type="button" aria-pressed={mode === "companies"} onClick={() => chooseMode("companies")}>Tracked Companies</button>
+      <button className={mode === "discovery" ? "active" : ""} type="button" aria-pressed={mode === "discovery"} onClick={() => chooseMode("discovery")}>Discovery</button>
     </div>
   );
 }

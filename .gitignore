@@ -12,6 +12,10 @@ venv/
 *.key
 app/node_modules/
 app/dist/
+app/playwright-report/
+app/test-results/
+playwright-report/
+test-results/
 .playwright-mcp/
 
 # Local app data, secrets, and machine-specific settings.

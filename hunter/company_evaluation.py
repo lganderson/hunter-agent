@@ -162,18 +162,20 @@ def mark_pending(company_ids, profile=None, force=False):
         return []
     normalized_profile = normalize_profile(profile or load_profile())
     rows = repository.read_companies()
-    changed = []
+    updates = {}
     for row in rows:
         if row.get("id", "").upper() not in wanted:
             continue
         if not evaluation_needed(row, normalized_profile, force=force):
             continue
-        row["company_evaluation_status"] = "pending"
-        row["company_evaluation_error"] = ""
-        changed.append(row.get("id", ""))
-    if changed:
-        repository.write_companies(rows)
-    return changed
+        company_id = row.get("id", "")
+        updates[company_id] = {
+            "company_evaluation_status": "pending",
+            "company_evaluation_error": "",
+        }
+    if updates:
+        repository.bulk_update_company_fields(updates)
+    return list(updates)
 
 
 def pending_company_ids():
@@ -281,16 +283,15 @@ def openai_company_evaluation(config, company_rows, profile, batch_number=1, rea
 
 def _set_status(company_ids, status, error=""):
     wanted = {storage.clean(value).upper() for value in company_ids or [] if storage.clean(value)}
-    rows = repository.read_companies()
-    changed = False
-    for row in rows:
-        if row.get("id", "").upper() not in wanted:
-            continue
-        row["company_evaluation_status"] = storage.clean(status)
-        row["company_evaluation_error"] = storage.clean(error)
-        changed = True
-    if changed:
-        repository.write_companies(rows)
+    updates = {
+        company_id: {
+            "company_evaluation_status": storage.clean(status),
+            "company_evaluation_error": storage.clean(error),
+        }
+        for company_id in wanted
+    }
+    if updates:
+        repository.bulk_update_company_fields(updates)
 
 
 def _apply_result(company, result, profile, checked_at):
@@ -365,7 +366,27 @@ def _apply_result(company, result, profile, checked_at):
         and row.get("company_location_fit", "")
         else "needs-verification"
     )
-    repository.write_companies(rows)
+    repository.update_company_fields(
+        row.get("id", ""),
+        {
+            field: row.get(field, "")
+            for field in [
+                "careers_url",
+                "company_location_fit",
+                "company_location",
+                "company_remote_policy",
+                "company_location_evidence",
+                "company_location_checked_at",
+                "company_fit_score",
+                "company_fit_summary",
+                "company_fit_checked_at",
+                "company_evaluation_version",
+                "company_evaluation_checked_at",
+                "company_evaluation_error",
+                "company_evaluation_status",
+            ]
+        },
+    )
     return companies.get_company(company.get("id", ""))
 
 

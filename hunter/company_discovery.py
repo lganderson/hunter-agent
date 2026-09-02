@@ -833,7 +833,7 @@ def update_discovery_evidence(company_id, values):
     row = next((item for item in rows if item.get("id", "") == company_id), None)
     if row is None:
         raise ValueError(f"No company found with id {company_id}.")
-    for field in [
+    fields = [
         "company_discovery_source",
         "company_discovery_source_url",
         "company_discovery_query",
@@ -846,9 +846,13 @@ def update_discovery_evidence(company_id, values):
         "company_fit_score",
         "company_fit_summary",
         "company_fit_checked_at",
-    ]:
+    ]
+    for field in fields:
         row[field] = storage.clean(values.get(field, ""))
-    repository.write_companies(rows)
+    repository.update_company_fields(
+        company_id,
+        {field: row.get(field, "") for field in fields},
+    )
     return companies.get_company(company_id)
 
 
@@ -857,15 +861,19 @@ def update_company_location_evidence(company_id, values):
     row = next((item for item in rows if item.get("id", "") == company_id), None)
     if row is None:
         raise ValueError(f"No company found with id {company_id}.")
-    for field in [
+    fields = [
         "company_location_fit",
         "company_location",
         "company_remote_policy",
         "company_location_evidence",
         "company_location_checked_at",
-    ]:
+    ]
+    for field in fields:
         row[field] = storage.clean(values.get(field, ""))
-    repository.write_companies(rows)
+    repository.update_company_fields(
+        company_id,
+        {field: row.get(field, "") for field in fields},
+    )
     return companies.get_company(company_id)
 
 

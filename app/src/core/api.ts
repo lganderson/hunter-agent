@@ -4,7 +4,6 @@ import type {
   AgentChatHistoryMessage,
   AgentChatResponse,
   AgentContext,
-  AppState,
   Application,
   ApplicationUpdates,
   Company,
@@ -86,10 +85,6 @@ async function fetchWithLocalRetry(url: string, init: RequestInit): Promise<Resp
       throw new Error(`Could not reach Hunter local API. Restart the matching Hunter API server and reload the page. ${message}`);
     }
   }
-}
-
-export async function getAppState(): Promise<AppState> {
-  return readJson<AppState>(await fetch("/api/app-state", { cache: "no-store" }));
 }
 
 export async function dismissSuggestion(id: string): Promise<void> {

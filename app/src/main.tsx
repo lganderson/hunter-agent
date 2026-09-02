@@ -3,6 +3,7 @@ import { createRoot, type Root as ReactRoot } from "react-dom/client";
 import { BrowserRouter } from "react-router-dom";
 import { App } from "./App";
 import { useHunterData } from "./core/useHunterData";
+import { HunterQueryProvider } from "./core/queryClient";
 import "./styles.css";
 
 declare global {
@@ -40,8 +41,10 @@ function Root() {
 globalThis.hunterRoot ??= createRoot(document.getElementById("root") as HTMLElement);
 globalThis.hunterRoot.render(
   <React.StrictMode>
-    <BrowserRouter>
-      <Root />
-    </BrowserRouter>
+    <HunterQueryProvider>
+      <BrowserRouter>
+        <Root />
+      </BrowserRouter>
+    </HunterQueryProvider>
   </React.StrictMode>
 );

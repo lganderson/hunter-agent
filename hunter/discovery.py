@@ -525,6 +525,7 @@ def apply_search_exclusions(search_id, excluded_terms=None):
         }
     rows = repository.read_discovery_candidates()
     changed_ids = []
+    updates = {}
     for candidate in rows:
         if not candidate_belongs_to_search(candidate, search["id"]):
             continue
@@ -534,13 +535,19 @@ def apply_search_exclusions(search_id, excluded_terms=None):
         if not matches:
             continue
         if len(candidate_search_ids(candidate)) == 1:
-            candidate["status"] = "ignored"
-            candidate["ignore_reason"] = "search-exclusion"
-            candidate["ignore_reason_detail"] = ", ".join(matches)
-            candidate["ingested_application_id"] = ""
+            updates[candidate.get("id", "")] = {
+                "status": "ignored",
+                "ignore_reason": "search-exclusion",
+                "ignore_reason_detail": ", ".join(matches),
+                "ingested_application_id": "",
+            }
         changed_ids.append(candidate.get("id", ""))
-    if changed_ids:
-        repository.write_discovery_candidates(rows)
+    for candidate_id, fields in updates.items():
+        repository.compare_and_update_discovery_candidate_fields(
+            candidate_id,
+            {"status": "new"},
+            fields,
+        )
     return {"candidate_ids": changed_ids, "count": len(changed_ids)}
 
 
@@ -552,6 +559,7 @@ def undo_search_exclusions(candidate_ids):
     }
     rows = repository.read_discovery_candidates()
     restored_ids = []
+    updates = {}
     for candidate in rows:
         if candidate.get("id", "").upper() not in wanted_ids:
             continue
@@ -560,12 +568,19 @@ def undo_search_exclusions(candidate_ids):
             or candidate.get("ignore_reason") != "search-exclusion"
         ):
             continue
-        candidate["status"] = "new"
-        candidate["ignore_reason"] = ""
-        candidate["ignore_reason_detail"] = ""
-        restored_ids.append(candidate.get("id", ""))
-    if restored_ids:
-        repository.write_discovery_candidates(rows)
+        candidate_id = candidate.get("id", "")
+        updates[candidate_id] = {
+            "status": "new",
+            "ignore_reason": "",
+            "ignore_reason_detail": "",
+        }
+        restored_ids.append(candidate_id)
+    for candidate_id, fields in updates.items():
+        repository.compare_and_update_discovery_candidate_fields(
+            candidate_id,
+            {"status": "ignored", "ignore_reason": "search-exclusion"},
+            fields,
+        )
     return {"candidate_ids": restored_ids, "count": len(restored_ids)}
 
 
@@ -1247,14 +1262,17 @@ def candidate_matches_lane(
     *,
     normalized_candidate_context=None,
     normalized_candidate_location=None,
+    inferred_candidate_mode=None,
 ):
     expected_modes = set(lane.get("work_modes", []))
     actual_mode = storage.clean(candidate.get("work_mode", "")).lower()
     actual_mode = "on-site" if actual_mode in {"onsite", "on site"} else actual_mode
-    inferred_mode = work_mode_from_text(
-        candidate.get("location", ""),
-        candidate.get("description_text", "") or candidate.get("description_excerpt", ""),
-    ).lower()
+    inferred_mode = inferred_candidate_mode
+    if inferred_mode is None:
+        inferred_mode = work_mode_from_text(
+            candidate.get("location", ""),
+            candidate.get("description_text", "") or candidate.get("description_excerpt", ""),
+        ).lower()
     if inferred_mode and inferred_mode != actual_mode:
         actual_mode = inferred_mode
     if actual_mode and actual_mode not in expected_modes:
@@ -2132,22 +2150,119 @@ def canonicalize_candidate_rows(rows):
 
 
 def canonicalize_candidates():
-    rows = repository.read_discovery_candidates()
-    canonical = canonicalize_candidate_rows(rows)
-    if canonical != rows:
-        repository.write_discovery_candidates(canonical)
-    return {
-        "before_count": len(rows),
-        "after_count": len(canonical),
-        "merged_count": max(0, len(rows) - len(canonical)),
+    for _attempt in range(5):
+        revision, rows = repository.read_discovery_candidates_snapshot()
+        canonical = canonicalize_candidate_rows(rows)
+        if canonical == rows or repository.reconcile_discovery_candidates(
+            revision,
+            canonical,
+        ):
+            return {
+                "before_count": len(rows),
+                "after_count": len(canonical),
+                "merged_count": max(0, len(rows) - len(canonical)),
+            }
+    raise RuntimeError("Discovery candidates changed repeatedly during canonicalization; retry.")
+
+
+STALE_PROTECTED_CANDIDATE_FIELDS = {
+    "status",
+    "freshness_status",
+    "freshness_checked_at",
+    "ingested_application_id",
+    "ignore_reason",
+    "ignore_reason_detail",
+    "notes",
+}
+DECISION_COUPLED_CANDIDATE_FIELDS = STALE_PROTECTED_CANDIDATE_FIELDS - {"notes"}
+MERGE_ONLY_CANDIDATE_FIELDS = {
+    "search_id",
+    "search_ids_json",
+    "source_urls_json",
+    "captured_at",
+    "last_seen_at",
+}
+
+
+def persist_discovery_candidate_changes(original_rows, computed_rows):
+    """Persist computed rows without replacing concurrent user decisions/details."""
+    originals = {
+        row.get("id", ""): dict(row)
+        for row in original_rows
+        if row.get("id", "")
     }
+    new_rows = []
+    for computed in computed_rows:
+        candidate_id = computed.get("id", "")
+        original = originals.get(candidate_id)
+        if original is None:
+            new_rows.append(computed)
+            continue
+        desired = dict(computed)
+        baseline = original
+        for _attempt in range(3):
+            changed = {
+                field: desired.get(field, "")
+                for field in schema.DISCOVERY_CANDIDATE_FIELDS
+                if field not in {"id", "notes"}
+                and desired.get(field, "") != baseline.get(field, "")
+            }
+            if not changed:
+                break
+            expected = {field: baseline.get(field, "") for field in changed}
+            if set(changed) & DECISION_COUPLED_CANDIDATE_FIELDS:
+                expected.update(
+                    {
+                        field: baseline.get(field, "")
+                        for field in DECISION_COUPLED_CANDIDATE_FIELDS
+                    }
+                )
+            result = repository.compare_and_update_discovery_candidate_fields(
+                candidate_id,
+                expected,
+                changed,
+            )
+            if result["updated"]:
+                break
+            live = result["row"]
+            merged = dict(live)
+            merge_candidate(merged, desired)
+            rebased = dict(live)
+            decision_conflict = any(
+                live.get(field, "") != baseline.get(field, "")
+                for field in DECISION_COUPLED_CANDIDATE_FIELDS
+            )
+            for field, value in changed.items():
+                if decision_conflict and (
+                    field in DECISION_COUPLED_CANDIDATE_FIELDS or field == "warnings"
+                ):
+                    continue
+                if live.get(field, "") == baseline.get(field, ""):
+                    rebased[field] = value
+                elif field in MERGE_ONLY_CANDIDATE_FIELDS:
+                    rebased[field] = merged.get(field, live.get(field, ""))
+                elif field not in STALE_PROTECTED_CANDIDATE_FIELDS:
+                    # A concurrent writer deliberately changed this exact field;
+                    # preserve it instead of applying the stale computation.
+                    rebased[field] = live.get(field, "")
+            baseline = live
+            desired = rebased
+        else:
+            raise RuntimeError(
+                f"Discovery candidate {candidate_id} changed repeatedly; retry."
+            )
+    inserted = repository.insert_discovery_candidates(new_rows) if new_rows else []
+    for pending, saved in zip(new_rows, inserted):
+        pending["id"] = saved.get("id", "")
+    return inserted
 
 
 def sync_discovered_companies():
     canonicalize_candidates()
     rows = repository.read_discovery_candidates()
     linked_count = 0
-    changed = False
+    updates = {}
+    expected_company_ids = {}
     for candidate in rows:
         previous_company_id = candidate.get("company_id", "")
         company = connect_candidate_company(
@@ -2158,9 +2273,16 @@ def sync_discovered_companies():
             continue
         if candidate.get("company_id", "") != previous_company_id:
             linked_count += 1
-            changed = True
-    if changed:
-        repository.write_discovery_candidates(rows)
+            updates[candidate.get("id", "")] = {
+                "company_id": candidate.get("company_id", "")
+            }
+            expected_company_ids[candidate.get("id", "")] = previous_company_id
+    for candidate_id, fields in updates.items():
+        repository.compare_and_update_discovery_candidate_fields(
+            candidate_id,
+            {"company_id": expected_company_ids[candidate_id]},
+            fields,
+        )
     return linked_count
 
 
@@ -2798,6 +2920,7 @@ def run_search(
             company_by_id[company_id] = research.get("company", company)
 
     rows = repository.read_discovery_candidates()
+    original_rows = [dict(row) for row in rows]
     for candidate in rows:
         if candidate.get("id", "") in known_membership_candidate_ids:
             add_candidate_search(candidate, search["id"])
@@ -2827,13 +2950,11 @@ def run_search(
         matching_candidate(rows, candidate) or candidate
         for candidate in captured
     ]
-    repository.write_discovery_candidates(rows)
-    stored_by_id = {
-        row.get("id", ""): row
-        for row in repository.read_discovery_candidates()
-    }
+    persist_discovery_candidate_changes(original_rows, rows)
+    canonicalize_candidates()
+    stored_rows = repository.read_discovery_candidates()
     captured = [
-        stored_by_id.get(candidate.get("id", ""), candidate)
+        matching_candidate(stored_rows, candidate) or candidate
         for candidate in captured
     ]
     role_family_counts = {}
@@ -2975,6 +3096,7 @@ def continue_enrichment(
     company_researcher=None,
 ):
     rows = canonicalize_candidate_rows(repository.read_discovery_candidates())
+    original_rows = [dict(row) for row in rows]
     company_rows = repository.read_companies()
     companies_by_id = candidate_eligibility.companies_by_id(company_rows)
     excluded_identity = discovery_excluded_company_identity(company_rows)
@@ -3123,7 +3245,9 @@ def continue_enrichment(
             )
 
     rows = canonicalize_candidate_rows(rows)
-    repository.write_discovery_candidates(rows)
+    persist_discovery_candidate_changes(original_rows, rows)
+    canonicalize_candidates()
+    rows = repository.read_discovery_candidates()
     refreshed_companies = {
         company.get("id", ""): company
         for company in repository.read_companies()
@@ -3194,9 +3318,9 @@ def enrich_candidate_backlog(
     use_browser_fallback=False,
     progress=None,
 ):
-    rows = canonicalize_candidate_rows(repository.read_discovery_candidates())
+    canonicalize_candidates()
+    rows = repository.read_discovery_candidates()
     searches = list_searches()
-    repository.write_discovery_candidates(rows)
     company_rows = repository.read_companies()
     company_candidates = repository.read_company_posting_candidates()
     targets = sorted(
@@ -3233,6 +3357,7 @@ def enrich_candidate_backlog(
     changed_count = 0
     errors = []
     for index, candidate in enumerate(selected, start=1):
+        original_candidate = dict(candidate)
         result = resolve_candidate_details(
             candidate,
             fetcher=fetcher,
@@ -3262,7 +3387,7 @@ def enrich_candidate_backlog(
             for error in result["errors"]
             if error
         )
-        repository.write_discovery_candidates(canonicalize_candidate_rows(rows))
+        persist_discovery_candidate_changes([original_candidate], [candidate])
         if progress:
             progress(
                 {
@@ -3274,8 +3399,8 @@ def enrich_candidate_backlog(
                 }
             )
 
-    refreshed = canonicalize_candidate_rows(repository.read_discovery_candidates())
-    repository.write_discovery_candidates(refreshed)
+    canonicalize_candidates()
+    refreshed = repository.read_discovery_candidates()
     refreshed_companies_by_id = {
         company.get("id", "").upper(): company
         for company in repository.read_companies()
@@ -3644,6 +3769,7 @@ def apply_candidate_review_admission_for_memberships(candidate, company=None, se
 
 def reclassify_review_queue():
     rows = canonicalize_candidate_rows(repository.read_discovery_candidates())
+    original_rows = [dict(row) for row in rows]
     company_by_id = {
         company.get("id", ""): company
         for company in repository.read_companies()
@@ -3664,7 +3790,8 @@ def reclassify_review_queue():
             screened_count += 1
         elif previous_status == SCREENED_STATUS and candidate.get("status") == "new":
             restored_count += 1
-    repository.write_discovery_candidates(rows)
+    persist_discovery_candidate_changes(original_rows, rows)
+    canonicalize_candidates()
     return {
         "screened_count": screened_count,
         "restored_count": restored_count,
@@ -3674,6 +3801,7 @@ def reclassify_review_queue():
 def reclassify_candidate_search_memberships():
     """Align existing candidates to current saved searches without changing past decisions."""
     rows = repository.read_discovery_candidates()
+    original_rows = [dict(row) for row in rows]
     searches = list_searches()
     company_by_id = {
         company.get("id", ""): company
@@ -3728,7 +3856,7 @@ def reclassify_candidate_search_memberships():
             screened_count += 1
         elif previous_status == SCREENED_STATUS and candidate.get("status") == "new":
             restored_count += 1
-    repository.write_discovery_candidates(rows)
+    persist_discovery_candidate_changes(original_rows, rows)
     return {
         "candidate_count": len(rows),
         "changed_count": changed_count,
@@ -3741,6 +3869,7 @@ def reclassify_candidate_search_memberships():
 
 def cleanup_candidates():
     original_rows = repository.read_discovery_candidates()
+    original_snapshot = [dict(row) for row in original_rows]
     rows = canonicalize_candidate_rows(original_rows)
     company_rows = repository.read_companies()
     excluded_identity = discovery_excluded_company_identity(company_rows)
@@ -3798,7 +3927,8 @@ def cleanup_candidates():
         elif previous_status == SCREENED_STATUS and candidate.get("status") == "new":
             restored_count += 1
 
-    repository.write_discovery_candidates(rows)
+    persist_discovery_candidate_changes(original_snapshot, rows)
+    canonicalize_candidates()
     return {
         "before_count": len(original_rows),
         "after_count": len(rows),
@@ -3899,6 +4029,10 @@ def candidate_lane_match(candidate, searches=None):
         )
     )
     normalized_location = normalized_location_text(candidate.get("location", ""))
+    inferred_mode = work_mode_from_text(
+        candidate.get("location", ""),
+        candidate.get("description_text", "") or candidate.get("description_excerpt", ""),
+    ).lower()
     for search in searches if searches is not None else list_searches():
         for lane in search.get("lanes", []):
             if candidate_matches_lane(
@@ -3907,6 +4041,7 @@ def candidate_lane_match(candidate, searches=None):
                 lane,
                 normalized_candidate_context=normalized_context,
                 normalized_candidate_location=normalized_location,
+                inferred_candidate_mode=inferred_mode,
             ):
                 label = lane.get("label", "") or lane.get("location", "")
                 mode = storage.clean(candidate.get("work_mode", ""))
@@ -4640,6 +4775,7 @@ def capture_candidates(search_id, capture_text, details=None, fetcher=None):
         raise ValueError("Copied posting details can be applied only when capturing one link at a time.")
 
     rows = repository.read_discovery_candidates()
+    original_rows = [dict(row) for row in rows]
     timestamp = now_iso()
     captured = []
     for url in urls:
@@ -4691,13 +4827,11 @@ def capture_candidates(search_id, capture_text, details=None, fetcher=None):
         matching_candidate(rows, candidate) or candidate
         for candidate in captured
     ]
-    repository.write_discovery_candidates(rows)
-    stored_by_id = {
-        row.get("id", ""): row
-        for row in repository.read_discovery_candidates()
-    }
+    persist_discovery_candidate_changes(original_rows, rows)
+    canonicalize_candidates()
+    stored_rows = repository.read_discovery_candidates()
     captured = [
-        stored_by_id.get(candidate.get("id", ""), candidate)
+        matching_candidate(stored_rows, candidate) or candidate
         for candidate in captured
     ]
     return {"captured": captured, "count": len(captured)}
@@ -4720,7 +4854,13 @@ def update_candidate_details(candidate_id, updates):
         row.update(original_row)
         raise ValueError("Cannot update candidate: its company is excluded from review.")
     score_candidate(row, now_iso())
-    repository.write_discovery_candidates(rows)
+    changed = {
+        field: row.get(field, "")
+        for field in schema.DISCOVERY_CANDIDATE_FIELDS
+        if field != "id" and row.get(field, "") != original_row.get(field, "")
+    }
+    if changed:
+        repository.update_discovery_candidate_fields(row.get("id", ""), changed)
     return get_candidate(candidate_id)
 
 
@@ -4763,6 +4903,7 @@ def update_candidate_statuses(candidate_ids, status, ignore_reason="", ignore_re
             + "."
         )
     company_rows = repository.read_companies()
+    updates = {}
     for row in rows:
         if row.get("id", "").upper() in wanted_ids:
             candidate_eligibility.require_candidate_eligible(
@@ -4782,7 +4923,18 @@ def update_candidate_statuses(candidate_ids, status, ignore_reason="", ignore_re
         else:
             row["ignore_reason"] = ""
             row["ignore_reason_detail"] = ""
-    repository.write_discovery_candidates(rows)
+        updates[row.get("id", "")] = {
+            field: row.get(field, "")
+            for field in [
+                "status",
+                "freshness_status",
+                "freshness_checked_at",
+                "ingested_application_id",
+                "ignore_reason",
+                "ignore_reason_detail",
+            ]
+        }
+    repository.bulk_update_discovery_candidate_fields(updates)
     updated = [get_candidate(candidate_id) for candidate_id in wanted_ids]
     return {"candidates": updated, "count": len(updated)}
 
@@ -4812,9 +4964,13 @@ def mark_candidate_duplicate(candidate_id, application_id):
     if posting is None:
         raise ValueError(f"No application found with id {application_id}.")
 
-    candidate["status"] = "duplicate"
-    candidate["ingested_application_id"] = posting.get("id", "")
-    repository.write_discovery_candidates(rows)
+    repository.update_discovery_candidate_fields(
+        candidate.get("id", ""),
+        {
+            "status": "duplicate",
+            "ingested_application_id": posting.get("id", ""),
+        },
+    )
     return {"candidate": get_candidate(candidate_id), "posting": posting}
 
 
@@ -4848,12 +5004,11 @@ def pursue_candidate(candidate_id):
         )
     existing = matching_application(candidate)
     if existing:
-        updated = update_candidate_status(candidate_id, "pursued")
-        rows = repository.read_discovery_candidates()
-        for row in rows:
-            if row.get("id", "").upper() == updated.get("id", "").upper():
-                row["ingested_application_id"] = existing.get("id", "")
-        repository.write_discovery_candidates(rows)
+        update_candidate_status(candidate_id, "pursued")
+        repository.update_discovery_candidate_fields(
+            candidate_id,
+            {"ingested_application_id": existing.get("id", "")},
+        )
         return {"candidate": get_candidate(candidate_id), "posting": existing, "created": False}
 
     company = companies.get_company(candidate.get("company_id", ""))
@@ -4888,12 +5043,13 @@ def pursue_candidate(candidate_id):
                 "warnings": candidate.get("warnings", ""),
             },
         )
-    rows = repository.read_discovery_candidates()
-    for row in rows:
-        if row.get("id", "").upper() == storage.clean(candidate_id).upper():
-            row["status"] = "pursued"
-            row["ingested_application_id"] = posting.get("id", "")
-    repository.write_discovery_candidates(rows)
+    repository.update_discovery_candidate_fields(
+        candidate_id,
+        {
+            "status": "pursued",
+            "ingested_application_id": posting.get("id", ""),
+        },
+    )
     return {"candidate": get_candidate(candidate_id), "posting": posting, "created": True}
 
 

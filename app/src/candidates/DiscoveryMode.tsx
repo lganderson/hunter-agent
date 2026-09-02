@@ -35,6 +35,8 @@ import { BriefcaseIcon, CheckIcon, ExternalIcon, FilterIcon, PlusIcon, RefreshIc
 import { SortableHeader } from "../components/Primitives";
 import { CandidateBulkActions, CandidateSelectionCheckbox } from "./CandidateBulkActions";
 import { canonicalCandidateRows } from "./candidateCanonicalization";
+import { discoveryDetailToLegacyCandidate } from "../core/readModelAdapters";
+import { useDiscoveryCandidateDetail } from "../core/readModelQueries";
 
 type DiscoveryModeProps = {
   data: AppState;
@@ -43,6 +45,11 @@ type DiscoveryModeProps = {
   enrichmentJob?: CandidateEnrichmentJob | null;
   startDiscoveryJob?: (payload: CandidateEnrichmentJob["request"]) => Promise<CandidateEnrichmentJob>;
   startEnrichmentJob?: (payload: CandidateEnrichmentJob["request"]) => Promise<CandidateEnrichmentJob>;
+  hasNextPage?: boolean;
+  isFetchingNextPage?: boolean;
+  loadMore?: () => void;
+  statusCounts?: Record<string, number>;
+  filteredTotal?: number;
 };
 
 type DiscoveryFilter = "needs-decision" | "pursued" | "ignored" | "duplicate" | "unavailable";
@@ -84,7 +91,7 @@ const EMPTY_DETAILS: DiscoveryCandidateDetails = {
 const MAX_BULK_INGEST = 25;
 const DISMISSED_DISCOVERY_RUN_KEY = "hunter-dismissed-discovery-run-v1";
 
-export function DiscoveryMode({ data, refresh, applyDiscoveryCandidateUpdate, enrichmentJob = null, startDiscoveryJob, startEnrichmentJob }: DiscoveryModeProps) {
+export function DiscoveryMode({ data, refresh, applyDiscoveryCandidateUpdate, enrichmentJob = null, startDiscoveryJob, startEnrichmentJob, hasNextPage = false, isFetchingNextPage = false, loadMore, statusCounts = {}, filteredTotal }: DiscoveryModeProps) {
   const { params: viewParams, updateParams: updateViewParams } = usePersistentViewParams("candidates");
   const requestedSearchId = viewParams.get("search_id") || "";
   const selectedSearch = data.discovery_searches.find(search => search.id === requestedSearchId)
@@ -114,6 +121,11 @@ export function DiscoveryMode({ data, refresh, applyDiscoveryCandidateUpdate, en
   const discoveryActive = enrichmentActive && enrichmentJob?.job_type === "candidate-discovery";
   const [editingCandidate, setEditingCandidate] = useState<DiscoveryCandidate | null>(null);
   const [reviewCandidateId, setReviewCandidateId] = useState("");
+  const selectedDetailId = editingCandidate?.id || reviewCandidateId;
+  const candidateDetailQuery = useDiscoveryCandidateDetail(selectedDetailId);
+  const detailedCandidate = candidateDetailQuery.data
+    ? discoveryDetailToLegacyCandidate(candidateDetailQuery.data)
+    : null;
   const [ingestedPostingId, setIngestedPostingId] = useState("");
   const [exclusionUndoIds, setExclusionUndoIds] = useState<string[]>([]);
   const [applyExistingExclusions, setApplyExistingExclusions] = useState(true);
@@ -267,10 +279,12 @@ export function DiscoveryMode({ data, refresh, applyDiscoveryCandidateUpdate, en
     () => Object.fromEntries(
       DISCOVERY_FILTERS.map(filter => [
         filter.id,
-        candidatesBeforeStatus.filter(candidate => discoveryCandidateMatches(candidate, filter.id)).length
+        filter.id === "needs-decision"
+          ? statusCounts.new ?? candidatesBeforeStatus.filter(candidate => discoveryCandidateMatches(candidate, filter.id)).length
+          : statusCounts[filter.id] ?? candidatesBeforeStatus.filter(candidate => discoveryCandidateMatches(candidate, filter.id)).length
       ])
     ) as Record<DiscoveryFilter, number>,
-    [candidatesBeforeStatus]
+    [candidatesBeforeStatus, statusCounts]
   );
   const decisionHistoryCount = DISCOVERY_FILTERS.reduce((total, filter) => total + counts[filter.id], 0);
   const reviewQueue = useMemo(
@@ -284,9 +298,10 @@ export function DiscoveryMode({ data, refresh, applyDiscoveryCandidateUpdate, en
     [selectedCandidates]
   );
   const reviewBatch = reviewQueue.slice(0, 10);
-  const reviewCandidate = selectedCandidates.find(candidate => candidate.id === reviewCandidateId) || null;
-  const activeReviewCandidates = reviewCandidate && !reviewBatch.some(candidate => candidate.id === reviewCandidate.id)
-    ? [reviewCandidate]
+  const reviewCandidateSummary = selectedCandidates.find(candidate => candidate.id === reviewCandidateId) || null;
+  const reviewCandidate = detailedCandidate?.id === reviewCandidateId ? detailedCandidate : null;
+  const activeReviewCandidates = reviewCandidateSummary && !reviewBatch.some(candidate => candidate.id === reviewCandidateSummary.id)
+    ? [reviewCandidateSummary]
     : reviewBatch;
 
   const capturedUrlCount = (captureText.match(/https?:\/\//gi) || []).length;
@@ -1118,7 +1133,7 @@ export function DiscoveryMode({ data, refresh, applyDiscoveryCandidateUpdate, en
       ) : (
         <div className="candidate-review-summary">
           <strong>{visibleCandidates.length}</strong>
-          <span>shown from {decisionHistoryCount} roles in your decision history</span>
+          <span>shown from {filteredTotal ?? decisionHistoryCount} matching roles</span>
         </div>
       )}
 
@@ -1257,18 +1272,34 @@ export function DiscoveryMode({ data, refresh, applyDiscoveryCandidateUpdate, en
           </tbody>
         </table>
         <div className="empty-state" style={{ display: visibleCandidates.length ? "none" : "block" }}>
-          {selectedSearch ? "No Discovery results match the current filters." : "Create a Discovery search to start capturing roles."}
+          {selectedSearch
+            ? hasNextPage
+              ? "No loaded Discovery results match the client-side filters. Load more to continue searching this result set."
+              : "No Discovery results match the current filters."
+            : "Create a Discovery search to start capturing roles."}
         </div>
       </div>
 
-      {editingCandidate ? (
+      {hasNextPage ? (
+        <div className="candidate-load-more">
+          <button className="button" type="button" disabled={isFetchingNextPage} onClick={loadMore}>
+            {isFetchingNextPage ? "Loading…" : "Load more candidates"}
+          </button>
+        </div>
+      ) : null}
+
+      {editingCandidate && detailedCandidate?.id === editingCandidate.id ? (
         <CandidateDetailsModal
-          candidate={editingCandidate}
+          candidate={detailedCandidate}
           companies={data.companies}
           pending={pending}
           close={() => setEditingCandidate(null)}
           save={saveCandidateDetails}
         />
+      ) : editingCandidate ? (
+        <div className="detail-status" role="status">
+          {candidateDetailQuery.error ? `Could not load candidate details. ${candidateDetailQuery.error.message}` : "Loading candidate details…"}
+        </div>
       ) : null}
       {reviewCandidate ? (
         <CandidateReviewModal
@@ -1295,6 +1326,10 @@ export function DiscoveryMode({ data, refresh, applyDiscoveryCandidateUpdate, en
           refresh={() => void enrichPendingCandidates(reviewCandidate.id)}
           consider={() => void reviewCandidateStatus(reviewCandidate, "pursued")}
         />
+      ) : reviewCandidateId ? (
+        <div className="detail-status" role="status">
+          {candidateDetailQuery.error ? `Could not load candidate details. ${candidateDetailQuery.error.message}` : "Loading candidate details…"}
+        </div>
       ) : null}
     </>
   );

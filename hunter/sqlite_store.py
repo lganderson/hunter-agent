@@ -7,6 +7,8 @@ export stay lossless while the app gets local transactional persistence.
 import hashlib
 import json
 import sqlite3
+import threading
+from contextlib import contextmanager
 from datetime import datetime
 
 from . import paths, schema, storage
@@ -18,6 +20,21 @@ TABLES = {
     "interviews": (paths.INTERVIEWS, schema.INTERVIEW_FIELDS),
     "actions": (paths.ACTIONS, schema.ACTION_FIELDS),
 }
+
+RESOURCE_FIELDS = {
+    "companies": schema.COMPANY_FIELDS,
+    "company_posting_candidates": schema.COMPANY_POSTING_CANDIDATE_FIELDS,
+    "discovery_candidates": schema.DISCOVERY_CANDIDATE_FIELDS,
+}
+RESOURCE_PRESERVED_FIELDS = {
+    "discovery_candidates": frozenset({"description_text", "warnings", "notes"}),
+}
+
+SCHEMA_VERSION = 21
+LEGACY_SCHEMA_VERSION = 20
+BUSY_TIMEOUT_MS = 5_000
+_initialization_lock = threading.RLock()
+_initialized_database_identity = None
 
 LEGACY_CLOSED_STATUSES = {"rejected", "withdrawn", "archived", "offer_declined", "declined", "accepted"}
 LEGACY_STAGE_MAP = {
@@ -46,9 +63,76 @@ class ClosingConnection(sqlite3.Connection):
 
 def connect():
     paths.DATA_DIR.mkdir(parents=True, exist_ok=True)
-    connection = sqlite3.connect(paths.SQLITE_DB, factory=ClosingConnection)
+    connection = sqlite3.connect(
+        paths.SQLITE_DB,
+        timeout=BUSY_TIMEOUT_MS / 1_000,
+        factory=ClosingConnection,
+    )
     connection.row_factory = sqlite3.Row
+    connection.execute(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}")
     return connection
+
+
+def _database_identity():
+    try:
+        stat = paths.SQLITE_DB.stat()
+    except FileNotFoundError:
+        return (str(paths.SQLITE_DB.resolve()), None, None)
+    return (str(paths.SQLITE_DB.resolve()), stat.st_dev, stat.st_ino)
+
+
+def ensure_initialized():
+    """Initialize the active database once per process and database file.
+
+    The public ``initialize`` function intentionally remains a forceable,
+    idempotent migration entry point for CLI startup, tests, and repair flows.
+    Routine reads and writes use this cached guard instead of rerunning every
+    schema migration for every repository call.
+    """
+    identity = _database_identity()
+    if _initialized_database_identity == identity and identity[1] is not None:
+        return
+    initialize()
+
+
+@contextmanager
+def read_transaction():
+    """Yield one consistent, short-lived SQLite read snapshot."""
+    ensure_initialized()
+    connection = connect()
+    try:
+        connection.execute("BEGIN")
+        yield connection
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
+
+
+def _increment_data_revision(connection):
+    connection.execute(
+        "INSERT INTO meta(key, value) VALUES('data_revision', '1') "
+        "ON CONFLICT(key) DO UPDATE SET value = CAST(value AS INTEGER) + 1"
+    )
+
+
+@contextmanager
+def write_transaction():
+    """Yield a serialized write transaction and advance its data revision once."""
+    ensure_initialized()
+    connection = connect()
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        yield connection
+        _increment_data_revision(connection)
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
 
 
 def quote_identifier(value):
@@ -61,6 +145,216 @@ def quote_field(value, fields):
     if value not in fields:
         raise ValueError(f"Unknown field: {value}")
     return f'"{value}"'
+
+
+def quote_resource(value):
+    if value not in RESOURCE_FIELDS:
+        raise ValueError(f"Unknown resource table: {value}")
+    return f'"{value}"'
+
+
+def _resource_value(table, field, value):
+    if field in RESOURCE_PRESERVED_FIELDS.get(table, ()):
+        return value or ""
+    cleaned = storage.clean(value)
+    if field == "status" and table in {
+        "company_posting_candidates",
+        "discovery_candidates",
+    }:
+        return schema.CANDIDATE_STATUS_ALIASES.get(cleaned.lower(), cleaned)
+    return cleaned
+
+
+def _resource_row(table, row):
+    if row is None:
+        return None
+    return {
+        field: _resource_value(table, field, row[field])
+        for field in RESOURCE_FIELDS[table]
+    }
+
+
+def _update_resource_fields(table, fields, resource_id, updates):
+    ensure_initialized()
+    wanted = storage.clean(resource_id).upper()
+    if not wanted:
+        raise ValueError(f"{table} id is required.")
+    cleaned_updates = {
+        field: _resource_value(table, field, value)
+        for field, value in (updates or {}).items()
+        if field in fields and field != "id"
+    }
+    if not cleaned_updates:
+        raise ValueError(f"No editable {table} fields were provided.")
+    assignments = ", ".join(f'"{field}" = ?' for field in cleaned_updates)
+    quoted_fields = ", ".join(f'"{field}"' for field in fields)
+    with write_transaction() as connection:
+        cursor = connection.execute(
+            f"UPDATE {quote_resource(table)} SET {assignments} WHERE id = ?",
+            [*cleaned_updates.values(), wanted],
+        )
+        if cursor.rowcount != 1:
+            raise ValueError(f"No {table} row found with id {resource_id}.")
+        row = connection.execute(
+            f"SELECT {quoted_fields} FROM {quote_resource(table)} WHERE id = ?",
+            (wanted,),
+        ).fetchone()
+    return _resource_row(table, row)
+
+
+def _bulk_update_resource_fields(table, fields, updates_by_id):
+    ensure_initialized()
+    normalized = []
+    for resource_id, updates in (updates_by_id or {}).items():
+        wanted = storage.clean(resource_id).upper()
+        cleaned_updates = {
+            field: _resource_value(table, field, value)
+            for field, value in (updates or {}).items()
+            if field in fields and field != "id"
+        }
+        if wanted and cleaned_updates:
+            normalized.append((wanted, cleaned_updates))
+    if not normalized:
+        raise ValueError(f"No {table} updates were provided.")
+    ids = [resource_id for resource_id, _updates in normalized]
+    placeholders = ", ".join("?" for _ in ids)
+    quoted_fields = ", ".join(f'"{field}"' for field in fields)
+    with write_transaction() as connection:
+        found = {
+            row["id"]
+            for row in connection.execute(
+                f"SELECT id FROM {quote_resource(table)} WHERE id IN ({placeholders})",
+                ids,
+            ).fetchall()
+        }
+        missing = set(ids) - found
+        if missing:
+            raise ValueError(
+                f"No {table} row found with id " + ", ".join(sorted(missing)) + "."
+            )
+        for resource_id, cleaned_updates in normalized:
+            assignments = ", ".join(f'"{field}" = ?' for field in cleaned_updates)
+            connection.execute(
+                f"UPDATE {quote_resource(table)} SET {assignments} WHERE id = ?",
+                [*cleaned_updates.values(), resource_id],
+            )
+        rows = connection.execute(
+            f"SELECT {quoted_fields} FROM {quote_resource(table)} "
+            f"WHERE id IN ({placeholders})",
+            ids,
+        ).fetchall()
+    by_id = {row["id"]: _resource_row(table, row) for row in rows}
+    return [by_id[resource_id] for resource_id in ids]
+
+
+def _compare_and_update_resource_fields(table, fields, resource_id, expected, updates):
+    ensure_initialized()
+    wanted = storage.clean(resource_id).upper()
+    if not wanted:
+        raise ValueError(f"{table} id is required.")
+    cleaned_expected = {
+        field: _resource_value(table, field, value)
+        for field, value in (expected or {}).items()
+        if field in fields and field != "id"
+    }
+    cleaned_updates = {
+        field: _resource_value(table, field, value)
+        for field, value in (updates or {}).items()
+        if field in fields and field != "id"
+    }
+    if not cleaned_expected:
+        raise ValueError(f"No expected {table} fields were provided.")
+    if not cleaned_updates:
+        raise ValueError(f"No editable {table} fields were provided.")
+    assignments = ", ".join(f'"{field}" = ?' for field in cleaned_updates)
+    conditions = " AND ".join(f'"{field}" = ?' for field in cleaned_expected)
+    quoted_fields = ", ".join(f'"{field}"' for field in fields)
+    with write_transaction() as connection:
+        cursor = connection.execute(
+            f"UPDATE {quote_resource(table)} SET {assignments} "
+            f"WHERE id = ? AND {conditions}",
+            [
+                *cleaned_updates.values(),
+                wanted,
+                *cleaned_expected.values(),
+            ],
+        )
+        row = connection.execute(
+            f"SELECT {quoted_fields} FROM {quote_resource(table)} WHERE id = ?",
+            (wanted,),
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"No {table} row found with id {resource_id}.")
+    return {"updated": cursor.rowcount == 1, "row": _resource_row(table, row)}
+
+
+def _next_available_resource_id(connection, table, prefix, requested_id):
+    requested = storage.clean(requested_id).upper()
+    if requested:
+        existing = connection.execute(
+            f"SELECT 1 FROM {quote_resource(table)} WHERE id = ?",
+            (requested,),
+        ).fetchone()
+        if not existing:
+            return requested
+    highest = 0
+    for row in connection.execute(
+        f"SELECT id FROM {quote_resource(table)} WHERE id LIKE ?",
+        (f"{prefix}%",),
+    ).fetchall():
+        value = storage.clean(row["id"]).upper()
+        suffix = value[len(prefix) :]
+        if suffix.isdigit():
+            highest = max(highest, int(suffix))
+    return f"{prefix}{highest + 1:04d}"
+
+
+def _insert_resource_rows(table, fields, prefix, rows):
+    ensure_initialized()
+    if not rows:
+        return []
+    quoted_fields = ", ".join(f'"{field}"' for field in fields)
+    placeholders = ", ".join("?" for _ in fields)
+    inserted_ids = []
+    with write_transaction() as connection:
+        for source in rows:
+            row = dict(source)
+            if table == "company_posting_candidates":
+                company_id = storage.clean(row.get("company_id", "")).upper()
+                exact_url = storage.clean(row.get("url", ""))
+                existing = (
+                    connection.execute(
+                        "SELECT id FROM company_posting_candidates "
+                        "WHERE upper(company_id) = ? AND url = ?",
+                        (company_id, exact_url),
+                    ).fetchone()
+                    if company_id and exact_url
+                    else None
+                )
+                if existing is not None:
+                    inserted_ids.append(existing["id"])
+                    continue
+            row["id"] = _next_available_resource_id(
+                connection,
+                table,
+                prefix,
+                row.get("id", ""),
+            )
+            values = [_resource_value(table, field, row.get(field, "")) for field in fields]
+            connection.execute(
+                f"INSERT INTO {quote_resource(table)} ({quoted_fields}) "
+                f"VALUES ({placeholders})",
+                values,
+            )
+            inserted_ids.append(row["id"])
+        id_placeholders = ", ".join("?" for _ in inserted_ids)
+        saved = connection.execute(
+            f"SELECT {quoted_fields} FROM {quote_resource(table)} "
+            f"WHERE id IN ({id_placeholders})",
+            inserted_ids,
+        ).fetchall()
+    by_id = {row["id"]: _resource_row(table, row) for row in saved}
+    return [by_id[resource_id] for resource_id in inserted_ids]
 
 
 def create_table_sql(table, fields):
@@ -430,10 +724,74 @@ def migrate_simplified_workflow(connection):
     )
 
 
+def schema_version(connection):
+    row = connection.execute(
+        "SELECT value FROM meta WHERE key = 'schema_version'"
+    ).fetchone()
+    try:
+        return int(row["value"]) if row else 0
+    except (TypeError, ValueError):
+        return 0
+
+
+def data_revision(connection=None):
+    """Return the monotonic revision used to invalidate read-model caches."""
+    if connection is not None:
+        row = connection.execute(
+            "SELECT value FROM meta WHERE key = 'data_revision'"
+        ).fetchone()
+        return int(row["value"]) if row else 0
+    ensure_initialized()
+    with connect() as current:
+        return data_revision(current)
+
+
+def _migrate_to_21(connection):
+    connection.execute(
+        "INSERT INTO meta(key, value) VALUES('data_revision', '0') "
+        "ON CONFLICT(key) DO NOTHING"
+    )
+
+
+SCHEMA_MIGRATIONS = {
+    21: _migrate_to_21,
+}
+
+
+def apply_schema_migrations(connection):
+    """Advance the initialized v20 schema through numbered migrations."""
+    current = schema_version(connection)
+    if current < LEGACY_SCHEMA_VERSION:
+        # The legacy initializer above establishes the complete v20 schema for
+        # both new databases and databases created before versions were tracked.
+        current = LEGACY_SCHEMA_VERSION
+        connection.execute(
+            "INSERT INTO meta(key, value) VALUES('schema_version', ?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (str(current),),
+        )
+    if current > SCHEMA_VERSION:
+        raise RuntimeError(
+            f"Hunter database schema {current} is newer than supported schema {SCHEMA_VERSION}."
+        )
+    for target in range(current + 1, SCHEMA_VERSION + 1):
+        migration = SCHEMA_MIGRATIONS.get(target)
+        if migration is None:
+            raise RuntimeError(f"Missing Hunter database migration for schema {target}.")
+        migration(connection)
+        connection.execute(
+            "UPDATE meta SET value = ? WHERE key = 'schema_version'",
+            (str(target),),
+        )
+    connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+
+
 def initialize():
+    global _initialized_database_identity
     for directory in paths.WORKSPACE_DIRS:
         (paths.ROOT / directory).mkdir(parents=True, exist_ok=True)
-    with connect() as connection:
+    with _initialization_lock, connect() as connection:
+        connection.execute("BEGIN IMMEDIATE")
         for table, (_, fields) in TABLES.items():
             connection.execute(create_table_sql(table, fields))
         migrate_applications_schema(connection)
@@ -650,10 +1008,8 @@ def initialize():
         ensure_text_columns(connection, "discovery_candidates", schema.DISCOVERY_CANDIDATE_FIELDS)
         migrate_discovery_candidates_schema(connection)
         migrate_simplified_workflow(connection)
-        connection.execute(
-            "INSERT INTO meta(key, value) VALUES('schema_version', '20') "
-            "ON CONFLICT(key) DO UPDATE SET value=excluded.value"
-        )
+        apply_schema_migrations(connection)
+    _initialized_database_identity = _database_identity()
 
 
 def is_initialized():
@@ -670,7 +1026,7 @@ def is_initialized():
 
 
 def read_suggestion_dismissals():
-    initialize()
+    ensure_initialized()
     with connect() as connection:
         rows = connection.execute(
             "SELECT suggestion_id, dismissed_at "
@@ -686,8 +1042,8 @@ def read_suggestion_dismissals():
 
 
 def dismiss_suggestion(suggestion_id, dismissed_at):
-    initialize()
-    with connect() as connection:
+    ensure_initialized()
+    with write_transaction() as connection:
         connection.execute(
             "INSERT INTO suggestion_dismissals(suggestion_id, dismissed_at) VALUES (?, ?) "
             "ON CONFLICT(suggestion_id) DO UPDATE SET dismissed_at=excluded.dismissed_at",
@@ -700,9 +1056,9 @@ def dismiss_suggestion(suggestion_id, dismissed_at):
 
 
 def restore_suggestion(suggestion_id):
-    initialize()
+    ensure_initialized()
     cleaned_id = storage.clean(suggestion_id)
-    with connect() as connection:
+    with write_transaction() as connection:
         cursor = connection.execute(
             "DELETE FROM suggestion_dismissals WHERE suggestion_id = ?",
             (cleaned_id,),
@@ -711,12 +1067,13 @@ def restore_suggestion(suggestion_id):
 
 
 def count_rows(table):
+    ensure_initialized()
     with connect() as connection:
         return connection.execute(f"SELECT COUNT(*) AS total FROM {quote_identifier(table)}").fetchone()["total"]
 
 
 def read_table(table):
-    initialize()
+    ensure_initialized()
     _, fields = TABLES[table]
     quoted_fields = ", ".join(quote_field(field, fields) for field in fields)
     with connect() as connection:
@@ -727,12 +1084,12 @@ def read_table(table):
 
 
 def write_table(table, rows):
-    initialize()
+    ensure_initialized()
     _, fields = TABLES[table]
     placeholders = ", ".join("?" for _ in fields)
     quoted_fields = ", ".join(quote_field(field, fields) for field in fields)
     values = [[storage.clean(row.get(field, "")) for field in fields] for row in rows]
-    with connect() as connection:
+    with write_transaction() as connection:
         connection.execute(f"DELETE FROM {quote_identifier(table)}")
         if values:
             connection.executemany(
@@ -742,6 +1099,7 @@ def write_table(table, rows):
 
 
 def upsert_table(table, rows):
+    ensure_initialized()
     _, fields = TABLES[table]
     if not rows:
         return
@@ -753,7 +1111,7 @@ def upsert_table(table, rows):
         if field != "id"
     )
     values = [[storage.clean(row.get(field, "")) for field in fields] for row in rows]
-    with connect() as connection:
+    with write_transaction() as connection:
         connection.executemany(
             f"INSERT INTO {quote_identifier(table)} ({quoted_fields}) VALUES ({placeholders}) "
             f"ON CONFLICT(\"id\") DO UPDATE SET {updates}",
@@ -762,7 +1120,7 @@ def upsert_table(table, rows):
 
 
 def import_from_csv(overwrite=False):
-    initialize()
+    ensure_initialized()
     imported = {}
     for table, (path, fields) in TABLES.items():
         rows = storage.read_rows(path, fields)
@@ -779,7 +1137,7 @@ def import_from_csv(overwrite=False):
 
 
 def export_to_csv():
-    initialize()
+    ensure_initialized()
     exported = {}
     for table, (path, fields) in TABLES.items():
         rows = read_table(table)
@@ -797,9 +1155,9 @@ def write_applications(rows):
 
 
 def delete_unmodified_discovery_application(application_id):
-    initialize()
+    ensure_initialized()
     wanted = storage.clean(application_id).upper()
-    with connect() as connection:
+    with write_transaction() as connection:
         application = connection.execute(
             "SELECT id, stage, source, posting_file FROM applications WHERE upper(id) = ?",
             (wanted,),
@@ -848,7 +1206,7 @@ def write_contacts(rows):
 
 
 def read_companies():
-    initialize()
+    ensure_initialized()
     fields = schema.COMPANY_FIELDS
     quoted_fields = ", ".join(f'"{field}"' for field in fields)
     with connect() as connection:
@@ -856,13 +1214,32 @@ def read_companies():
     return [{field: storage.clean(row[field]) for field in fields} for row in rows]
 
 
-def write_companies(rows):
-    initialize()
+def read_company(company_id):
+    ensure_initialized()
+    fields = schema.COMPANY_FIELDS
+    quoted_fields = ", ".join(f'"{field}"' for field in fields)
+    with connect() as connection:
+        row = connection.execute(
+            f"SELECT {quoted_fields} FROM companies WHERE upper(id) = ?",
+            (storage.clean(company_id).upper(),),
+        ).fetchone()
+    return {field: storage.clean(row[field]) for field in fields} if row else None
+
+
+def replace_companies_for_import(rows):
+    """Replace every company row for explicit import/demo compatibility only."""
+    ensure_initialized()
     fields = schema.COMPANY_FIELDS
     placeholders = ", ".join("?" for _ in fields)
     quoted_fields = ", ".join(f'"{field}"' for field in fields)
-    values = [[storage.clean(row.get(field, "")) for field in fields] for row in rows]
-    with connect() as connection:
+    values = [
+        [
+            _resource_value("companies", field, row.get(field, ""))
+            for field in fields
+        ]
+        for row in rows
+    ]
+    with write_transaction() as connection:
         connection.execute("DELETE FROM companies")
         if values:
             connection.executemany(
@@ -871,72 +1248,186 @@ def write_companies(rows):
             )
 
 
-def merge_company_references(keep_company_id, merge_company_id, company_name):
-    initialize()
-    keep_id = storage.clean(keep_company_id).upper()
-    merge_id = storage.clean(merge_company_id).upper()
-    cleaned_name = storage.clean(company_name)
-    with connect() as connection:
-        connection.execute(
-            "UPDATE applications SET company_id = ?, company = ? WHERE upper(company_id) = ?",
-            (keep_id, cleaned_name, merge_id),
+def write_companies(rows):
+    """Compatibility alias for callers not yet migrated to row-level commands."""
+    replace_companies_for_import(rows)
+
+
+def upsert_companies(rows):
+    ensure_initialized()
+    if not rows:
+        return []
+    fields = schema.COMPANY_FIELDS
+    quoted_fields = ", ".join(f'"{field}"' for field in fields)
+    placeholders = ", ".join("?" for _ in fields)
+    updates = ", ".join(
+        f'"{field}"=excluded."{field}"' for field in fields if field != "id"
+    )
+    values = [[storage.clean(row.get(field, "")) for field in fields] for row in rows]
+    with write_transaction() as connection:
+        connection.executemany(
+            f"INSERT INTO companies ({quoted_fields}) VALUES ({placeholders}) "
+            f"ON CONFLICT(id) DO UPDATE SET {updates}",
+            values,
         )
-        connection.execute(
-            "UPDATE discovery_candidates SET company_id = ? WHERE upper(company_id) = ?",
-            (keep_id, merge_id),
+    return [read_company(row.get("id", "")) for row in rows]
+
+
+def insert_companies(rows):
+    return _insert_resource_rows(
+        "companies",
+        schema.COMPANY_FIELDS,
+        "CO",
+        rows,
+    )
+
+
+def update_company_fields(company_id, updates):
+    return _update_resource_fields(
+        "companies",
+        schema.COMPANY_FIELDS,
+        company_id,
+        updates,
+    )
+
+
+def bulk_update_company_fields(updates_by_id):
+    return _bulk_update_resource_fields(
+        "companies",
+        schema.COMPANY_FIELDS,
+        updates_by_id,
+    )
+
+
+def delete_company(company_id):
+    ensure_initialized()
+    wanted = storage.clean(company_id).upper()
+    if not wanted:
+        raise ValueError("Company id is required.")
+    with write_transaction() as connection:
+        cursor = connection.execute(
+            "DELETE FROM companies WHERE upper(id) = ?",
+            (wanted,),
         )
+        if cursor.rowcount != 1:
+            raise ValueError(f"No company found with id {company_id}.")
+    return {"id": wanted, "deleted": True}
+
+
+def _merge_company_references(connection, keep_id, merge_id, company_name):
+    connection.execute(
+        "UPDATE applications SET company_id = ?, company = ? WHERE upper(company_id) = ?",
+        (keep_id, company_name, merge_id),
+    )
+    connection.execute(
+        "UPDATE discovery_candidates SET company_id = ? WHERE upper(company_id) = ?",
+        (keep_id, merge_id),
+    )
+    connection.execute(
+        "DELETE FROM company_posting_candidates AS merged "
+        "WHERE upper(merged.company_id) = ? AND EXISTS ("
+        "SELECT 1 FROM company_posting_candidates AS kept "
+        "WHERE upper(kept.company_id) = ? AND kept.url = merged.url"
+        ")",
+        (merge_id, keep_id),
+    )
+    connection.execute(
+        "UPDATE company_posting_candidates SET company_id = ? WHERE upper(company_id) = ?",
+        (keep_id, merge_id),
+    )
+    connection.execute(
+        "INSERT INTO company_contacts(company_id, contact_id, created_at) "
+        "SELECT ?, contact_id, created_at FROM company_contacts WHERE upper(company_id) = ? "
+        "ON CONFLICT(company_id, contact_id) DO NOTHING",
+        (keep_id, merge_id),
+    )
+    connection.execute(
+        "DELETE FROM company_contacts WHERE upper(company_id) = ?",
+        (merge_id,),
+    )
+    kept_source = connection.execute(
+        "SELECT 1 FROM company_career_sources WHERE upper(company_id) = ?",
+        (keep_id,),
+    ).fetchone()
+    if kept_source:
         connection.execute(
-            "DELETE FROM company_posting_candidates AS merged "
-            "WHERE upper(merged.company_id) = ? AND EXISTS ("
-            "SELECT 1 FROM company_posting_candidates AS kept "
-            "WHERE upper(kept.company_id) = ? AND kept.url = merged.url"
-            ")",
-            (merge_id, keep_id),
-        )
-        connection.execute(
-            "UPDATE company_posting_candidates SET company_id = ? WHERE upper(company_id) = ?",
-            (keep_id, merge_id),
-        )
-        connection.execute(
-            "INSERT INTO company_contacts(company_id, contact_id, created_at) "
-            "SELECT ?, contact_id, created_at FROM company_contacts WHERE upper(company_id) = ? "
-            "ON CONFLICT(company_id, contact_id) DO NOTHING",
-            (keep_id, merge_id),
-        )
-        connection.execute(
-            "DELETE FROM company_contacts WHERE upper(company_id) = ?",
+            "DELETE FROM company_career_sources WHERE upper(company_id) = ?",
             (merge_id,),
         )
-        kept_source = connection.execute(
-            "SELECT 1 FROM company_career_sources WHERE upper(company_id) = ?",
-            (keep_id,),
-        ).fetchone()
-        if kept_source:
-            connection.execute(
-                "DELETE FROM company_career_sources WHERE upper(company_id) = ?",
-                (merge_id,),
-            )
-        else:
-            connection.execute(
-                "UPDATE company_career_sources SET company_id = ? WHERE upper(company_id) = ?",
-                (keep_id, merge_id),
-            )
+    else:
         connection.execute(
-            "DELETE FROM company_career_scans AS merged "
-            "WHERE upper(merged.company_id) = ? AND EXISTS ("
-            "SELECT 1 FROM company_career_scans AS kept "
-            "WHERE upper(kept.company_id) = ? AND kept.checked_at = merged.checked_at"
-            ")",
-            (merge_id, keep_id),
-        )
-        connection.execute(
-            "UPDATE company_career_scans SET company_id = ? WHERE upper(company_id) = ?",
+            "UPDATE company_career_sources SET company_id = ? WHERE upper(company_id) = ?",
             (keep_id, merge_id),
         )
+    connection.execute(
+        "DELETE FROM company_career_scans AS merged "
+        "WHERE upper(merged.company_id) = ? AND EXISTS ("
+        "SELECT 1 FROM company_career_scans AS kept "
+        "WHERE upper(kept.company_id) = ? AND kept.checked_at = merged.checked_at"
+        ")",
+        (merge_id, keep_id),
+    )
+    connection.execute(
+        "UPDATE company_career_scans SET company_id = ? WHERE upper(company_id) = ?",
+        (keep_id, merge_id),
+    )
+
+
+def merge_company_references(keep_company_id, merge_company_id, company_name):
+    ensure_initialized()
+    keep_id = storage.clean(keep_company_id).upper()
+    merge_id = storage.clean(merge_company_id).upper()
+    with write_transaction() as connection:
+        _merge_company_references(
+            connection,
+            keep_id,
+            merge_id,
+            storage.clean(company_name),
+        )
+
+
+def merge_companies_atomic(keep_row, merge_company_id):
+    """Update, relink, and delete a company duplicate in one transaction."""
+    ensure_initialized()
+    fields = schema.COMPANY_FIELDS
+    keep_id = storage.clean((keep_row or {}).get("id", "")).upper()
+    merge_id = storage.clean(merge_company_id).upper()
+    if not keep_id or not merge_id or keep_id == merge_id:
+        raise ValueError("Choose two different company records to merge.")
+    editable_fields = [field for field in fields if field != "id"]
+    assignments = ", ".join(f'"{field}" = ?' for field in editable_fields)
+    quoted_fields = ", ".join(f'"{field}"' for field in fields)
+    values = [_resource_value("companies", field, keep_row.get(field, "")) for field in editable_fields]
+    with write_transaction() as connection:
+        found = {
+            row["id"].upper()
+            for row in connection.execute(
+                "SELECT id FROM companies WHERE upper(id) IN (?, ?)",
+                (keep_id, merge_id),
+            ).fetchall()
+        }
+        if found != {keep_id, merge_id}:
+            raise ValueError("One of the company records no longer exists.")
+        connection.execute(
+            f"UPDATE companies SET {assignments} WHERE upper(id) = ?",
+            [*values, keep_id],
+        )
+        _merge_company_references(
+            connection,
+            keep_id,
+            merge_id,
+            storage.clean(keep_row.get("name", "")),
+        )
+        connection.execute("DELETE FROM companies WHERE upper(id) = ?", (merge_id,))
+        saved = connection.execute(
+            f"SELECT {quoted_fields} FROM companies WHERE upper(id) = ?",
+            (keep_id,),
+        ).fetchone()
+    return _resource_row("companies", saved)
 
 
 def read_application_contacts():
-    initialize()
+    ensure_initialized()
     with connect() as connection:
         rows = connection.execute(
             "SELECT application_id, contact_id, created_at FROM application_contacts "
@@ -953,13 +1444,13 @@ def read_application_contacts():
 
 
 def link_application_contact(application_id, contact_id):
-    initialize()
+    ensure_initialized()
     link = {
         "application_id": storage.clean(application_id).upper(),
         "contact_id": storage.clean(contact_id).upper(),
         "created_at": datetime.now().isoformat(timespec="seconds"),
     }
-    with connect() as connection:
+    with write_transaction() as connection:
         connection.execute(
             "INSERT INTO application_contacts(application_id, contact_id, created_at) VALUES (?, ?, ?) "
             "ON CONFLICT(application_id, contact_id) DO NOTHING",
@@ -969,10 +1460,10 @@ def link_application_contact(application_id, contact_id):
 
 
 def unlink_application_contact(application_id, contact_id):
-    initialize()
+    ensure_initialized()
     application_id = storage.clean(application_id).upper()
     contact_id = storage.clean(contact_id).upper()
-    with connect() as connection:
+    with write_transaction() as connection:
         connection.execute(
             "DELETE FROM application_contacts WHERE application_id = ? AND contact_id = ?",
             (application_id, contact_id),
@@ -981,7 +1472,7 @@ def unlink_application_contact(application_id, contact_id):
 
 
 def read_company_contacts():
-    initialize()
+    ensure_initialized()
     with connect() as connection:
         rows = connection.execute(
             "SELECT company_id, contact_id, created_at FROM company_contacts "
@@ -998,13 +1489,13 @@ def read_company_contacts():
 
 
 def link_company_contact(company_id, contact_id):
-    initialize()
+    ensure_initialized()
     link = {
         "company_id": storage.clean(company_id).upper(),
         "contact_id": storage.clean(contact_id).upper(),
         "created_at": datetime.now().isoformat(timespec="seconds"),
     }
-    with connect() as connection:
+    with write_transaction() as connection:
         connection.execute(
             "INSERT INTO company_contacts(company_id, contact_id, created_at) VALUES (?, ?, ?) "
             "ON CONFLICT(company_id, contact_id) DO NOTHING",
@@ -1014,10 +1505,10 @@ def link_company_contact(company_id, contact_id):
 
 
 def unlink_company_contact(company_id, contact_id):
-    initialize()
+    ensure_initialized()
     company_id = storage.clean(company_id).upper()
     contact_id = storage.clean(contact_id).upper()
-    with connect() as connection:
+    with write_transaction() as connection:
         connection.execute(
             "DELETE FROM company_contacts WHERE company_id = ? AND contact_id = ?",
             (company_id, contact_id),
@@ -1026,7 +1517,7 @@ def unlink_company_contact(company_id, contact_id):
 
 
 def read_company_career_sources():
-    initialize()
+    ensure_initialized()
     fields = schema.COMPANY_CAREER_SOURCE_FIELDS
     quoted_fields = ", ".join(f'"{field}"' for field in fields)
     with connect() as connection:
@@ -1037,12 +1528,12 @@ def read_company_career_sources():
 
 
 def write_company_career_sources(rows):
-    initialize()
+    ensure_initialized()
     fields = schema.COMPANY_CAREER_SOURCE_FIELDS
     placeholders = ", ".join("?" for _ in fields)
     quoted_fields = ", ".join(f'"{field}"' for field in fields)
     values = [[storage.clean(row.get(field, "")) for field in fields] for row in rows]
-    with connect() as connection:
+    with write_transaction() as connection:
         connection.execute("DELETE FROM company_career_sources")
         if values:
             connection.executemany(
@@ -1051,8 +1542,29 @@ def write_company_career_sources(rows):
             )
 
 
+def upsert_company_career_source(row):
+    ensure_initialized()
+    fields = schema.COMPANY_CAREER_SOURCE_FIELDS
+    quoted_fields = ", ".join(f'"{field}"' for field in fields)
+    placeholders = ", ".join("?" for _ in fields)
+    updates = ", ".join(
+        f'"{field}"=excluded."{field}"' for field in fields if field != "company_id"
+    )
+    values = [storage.clean(row.get(field, "")) for field in fields]
+    with write_transaction() as connection:
+        connection.execute(
+            f"INSERT INTO company_career_sources ({quoted_fields}) VALUES ({placeholders}) "
+            f"ON CONFLICT(company_id) DO UPDATE SET {updates}",
+            values,
+        )
+    return {
+        field: storage.clean(row.get(field, ""))
+        for field in fields
+    }
+
+
 def read_company_posting_candidates():
-    initialize()
+    ensure_initialized()
     fields = schema.COMPANY_POSTING_CANDIDATE_FIELDS
     quoted_fields = ", ".join(f'"{field}"' for field in fields)
     with connect() as connection:
@@ -1062,13 +1574,32 @@ def read_company_posting_candidates():
     return [{field: storage.clean(row[field]) for field in fields} for row in rows]
 
 
-def write_company_posting_candidates(rows):
-    initialize()
+def read_company_posting_candidate(candidate_id):
+    ensure_initialized()
+    fields = schema.COMPANY_POSTING_CANDIDATE_FIELDS
+    quoted_fields = ", ".join(f'"{field}"' for field in fields)
+    with connect() as connection:
+        row = connection.execute(
+            f"SELECT {quoted_fields} FROM company_posting_candidates WHERE id = ?",
+            (storage.clean(candidate_id).upper(),),
+        ).fetchone()
+    return _resource_row("company_posting_candidates", row)
+
+
+def replace_company_posting_candidates_for_import(rows):
+    """Replace all tracked-company candidates for import/demo compatibility only."""
+    ensure_initialized()
     fields = schema.COMPANY_POSTING_CANDIDATE_FIELDS
     placeholders = ", ".join("?" for _ in fields)
     quoted_fields = ", ".join(f'"{field}"' for field in fields)
-    values = [[storage.clean(row.get(field, "")) for field in fields] for row in rows]
-    with connect() as connection:
+    values = [
+        [
+            _resource_value("company_posting_candidates", field, row.get(field, ""))
+            for field in fields
+        ]
+        for row in rows
+    ]
+    with write_transaction() as connection:
         connection.execute("DELETE FROM company_posting_candidates")
         if values:
             connection.executemany(
@@ -1077,8 +1608,88 @@ def write_company_posting_candidates(rows):
             )
 
 
+def write_company_posting_candidates(rows):
+    """Compatibility alias for callers not yet migrated to row-level commands."""
+    replace_company_posting_candidates_for_import(rows)
+
+
+def upsert_company_posting_candidates(rows):
+    ensure_initialized()
+    if not rows:
+        return []
+    fields = schema.COMPANY_POSTING_CANDIDATE_FIELDS
+    quoted_fields = ", ".join(f'"{field}"' for field in fields)
+    placeholders = ", ".join("?" for _ in fields)
+    updates = ", ".join(
+        f'"{field}"=excluded."{field}"' for field in fields if field != "id"
+    )
+    values = [
+        [
+            _resource_value("company_posting_candidates", field, row.get(field, ""))
+            for field in fields
+        ]
+        for row in rows
+    ]
+    with write_transaction() as connection:
+        connection.executemany(
+            f"INSERT INTO company_posting_candidates ({quoted_fields}) VALUES ({placeholders}) "
+            f"ON CONFLICT(id) DO UPDATE SET {updates}",
+            values,
+        )
+    return [read_company_posting_candidate(row.get("id", "")) for row in rows]
+
+
+def insert_company_posting_candidates(rows):
+    return _insert_resource_rows(
+        "company_posting_candidates",
+        schema.COMPANY_POSTING_CANDIDATE_FIELDS,
+        "CP",
+        rows,
+    )
+
+
+def update_company_posting_candidate_fields(candidate_id, updates):
+    return _update_resource_fields(
+        "company_posting_candidates",
+        schema.COMPANY_POSTING_CANDIDATE_FIELDS,
+        candidate_id,
+        updates,
+    )
+
+
+def compare_and_update_company_posting_candidate_fields(
+    candidate_id,
+    expected,
+    updates,
+):
+    return _compare_and_update_resource_fields(
+        "company_posting_candidates",
+        schema.COMPANY_POSTING_CANDIDATE_FIELDS,
+        candidate_id,
+        expected,
+        updates,
+    )
+
+
+def bulk_update_company_posting_candidate_fields(updates_by_id):
+    return _bulk_update_resource_fields(
+        "company_posting_candidates",
+        schema.COMPANY_POSTING_CANDIDATE_FIELDS,
+        updates_by_id,
+    )
+
+
+def update_company_posting_candidate_statuses(candidate_ids, status):
+    updates = {
+        storage.clean(candidate_id).upper(): {"status": storage.clean(status)}
+        for candidate_id in candidate_ids or []
+        if storage.clean(candidate_id)
+    }
+    return bulk_update_company_posting_candidate_fields(updates)
+
+
 def read_company_career_scans(company_id="", limit=200):
-    initialize()
+    ensure_initialized()
     fields = schema.COMPANY_CAREER_SCAN_FIELDS
     quoted_fields = ", ".join(f'"{field}"' for field in fields)
     query = f"SELECT {quoted_fields} FROM company_career_scans"
@@ -1094,13 +1705,13 @@ def read_company_career_scans(company_id="", limit=200):
 
 
 def write_company_career_scan(row):
-    initialize()
+    ensure_initialized()
     fields = schema.COMPANY_CAREER_SCAN_FIELDS
     quoted_fields = ", ".join(f'"{field}"' for field in fields)
     placeholders = ", ".join("?" for _ in fields)
     updates = ", ".join(f'"{field}"=excluded."{field}"' for field in fields[2:])
     values = [storage.clean(row.get(field, "")) for field in fields]
-    with connect() as connection:
+    with write_transaction() as connection:
         connection.execute(
             f"INSERT INTO company_career_scans ({quoted_fields}) VALUES ({placeholders}) "
             f"ON CONFLICT(company_id, checked_at) DO UPDATE SET {updates}",
@@ -1110,13 +1721,13 @@ def write_company_career_scan(row):
 
 
 def clear_company_career_scans():
-    initialize()
-    with connect() as connection:
+    ensure_initialized()
+    with write_transaction() as connection:
         connection.execute("DELETE FROM company_career_scans")
 
 
 def read_discovery_searches():
-    initialize()
+    ensure_initialized()
     fields = schema.DISCOVERY_SEARCH_FIELDS
     quoted_fields = ", ".join(f'"{field}"' for field in fields)
     with connect() as connection:
@@ -1127,12 +1738,12 @@ def read_discovery_searches():
 
 
 def write_discovery_searches(rows):
-    initialize()
+    ensure_initialized()
     fields = schema.DISCOVERY_SEARCH_FIELDS
     placeholders = ", ".join("?" for _ in fields)
     quoted_fields = ", ".join(f'"{field}"' for field in fields)
     values = [[storage.clean(row.get(field, "")) for field in fields] for row in rows]
-    with connect() as connection:
+    with write_transaction() as connection:
         connection.execute("DELETE FROM discovery_searches")
         if values:
             connection.executemany(
@@ -1142,7 +1753,7 @@ def write_discovery_searches(rows):
 
 
 def read_discovery_candidates():
-    initialize()
+    ensure_initialized()
     fields = schema.DISCOVERY_CANDIDATE_FIELDS
     quoted_fields = ", ".join(f'"{field}"' for field in fields)
     preserved_fields = {"description_text", "warnings", "notes"}
@@ -1160,8 +1771,89 @@ def read_discovery_candidates():
     ]
 
 
-def write_discovery_candidates(rows):
-    initialize()
+def read_discovery_candidates_snapshot():
+    """Read candidates and their revision from one consistent snapshot."""
+    fields = schema.DISCOVERY_CANDIDATE_FIELDS
+    preserved_fields = RESOURCE_PRESERVED_FIELDS["discovery_candidates"]
+    quoted_fields = ", ".join(f'"{field}"' for field in fields)
+    with read_transaction() as connection:
+        revision = data_revision(connection)
+        rows = connection.execute(
+            f"SELECT {quoted_fields} FROM discovery_candidates "
+            "ORDER BY captured_at DESC, lower(title), id"
+        ).fetchall()
+    return revision, [
+        {
+            field: (row[field] or "")
+            if field in preserved_fields
+            else storage.clean(row[field])
+            for field in fields
+        }
+        for row in rows
+    ]
+
+
+def reconcile_discovery_candidates(expected_revision, rows):
+    """Apply topology-changing canonicalization only to its exact snapshot."""
+    ensure_initialized()
+    fields = schema.DISCOVERY_CANDIDATE_FIELDS
+    quoted_fields = ", ".join(f'"{field}"' for field in fields)
+    placeholders = ", ".join("?" for _ in fields)
+    updates = ", ".join(
+        f'"{field}"=excluded."{field}"' for field in fields if field != "id"
+    )
+    values = [
+        [
+            _resource_value("discovery_candidates", field, row.get(field, ""))
+            for field in fields
+        ]
+        for row in rows
+    ]
+    ids = [value[0] for value in values]
+    connection = connect()
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        if data_revision(connection) != int(expected_revision):
+            connection.rollback()
+            return False
+        if ids:
+            id_placeholders = ", ".join("?" for _ in ids)
+            connection.execute(
+                f"DELETE FROM discovery_candidates WHERE id NOT IN ({id_placeholders})",
+                ids,
+            )
+            connection.executemany(
+                f"INSERT INTO discovery_candidates ({quoted_fields}) VALUES ({placeholders}) "
+                f"ON CONFLICT(id) DO UPDATE SET {updates}",
+                values,
+            )
+        else:
+            connection.execute("DELETE FROM discovery_candidates")
+        _increment_data_revision(connection)
+        connection.commit()
+        return True
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
+
+
+def read_discovery_candidate(candidate_id):
+    ensure_initialized()
+    fields = schema.DISCOVERY_CANDIDATE_FIELDS
+    quoted_fields = ", ".join(f'"{field}"' for field in fields)
+    with connect() as connection:
+        row = connection.execute(
+            f"SELECT {quoted_fields} FROM discovery_candidates WHERE id = ?",
+            (storage.clean(candidate_id).upper(),),
+        ).fetchone()
+    return _resource_row("discovery_candidates", row)
+
+
+def replace_discovery_candidates_for_import(rows):
+    """Replace all Discovery candidates for import/demo compatibility only."""
+    ensure_initialized()
     fields = schema.DISCOVERY_CANDIDATE_FIELDS
     preserved_fields = {"description_text", "warnings", "notes"}
     placeholders = ", ".join("?" for _ in fields)
@@ -1169,12 +1861,12 @@ def write_discovery_candidates(rows):
     values = [
         [
             (row.get(field, "") or "") if field in preserved_fields
-            else storage.clean(row.get(field, ""))
+            else _resource_value("discovery_candidates", field, row.get(field, ""))
             for field in fields
         ]
         for row in rows
     ]
-    with connect() as connection:
+    with write_transaction() as connection:
         connection.execute("DELETE FROM discovery_candidates")
         if values:
             connection.executemany(
@@ -1183,8 +1875,100 @@ def write_discovery_candidates(rows):
             )
 
 
+def write_discovery_candidates(rows):
+    """Compatibility alias for callers not yet migrated to row-level commands."""
+    replace_discovery_candidates_for_import(rows)
+
+
+def upsert_discovery_candidates(rows):
+    ensure_initialized()
+    if not rows:
+        return []
+    fields = schema.DISCOVERY_CANDIDATE_FIELDS
+    preserved_fields = RESOURCE_PRESERVED_FIELDS["discovery_candidates"]
+    quoted_fields = ", ".join(f'"{field}"' for field in fields)
+    placeholders = ", ".join("?" for _ in fields)
+    updates = ", ".join(
+        f'"{field}"=excluded."{field}"' for field in fields if field != "id"
+    )
+    values = [
+        [
+            (row.get(field, "") or "") if field in preserved_fields
+            else _resource_value("discovery_candidates", field, row.get(field, ""))
+            for field in fields
+        ]
+        for row in rows
+    ]
+    with write_transaction() as connection:
+        connection.executemany(
+            f"INSERT INTO discovery_candidates ({quoted_fields}) VALUES ({placeholders}) "
+            f"ON CONFLICT(id) DO UPDATE SET {updates}",
+            values,
+        )
+    return [read_discovery_candidate(row.get("id", "")) for row in rows]
+
+
+def insert_discovery_candidates(rows):
+    return _insert_resource_rows(
+        "discovery_candidates",
+        schema.DISCOVERY_CANDIDATE_FIELDS,
+        "DC",
+        rows,
+    )
+
+
+def update_discovery_candidate_fields(candidate_id, updates):
+    return _update_resource_fields(
+        "discovery_candidates",
+        schema.DISCOVERY_CANDIDATE_FIELDS,
+        candidate_id,
+        updates,
+    )
+
+
+def compare_and_update_discovery_candidate_fields(candidate_id, expected, updates):
+    return _compare_and_update_resource_fields(
+        "discovery_candidates",
+        schema.DISCOVERY_CANDIDATE_FIELDS,
+        candidate_id,
+        expected,
+        updates,
+    )
+
+
+def bulk_update_discovery_candidate_fields(updates_by_id):
+    return _bulk_update_resource_fields(
+        "discovery_candidates",
+        schema.DISCOVERY_CANDIDATE_FIELDS,
+        updates_by_id,
+    )
+
+
+def update_discovery_candidate_statuses(candidate_ids, status, **status_fields):
+    fields = {
+        "status": storage.clean(status),
+        **{
+            key: value
+            for key, value in status_fields.items()
+            if key in {
+                "ingested_application_id",
+                "ignore_reason",
+                "ignore_reason_detail",
+                "freshness_status",
+                "freshness_checked_at",
+            }
+        },
+    }
+    updates = {
+        storage.clean(candidate_id).upper(): fields
+        for candidate_id in candidate_ids or []
+        if storage.clean(candidate_id)
+    }
+    return bulk_update_discovery_candidate_fields(updates)
+
+
 def read_posting_note(application_id):
-    initialize()
+    ensure_initialized()
     with connect() as connection:
         row = connection.execute(
             "SELECT application_id, path, content, updated_at FROM posting_notes WHERE upper(application_id) = ?",
@@ -1201,14 +1985,14 @@ def read_posting_note(application_id):
 
 
 def write_posting_note(application_id, path, content):
-    initialize()
+    ensure_initialized()
     note = {
         "application_id": storage.clean(application_id).upper(),
         "path": storage.clean(path),
         "content": content or "",
         "updated_at": datetime.now().isoformat(timespec="seconds"),
     }
-    with connect() as connection:
+    with write_transaction() as connection:
         connection.execute(
             "INSERT INTO posting_notes(application_id, path, content, updated_at) VALUES (?, ?, ?, ?) "
             "ON CONFLICT(application_id) DO UPDATE SET "
@@ -1219,7 +2003,7 @@ def write_posting_note(application_id, path, content):
 
 
 def import_posting_notes_from_files(overwrite=False):
-    initialize()
+    ensure_initialized()
     imported = 0
     skipped = 0
     for app in read_applications():
@@ -1241,13 +2025,13 @@ def import_posting_notes_from_files(overwrite=False):
 
 
 def posting_note_count():
-    initialize()
+    ensure_initialized()
     with connect() as connection:
         return connection.execute("SELECT COUNT(*) AS total FROM posting_notes").fetchone()["total"]
 
 
 def read_posting_snapshots(application_id=""):
-    initialize()
+    ensure_initialized()
     params = []
     where = ""
     wanted = storage.clean(application_id).upper()
@@ -1300,7 +2084,7 @@ def write_posting_snapshot(application_id, values):
         "source_html": source_html,
         "warnings": values.get("warnings", "") or "",
     }
-    with connect() as connection:
+    with write_transaction() as connection:
         connection.execute(
             "INSERT INTO posting_snapshots("
             "application_id, source_url, final_url, captured_at, http_status, capture_method, capture_model, sources_json, content_hash, content_text, source_html, warnings"
@@ -1322,7 +2106,7 @@ def write_posting_snapshot(application_id, values):
 
 
 def read_resume_versions(application_id=""):
-    initialize()
+    ensure_initialized()
     params = []
     where = ""
     wanted = storage.clean(application_id).upper()
@@ -1346,7 +2130,7 @@ def read_resume_versions(application_id=""):
 
 
 def write_resume_version(row):
-    initialize()
+    ensure_initialized()
     fields = schema.RESUME_VERSION_FIELDS
     values = [
         (row.get(field, "") or "") if field in {"guidance", "changes_json", "warnings_json"}
@@ -1355,7 +2139,7 @@ def write_resume_version(row):
     ]
     quoted_fields = ", ".join(f'"{field}"' for field in fields)
     placeholders = ", ".join("?" for _ in fields)
-    with connect() as connection:
+    with write_transaction() as connection:
         connection.execute(
             f"INSERT INTO resume_versions ({quoted_fields}) VALUES ({placeholders})",
             values,
@@ -1366,7 +2150,7 @@ def write_resume_version(row):
 def record_event(entity_type, entity_id, event_type, data):
     payload = json.dumps(data, sort_keys=True)
     created_at = datetime.now().isoformat(timespec="seconds")
-    with connect() as connection:
+    with write_transaction() as connection:
         connection.execute(
             "INSERT INTO events(entity_type, entity_id, event_type, created_at, data_json) "
             "VALUES (?, ?, ?, ?, ?)",
@@ -1375,14 +2159,14 @@ def record_event(entity_type, entity_id, event_type, data):
 
 
 def update_action_status(action_id, status):
-    initialize()
+    ensure_initialized()
     status = normalize_action_status(status)
     if status not in schema.ACTION_STATUSES:
         raise ValueError(f"Unsupported action status: {status}")
 
     wanted = storage.clean(action_id).upper()
     completed_date = storage.today_iso() if status in schema.COMPLETED_ACTION_STATUSES else ""
-    with connect() as connection:
+    with write_transaction() as connection:
         row = connection.execute(
             "SELECT * FROM actions WHERE upper(id) = ?",
             (wanted,),

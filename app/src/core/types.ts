@@ -102,6 +102,7 @@ export type Company = {
   company_metadata_source: string;
   company_metadata_checked_at: string;
   company_metadata_suggestions_json: string;
+  company_metadata_suggestion_count?: number;
   company_research_status: string;
   company_discovery_source: string;
   company_discovery_source_url: string;

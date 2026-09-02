@@ -1735,6 +1735,12 @@
       background: var(--surface);
     }
 
+    .candidate-mode-switch button:focus-visible,
+    .candidate-selection-checkbox:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+    }
+
     .candidate-mode-switch button.active {
       border-color: var(--border-strong);
       background: var(--surface);
@@ -3375,8 +3381,8 @@
     }
 
     .candidate-selection-checkbox {
-      width: 16px;
-      height: 16px;
+      width: 24px;
+      height: 24px;
       margin: 0;
       accent-color: var(--accent);
       cursor: pointer;

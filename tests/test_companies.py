@@ -3,6 +3,7 @@ import html as html_lib
 import json
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -848,6 +849,52 @@ class HunterCompaniesTest(unittest.TestCase):
         self.assertIn("external-job-id:744000133930119", keys)
         self.assertIn("path:smartrecruiters:744000133930119-technical-program-manager-ai-initiatives", keys)
         self.assertNotIn("path:smartrecruiters:ubisoft2", keys)
+
+    def test_posting_identity_cache_is_normalized_and_mutation_isolated(self):
+        companies._posting_identity_keys_cached.cache_clear()
+        first = companies.posting_identity_keys(
+            "https://job-boards.greenhouse.io/example/jobs/6135395004"
+            "?gh_jid=6135395004&utm_source=first"
+        )
+        first.add("caller-only")
+        second = companies.posting_identity_keys(
+            "https://job-boards.greenhouse.io/example/jobs/6135395004"
+            "?gh_jid=6135395004&utm_source=second"
+        )
+
+        self.assertNotIn("caller-only", second)
+        self.assertIn("greenhouse:6135395004", second)
+        self.assertEqual(companies._posting_identity_keys_cached.cache_info().misses, 1)
+        self.assertGreaterEqual(companies._posting_identity_keys_cached.cache_info().hits, 1)
+
+    def test_identity_caches_are_safe_under_concurrent_callers(self):
+        companies._posting_identity_keys_cached.cache_clear()
+        companies._normalized_requisition_ids_cached.cache_clear()
+        url = (
+            "https://jobs.smartrecruiters.com/Example/"
+            "744000133930119-technical-program-manager"
+        )
+
+        def identity(_index):
+            keys = companies.posting_identity_keys(url)
+            requisitions = companies.normalized_requisition_ids(url)
+            keys.add(f"local:{_index}")
+            requisitions.add(f"local:{_index}")
+            return keys, requisitions
+
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            results = list(executor.map(identity, range(64)))
+
+        for index, (keys, requisitions) in enumerate(results):
+            self.assertIn(f"local:{index}", keys)
+            self.assertIn(f"local:{index}", requisitions)
+            self.assertIn("smartrecruiters:744000133930119", keys)
+            self.assertEqual(
+                requisitions - {f"local:{index}"},
+                {"744000133930119"},
+            )
+        self.assertEqual(companies._posting_identity_keys_cached.cache_info().currsize, 1)
+        self.assertEqual(companies._normalized_requisition_ids_cached.cache_info().currsize, 1)
 
     def test_smartrecruiters_candidate_matches_branded_careers_url_by_job_id(self):
         sqlite_store.initialize()

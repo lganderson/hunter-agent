@@ -110,7 +110,8 @@ function buildHunterSuggestions(data: AppState): HunterSuggestion[] {
   });
 
   data.companies.forEach(company => {
-    const count = metadataSuggestionCount(company.company_metadata_suggestions_json);
+    const count = company.company_metadata_suggestion_count
+      ?? metadataSuggestionCount(company.company_metadata_suggestions_json);
     if (!count) return;
     suggestions.push({
       id: `company-research:${company.id}`,

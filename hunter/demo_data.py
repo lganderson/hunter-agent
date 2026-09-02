@@ -46,7 +46,7 @@ def _existing_counts():
 
 
 def _posting_note_count():
-    with sqlite_store.connect() as connection:
+    with sqlite_store.read_transaction() as connection:
         row = connection.execute("SELECT COUNT(*) AS total FROM posting_notes").fetchone()
     return int(row["total"])
 
@@ -54,16 +54,16 @@ def _posting_note_count():
 def _clear_related_tables():
     chat_history.clear_messages()
     repository.clear_company_career_scans()
-    with sqlite_store.connect() as connection:
+    with sqlite_store.write_transaction() as connection:
         connection.execute("DELETE FROM application_contacts")
         connection.execute("DELETE FROM company_contacts")
         connection.execute("DELETE FROM posting_notes")
         connection.execute("DELETE FROM posting_snapshots")
     repository.write_company_career_sources([])
-    repository.write_company_posting_candidates([])
-    repository.write_discovery_candidates([])
+    repository.replace_company_posting_candidates_for_import([])
+    repository.replace_discovery_candidates_for_import([])
     repository.write_discovery_searches([])
-    repository.write_companies([])
+    repository.replace_companies_for_import([])
     repository.write_applications([])
     repository.write_actions([])
     repository.write_contacts([])
@@ -71,7 +71,7 @@ def _clear_related_tables():
 
 
 def _replace_company_contacts(rows):
-    with sqlite_store.connect() as connection:
+    with sqlite_store.write_transaction() as connection:
         connection.execute("DELETE FROM company_contacts")
         for row in rows:
             connection.execute(
@@ -85,7 +85,7 @@ def _replace_company_contacts(rows):
 
 
 def _replace_posting_notes(rows):
-    with sqlite_store.connect() as connection:
+    with sqlite_store.write_transaction() as connection:
         connection.execute("DELETE FROM posting_notes")
         for row in rows:
             connection.execute(
@@ -116,7 +116,9 @@ def load_demo_data(overwrite=False, path=DEMO_DATA_FILE):
 
     payload = read_demo_data(path)
     _clear_related_tables()
-    repository.write_companies(_clean_rows(payload.get("companies", []), schema.COMPANY_FIELDS))
+    repository.replace_companies_for_import(
+        _clean_rows(payload.get("companies", []), schema.COMPANY_FIELDS)
+    )
     repository.write_contacts(_clean_rows(payload.get("contacts", []), schema.CONTACT_FIELDS))
     repository.write_applications(_clean_rows(payload.get("applications", []), schema.APPLICATION_FIELDS))
     repository.write_actions(_clean_rows(payload.get("actions", []), schema.ACTION_FIELDS))
@@ -124,7 +126,7 @@ def load_demo_data(overwrite=False, path=DEMO_DATA_FILE):
     repository.write_company_career_sources(
         _clean_rows(payload.get("company_career_sources", []), schema.COMPANY_CAREER_SOURCE_FIELDS)
     )
-    repository.write_company_posting_candidates(
+    repository.replace_company_posting_candidates_for_import(
         _clean_rows(payload.get("company_posting_candidates", []), schema.COMPANY_POSTING_CANDIDATE_FIELDS)
     )
     _replace_company_contacts(payload.get("company_contacts", []))

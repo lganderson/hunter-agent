@@ -10,6 +10,7 @@ export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, ".", "");
   const frontendPort = portFromEnv(env.VITE_PORT, 5173);
   const apiPort = portFromEnv(env.HUNTER_API_PORT || env.PORT, 8010);
+  const apiOrigin = `http://127.0.0.1:${apiPort}`;
 
   return {
     plugins: [react()],
@@ -17,7 +18,11 @@ export default defineConfig(({ mode }) => {
       port: frontendPort,
       strictPort: true,
       proxy: {
-        "/api": `http://127.0.0.1:${apiPort}`
+        "/api": {
+          target: apiOrigin,
+          changeOrigin: true,
+          headers: { Origin: apiOrigin }
+        }
       }
     }
   };

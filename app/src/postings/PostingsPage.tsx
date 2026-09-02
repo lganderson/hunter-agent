@@ -83,10 +83,10 @@ export function PostingsPage({ data }: { data: AppState }) {
   }
 
   return (
-    <section className="view-section workspace" id="postings-view" aria-label="Posting workspace">
+    <section className="view-section workspace" id="postings-view" aria-labelledby="postings-title">
       <article className="panel">
         <div className="panel-header postings-header">
-          <div><h2 className="panel-title">Postings</h2><p>Track opportunities from discovery through close.</p></div>
+          <div><h1 className="panel-title" id="postings-title">Postings</h1><p>Track opportunities from discovery through close.</p></div>
           <button className="button primary" type="button" onClick={() => navigate("/postings/new")}><PlusIcon /> Add posting</button>
         </div>
         <div className="toolbar" aria-label="Posting filters">

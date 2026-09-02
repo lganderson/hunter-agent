@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import type { CSSProperties } from "react";
 import { Link, NavLink, Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { ActionsPage } from "./actions/ActionsPage";
@@ -17,6 +18,7 @@ import { SettingsPage } from "./settings/SettingsPage";
 import { getCandidateEnrichmentJob, getCompanyDiscoveryJob, startCandidateDiscovery, startCandidateEnrichment, startCompanyDiscovery, startCompanyEvaluation } from "./core/api";
 import type { CandidateEnrichmentJob, CompanyDiscoveryJob } from "./core/types";
 import type { ActionUpdateResult } from "./core/useHunterData";
+import { readModelQueryKeys } from "./core/queryKeys";
 
 type AppProps = {
   data: AppState;
@@ -93,6 +95,7 @@ function AppNav({ collapsed = false, mobile = false }: { collapsed?: boolean; mo
 }
 
 export function App({ data, refresh, applyActionUpdate, applyApplicationUpdate, applyCompanyCandidateUpdates, applyDiscoveryCandidateUpdate }: AppProps) {
+  const queryClient = useQueryClient();
   const closed = data.applications.filter(app => app.is_closed).length;
   const location = useLocation();
   const [agentOpen, setAgentOpen] = useState(false);
@@ -157,7 +160,14 @@ export function App({ data, refresh, applyActionUpdate, applyApplicationUpdate, 
           && lastRefreshedEnrichmentJob.current !== response.job.id
         ) {
           lastRefreshedEnrichmentJob.current = response.job.id;
-          await refresh();
+          await Promise.all([
+            refresh(),
+            queryClient.invalidateQueries({ queryKey: readModelQueryKeys.candidateLists("discovery") })
+          ]);
+          await queryClient.invalidateQueries({
+            queryKey: readModelQueryKeys.candidateDetails("discovery"),
+            refetchType: "none"
+          });
         }
       } catch {
         // The rest of Hunter remains usable while the local job endpoint reconnects.
@@ -169,7 +179,7 @@ export function App({ data, refresh, applyActionUpdate, applyApplicationUpdate, 
       active = false;
       window.clearInterval(interval);
     };
-  }, [refresh]);
+  }, [queryClient, refresh]);
 
   const beginCompanyDiscovery = useCallback(async (payload: CompanyDiscoveryJob["request"]) => {
     const response = await startCompanyDiscovery({

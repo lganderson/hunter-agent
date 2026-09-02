@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { FilterIcon, ListIcon, PeopleIcon, SearchIcon, XIcon } from "../components/Icons";
 import { SortableHeader } from "../components/Primitives";
 import { linkCompanyContact, linkContact, unlinkCompanyContact, unlinkContact, upsertContact } from "../core/api";
@@ -6,6 +7,9 @@ import { titleCase } from "../core/format";
 import { compareText, nextSortState, type SortDirection, type SortState } from "../core/tableSort";
 import type { AppState, Contact } from "../core/types";
 import { sortFromParams, usePersistentViewParams } from "../core/viewState";
+import { useContactDetail } from "../core/readModelQueries";
+import { readModelQueryKeys } from "../core/queryKeys";
+import type { EntityDetail } from "../core/readModelTypes";
 
 type ContactSortKey = "contact" | "status" | "relationship" | "next_follow_up";
 const CONTACT_SORT_KEYS: ContactSortKey[] = ["contact", "status", "relationship", "next_follow_up"];
@@ -61,7 +65,8 @@ export function ContactsPage({ data, refresh }: ContactsPageProps) {
   }
 
   return (
-    <section className="view-section" id="contacts-view" aria-label="Contacts">
+    <section className="view-section" id="contacts-view" aria-labelledby="contacts-title">
+      <h1 className="sr-only" id="contacts-title">Contacts</h1>
       <div className="contact-layout">
         <article className="panel">
           <div className="toolbar" aria-label="Contact tools">
@@ -129,7 +134,7 @@ function compareContactRows(left: Contact, right: Contact, sort: SortState<Conta
 }
 
 function ContactModal({
-  contact,
+  contact: shellContact,
   data,
   operationStatus,
   setOperationStatus,
@@ -145,6 +150,11 @@ function ContactModal({
   refresh: () => Promise<AppState>;
   setSelectedContactId: (id: string) => void;
 }) {
+  const queryClient = useQueryClient();
+  const contactDetailQuery = useContactDetail(shellContact?.id || "", Boolean(shellContact));
+  const contact = contactDetailQuery.data?.item
+    ? { ...shellContact, ...contactDetailQuery.data.item }
+    : shellContact;
   const linkedApps = useMemo(() => {
     if (!contact) return [];
     const linkedIds = new Set(data.application_contacts.filter(link => link.contact_id === contact.id).map(link => link.application_id));
@@ -171,6 +181,27 @@ function ContactModal({
     setCompanyId(availableCompanies[0]?.id || "");
   }, [availableCompanies]);
 
+  if (shellContact && contactDetailQuery.isPending) {
+    return (
+      <div className="modal-backdrop">
+        <article className="modal" role="dialog" aria-modal="true" aria-label="Contact details">
+          <div className="empty-state" style={{ display: "block" }}>Loading contact details…</div>
+        </article>
+      </div>
+    );
+  }
+
+  if (shellContact && contactDetailQuery.error) {
+    return (
+      <div className="modal-backdrop">
+        <article className="modal" role="dialog" aria-modal="true" aria-label="Contact details">
+          <div className="empty-state" style={{ display: "block" }}>Could not load contact details. Close and retry before editing.</div>
+          <button className="button" type="button" onClick={closeModal}>Close</button>
+        </article>
+      </div>
+    );
+  }
+
   async function saveContact(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
@@ -188,6 +219,10 @@ function ContactModal({
         next_follow_up: String(form.get("next_follow_up") || ""),
         notes: String(form.get("notes") || "")
       });
+      queryClient.setQueryData<EntityDetail<"contact">>(
+        readModelQueryKeys.entityDetail("contact", result.contact.id),
+        current => current ? { ...current, item: result.contact } : current
+      );
       await refresh();
       setSelectedContactId(result.contact.id);
       setOperationStatus("Contact saved.");

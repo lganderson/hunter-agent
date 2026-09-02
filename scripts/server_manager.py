@@ -2,12 +2,17 @@
 """Manage the local Hunter app server on a fixed port."""
 
 import argparse
+import fcntl
+import http.client
+import json
 import os
 import signal
 import subprocess
 import sys
 import time
+from contextlib import contextmanager
 from pathlib import Path
+from urllib.parse import urlparse
 
 ROOT_FOR_IMPORTS = Path(__file__).resolve().parents[1]
 if str(ROOT_FOR_IMPORTS) not in sys.path:
@@ -20,6 +25,22 @@ PID_FILE = paths.DATA_DIR / "hunter-server.pid"
 LOG_FILE = paths.DATA_DIR / "hunter-server.log"
 PORT_FILE = paths.DATA_DIR / "hunter-server.port"
 URL_FILE = paths.DATA_DIR / "hunter-server.url"
+LOCK_FILE = paths.DATA_DIR / "hunter-server.lock"
+READY_TIMEOUT_SECONDS = 30
+HEALTH_REQUEST_TIMEOUT_SECONDS = 1
+HEALTH_POLL_INTERVAL_SECONDS = 0.1
+
+
+@contextmanager
+def lifecycle_lock():
+    """Serialize server lifecycle state across manager processes."""
+    paths.DATA_DIR.mkdir(parents=True, exist_ok=True)
+    with LOCK_FILE.open("a+", encoding="utf-8") as lock_handle:
+        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
 
 
 def command_for_pid(pid):
@@ -80,10 +101,88 @@ def first_available_port(start_port, limit=50):
     return None
 
 
-def stop_server(port):
+def remove_server_state():
+    for path in [PID_FILE, PORT_FILE, URL_FILE]:
+        if path.exists():
+            path.unlink()
+
+
+def atomic_write_text(path, value):
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        temporary.write_text(value, encoding="utf-8")
+        os.replace(temporary, path)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+
+def publish_server_state(pid, port, url):
+    atomic_write_text(PID_FILE, str(pid))
+    atomic_write_text(PORT_FILE, str(port))
+    # Publish the URL last; consumers treat its presence as the ready signal.
+    atomic_write_text(URL_FILE, url + "\n")
+
+
+def health_is_ready(url):
+    parsed = urlparse(url)
+    connection = http.client.HTTPConnection(
+        parsed.hostname,
+        parsed.port,
+        timeout=HEALTH_REQUEST_TIMEOUT_SECONDS,
+    )
+    try:
+        connection.request("GET", "/api/health")
+        response = connection.getresponse()
+        if response.status != 200:
+            return False
+        payload = json.loads(response.read().decode("utf-8"))
+    except (OSError, http.client.HTTPException, UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    finally:
+        connection.close()
+    return payload == {"service": "hunter", "status": "ok"}
+
+
+def wait_for_health(process, url, timeout=READY_TIMEOUT_SECONDS):
+    deadline = time.monotonic() + timeout
+    while True:
+        exit_code = process.poll()
+        if exit_code is not None:
+            return False, f"Hunter server exited with code {exit_code}."
+        if health_is_ready(url):
+            return True, ""
+        if time.monotonic() >= deadline:
+            return False, f"Hunter server did not become ready within {timeout} seconds."
+        time.sleep(HEALTH_POLL_INTERVAL_SECONDS)
+
+
+def terminate_process(process):
+    if process.poll() is not None:
+        return
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except (ProcessLookupError, PermissionError):
+        return
+    try:
+        process.wait(timeout=3)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        return
+    try:
+        process.wait(timeout=1)
+    except subprocess.TimeoutExpired:
+        pass
+
+
+def _stop_server(port):
     candidates = []
     pid = tracked_pid()
-    if pid:
+    if pid and tracked_port() == port:
         candidates.append(pid)
     candidates.extend(listening_pids(port))
     stopped = []
@@ -102,20 +201,29 @@ def stop_server(port):
         if is_running(candidate):
             os.kill(candidate, signal.SIGKILL)
         stopped.append(candidate)
-    if PID_FILE.exists() and (tracked_pid() in stopped or not tracked_pid() or not is_running(tracked_pid())):
-        PID_FILE.unlink()
-    if stopped:
-        for path in [PORT_FILE, URL_FILE]:
-            if path.exists():
-                path.unlink()
+    current_tracked_pid = tracked_pid()
+    if (
+        tracked_port() == port
+        and (
+            current_tracked_pid in stopped
+            or not current_tracked_pid
+            or not is_running(current_tracked_pid)
+        )
+    ):
+        remove_server_state()
     return stopped, refused
+
+
+def stop_server(port):
+    with lifecycle_lock():
+        return _stop_server(port)
 
 
 def build_frontend():
     return subprocess.call(["npm", "run", "build"], cwd=paths.FRONTEND_DIR)
 
 
-def start_server(port, build=True):
+def _start_server(port, build=True):
     paths.DATA_DIR.mkdir(parents=True, exist_ok=True)
     if build:
         build_status = build_frontend()
@@ -127,22 +235,38 @@ def start_server(port, build=True):
         for pid, command in blockers:
             print(f"  {pid}: {command}")
         return 2
-    log_handle = LOG_FILE.open("a", encoding="utf-8")
-    process = subprocess.Popen(
-        [sys.executable, str(paths.ROOT / "hunter.py"), "serve", str(port)],
-        cwd=paths.ROOT,
-        stdout=log_handle,
-        stderr=subprocess.STDOUT,
-        start_new_session=True,
-    )
-    PID_FILE.write_text(str(process.pid), encoding="utf-8")
-    time.sleep(0.5)
-    if process.poll() is not None:
-        print(f"error: Hunter server exited with code {process.returncode}. Log: {LOG_FILE}")
-        return process.returncode or 1
+    existing_pid = tracked_pid()
+    if existing_pid and is_running(existing_pid) and is_hunter_server(existing_pid):
+        existing_port = tracked_port()
+        print(
+            "error: a managed Hunter server is already running "
+            f"(pid={existing_pid}, port={existing_port or 'unknown'}). "
+            "Use serve-restart or serve-ready."
+        )
+        return 2
+    remove_server_state()
+    with LOG_FILE.open("a", encoding="utf-8") as log_handle:
+        process = subprocess.Popen(
+            [sys.executable, str(ROOT_FOR_IMPORTS / "scripts" / "serve_app.py"), str(port)],
+            cwd=ROOT_FOR_IMPORTS,
+            stdout=log_handle,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
     url = f"http://127.0.0.1:{port}/"
-    PORT_FILE.write_text(str(port), encoding="utf-8")
-    URL_FILE.write_text(url + "\n", encoding="utf-8")
+    ready, error = wait_for_health(process, url)
+    if not ready:
+        terminate_process(process)
+        remove_server_state()
+        print(f"error: {error} Log: {LOG_FILE}")
+        return 1
+    try:
+        publish_server_state(process.pid, port, url)
+    except OSError as exc:
+        terminate_process(process)
+        remove_server_state()
+        print(f"error: could not publish Hunter server state: {exc}. Log: {LOG_FILE}")
+        return 1
     print(f"Serving Hunter at {url}")
     print(f"PID: {process.pid}")
     print(f"Log: {LOG_FILE}")
@@ -150,10 +274,15 @@ def start_server(port, build=True):
     return 0
 
 
-def ready_server(start_port, build=True):
+def start_server(port, build=True):
+    with lifecycle_lock():
+        return _start_server(port, build=build)
+
+
+def _ready_server(start_port, build=True):
     port = tracked_port()
     if port is not None:
-        stopped, refused = stop_server(port)
+        stopped, refused = _stop_server(port)
         for pid, command in refused:
             print(f"Refused to stop non-Hunter process {pid}: {command}")
         if refused:
@@ -164,7 +293,24 @@ def ready_server(start_port, build=True):
     if port is None:
         print(f"error: no free port found from {start_port} to {start_port + 49}")
         return 2
-    return start_server(port, build=build)
+    return _start_server(port, build=build)
+
+
+def ready_server(start_port, build=True):
+    with lifecycle_lock():
+        return _ready_server(start_port, build=build)
+
+
+def restart_server(port, build=True):
+    with lifecycle_lock():
+        stopped, refused = _stop_server(port)
+        for pid, command in refused:
+            print(f"Refused to stop non-Hunter process {pid}: {command}")
+        if refused:
+            return 1
+        if stopped:
+            print("Stopped Hunter server PIDs: " + ", ".join(str(pid) for pid in stopped))
+        return _start_server(port, build=build)
 
 
 def print_status(port):
@@ -212,14 +358,7 @@ def main(argv=None):
     if args.command == "start":
         return start_server(args.port, build=not args.no_build)
     if args.command == "restart":
-        stopped, refused = stop_server(args.port)
-        for pid, command in refused:
-            print(f"Refused to stop non-Hunter process {pid}: {command}")
-        if refused:
-            return 1
-        if stopped:
-            print("Stopped Hunter server PIDs: " + ", ".join(str(pid) for pid in stopped))
-        return start_server(args.port, build=not args.no_build)
+        return restart_server(args.port, build=not args.no_build)
     if args.command == "ready":
         return ready_server(args.port, build=not args.no_build)
     return 2

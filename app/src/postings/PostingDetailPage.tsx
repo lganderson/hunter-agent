@@ -7,6 +7,7 @@ import { actionDueLabel, archivedPostingMarkdown, dueLabel, isActionComplete, ma
 import { routes } from "../core/routes";
 import type { Action, ActionUpdates, AppState, Application, PostingSnapshot, ResumePlan, ResumeTailoringStatus } from "../core/types";
 import type { ActionUpdateResult } from "../core/useHunterData";
+import { useActionDetail, useApplicationDetail } from "../core/readModelQueries";
 
 type DetailProps = {
   data: AppState;
@@ -19,7 +20,13 @@ type DetailProps = {
 export function PostingDetailPage({ data, refresh, applyActionUpdate, applyApplicationUpdate, createNew = false }: DetailProps) {
   const { id = "" } = useParams();
   const navigate = useNavigate();
-  const app = createNew ? blankApplication(data) : data.applications.find(item => item.id === id);
+  const applicationDetailQuery = useApplicationDetail(id, !createNew);
+  const shellApplication = data.applications.find(item => item.id === id);
+  const app = createNew
+    ? blankApplication(data)
+    : applicationDetailQuery.data?.item
+      ? { ...shellApplication, ...applicationDetailQuery.data.item }
+      : undefined;
   const [operationStatus, setOperationStatus] = useState("");
   const [pendingActionId, setPendingActionId] = useState("");
   const [archiving, setArchiving] = useState(false);
@@ -46,6 +53,10 @@ export function PostingDetailPage({ data, refresh, applyActionUpdate, applyAppli
   useEffect(() => {
     setTagInput("");
   }, [app?.id]);
+
+  if (!createNew && applicationDetailQuery.isPending) {
+    return <div className="empty-state" style={{ display: "block" }}>Loading posting details…</div>;
+  }
 
   if (!app) {
     return <div className="empty-state" style={{ display: "block" }}>That posting could not be found. <Link to="/postings">Return to postings.</Link></div>;
@@ -100,6 +111,7 @@ export function PostingDetailPage({ data, refresh, applyActionUpdate, applyAppli
         notes: String(form.get("notes") || "")
       };
       const result = createNew ? await createApplication(values) : await updateApplication(app!.id, values);
+      if (!createNew && applyApplicationUpdate) applyApplicationUpdate(result.application);
       await refresh();
       if (createNew) {
         navigate(`/postings/${encodeURIComponent(result.application.id)}`, { replace: true });
@@ -162,8 +174,9 @@ export function PostingDetailPage({ data, refresh, applyActionUpdate, applyAppli
   async function saveActionFields(actionId: string, updates: ActionUpdates) {
     setOperationStatus("Saving action...");
     try {
-      await updateActionFields(actionId, updates);
-      await refresh();
+      const result = await updateActionFields(actionId, updates);
+      if (applyActionUpdate) applyActionUpdate(result);
+      else await refresh();
       setOperationStatus("Action saved.");
     } catch (error) {
       setOperationStatus(`Could not save action. Run make serve-app. ${error instanceof Error ? error.message : String(error)}`);
@@ -799,7 +812,12 @@ function ActionControls({
   pending: boolean;
   statusUpdatesDisabled: boolean;
 }) {
-  const complete = isActionComplete(action);
+  const [editorOpen, setEditorOpen] = useState(false);
+  const actionDetailQuery = useActionDetail(action.id, editorOpen);
+  const editableAction = actionDetailQuery.data?.item
+    ? { ...action, ...actionDetailQuery.data.item }
+    : action;
+  const complete = isActionComplete(editableAction);
 
   return (
     <>
@@ -813,21 +831,23 @@ function ActionControls({
           onUpdate={onStatusUpdate}
         />
       </div>
-      <details className="action-editor">
+      <details className="action-editor" onToggle={event => setEditorOpen(event.currentTarget.open)}>
         <summary>Edit</summary>
-        <form onSubmit={event => {
+        <form key={actionDetailQuery.data?.revision || "shell"} onSubmit={event => {
           event.preventDefault();
           const form = new FormData(event.currentTarget);
-          onFieldsSave(action.id, actionValues(form));
+          onFieldsSave(editableAction.id, actionValues(form));
         }}>
-          <label className="form-field full">Title <input name="title" defaultValue={action.title} required /></label>
-          <label className="form-field">Type <select name="type" defaultValue={action.type}>{actionTypeOptions(actionTypes, action.type).map(type => <option key={type.id} value={type.id}>{type.label}</option>)}</select></label>
-          <label className="form-field">Priority <select name="priority" defaultValue={action.priority}><option value=""></option><option value="high">High</option><option value="medium">Medium</option><option value="low">Low</option></select></label>
-          <label className="form-field">Due <input name="due_date" type="date" defaultValue={action.due_date} /></label>
-          <label className="form-field">Related URL <input name="related_url" type="url" defaultValue={action.related_url} /></label>
-          <label className="form-field full">Description <textarea name="description" defaultValue={action.description} /></label>
-          <label className="form-field full">Notes <textarea name="notes" defaultValue={action.notes} /></label>
-          <div className="form-field full"><button className="button compact" type="submit">Save action</button></div>
+          {editorOpen && actionDetailQuery.isPending ? <div className="form-field full">Loading action details…</div> : null}
+          {actionDetailQuery.error ? <div className="form-field full">Could not load action details. Close and retry before editing.</div> : null}
+          <label className="form-field full">Title <input name="title" defaultValue={editableAction.title} required /></label>
+          <label className="form-field">Type <select name="type" defaultValue={editableAction.type}>{actionTypeOptions(actionTypes, editableAction.type).map(type => <option key={type.id} value={type.id}>{type.label}</option>)}</select></label>
+          <label className="form-field">Priority <select name="priority" defaultValue={editableAction.priority}><option value=""></option><option value="high">High</option><option value="medium">Medium</option><option value="low">Low</option></select></label>
+          <label className="form-field">Due <input name="due_date" type="date" defaultValue={editableAction.due_date} /></label>
+          <label className="form-field">Related URL <input name="related_url" type="url" defaultValue={editableAction.related_url} /></label>
+          <label className="form-field full">Description <textarea name="description" defaultValue={editableAction.description} /></label>
+          <label className="form-field full">Notes <textarea name="notes" defaultValue={editableAction.notes} /></label>
+          <div className="form-field full"><button className="button compact" type="submit" disabled={editorOpen && (actionDetailQuery.isPending || Boolean(actionDetailQuery.error))}>Save action</button></div>
         </form>
       </details>
     </>

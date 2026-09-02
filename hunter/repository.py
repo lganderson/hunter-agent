@@ -15,6 +15,10 @@ def backend_name():
     return "sqlite" if using_sqlite() else "csv"
 
 
+def data_revision():
+    return sqlite_store.data_revision() if using_sqlite() else 0
+
+
 def read_applications():
     if using_sqlite():
         return sqlite_store.read_applications()
@@ -71,6 +75,47 @@ def write_companies(rows):
         sqlite_store.write_companies(rows)
 
 
+def replace_companies_for_import(rows):
+    if using_sqlite():
+        sqlite_store.replace_companies_for_import(rows)
+
+
+def read_company(company_id):
+    if using_sqlite():
+        return sqlite_store.read_company(company_id)
+    return None
+
+
+def upsert_companies(rows):
+    if using_sqlite():
+        return sqlite_store.upsert_companies(rows)
+    return []
+
+
+def insert_companies(rows):
+    if using_sqlite():
+        return sqlite_store.insert_companies(rows)
+    return []
+
+
+def update_company_fields(company_id, updates):
+    if using_sqlite():
+        return sqlite_store.update_company_fields(company_id, updates)
+    raise ValueError("Company updates require the local SQLite store.")
+
+
+def bulk_update_company_fields(updates_by_id):
+    if using_sqlite():
+        return sqlite_store.bulk_update_company_fields(updates_by_id)
+    raise ValueError("Company updates require the local SQLite store.")
+
+
+def delete_company(company_id):
+    if using_sqlite():
+        return sqlite_store.delete_company(company_id)
+    raise ValueError("Company deletion requires the local SQLite store.")
+
+
 def merge_company_references(keep_company_id, merge_company_id, company_name):
     if using_sqlite():
         sqlite_store.merge_company_references(
@@ -78,6 +123,12 @@ def merge_company_references(keep_company_id, merge_company_id, company_name):
             merge_company_id,
             company_name,
         )
+
+
+def merge_companies_atomic(keep_row, merge_company_id):
+    if using_sqlite():
+        return sqlite_store.merge_companies_atomic(keep_row, merge_company_id)
+    raise ValueError("Company merging requires the local SQLite store.")
 
 
 def read_application_contacts():
@@ -127,6 +178,12 @@ def write_company_career_sources(rows):
         sqlite_store.write_company_career_sources(rows)
 
 
+def upsert_company_career_source(row):
+    if using_sqlite():
+        return sqlite_store.upsert_company_career_source(row)
+    return row
+
+
 def read_company_posting_candidates():
     if using_sqlite():
         return sqlite_store.read_company_posting_candidates()
@@ -136,6 +193,57 @@ def read_company_posting_candidates():
 def write_company_posting_candidates(rows):
     if using_sqlite():
         sqlite_store.write_company_posting_candidates(rows)
+
+
+def replace_company_posting_candidates_for_import(rows):
+    if using_sqlite():
+        sqlite_store.replace_company_posting_candidates_for_import(rows)
+
+
+def read_company_posting_candidate(candidate_id):
+    if using_sqlite():
+        return sqlite_store.read_company_posting_candidate(candidate_id)
+    return None
+
+
+def upsert_company_posting_candidates(rows):
+    if using_sqlite():
+        return sqlite_store.upsert_company_posting_candidates(rows)
+    return []
+
+
+def insert_company_posting_candidates(rows):
+    if using_sqlite():
+        return sqlite_store.insert_company_posting_candidates(rows)
+    return []
+
+
+def update_company_posting_candidate_fields(candidate_id, updates):
+    if using_sqlite():
+        return sqlite_store.update_company_posting_candidate_fields(candidate_id, updates)
+    raise ValueError("Company candidate updates require the local SQLite store.")
+
+
+def compare_and_update_company_posting_candidate_fields(candidate_id, expected, updates):
+    if using_sqlite():
+        return sqlite_store.compare_and_update_company_posting_candidate_fields(
+            candidate_id,
+            expected,
+            updates,
+        )
+    raise ValueError("Company candidate updates require the local SQLite store.")
+
+
+def bulk_update_company_posting_candidate_fields(updates_by_id):
+    if using_sqlite():
+        return sqlite_store.bulk_update_company_posting_candidate_fields(updates_by_id)
+    raise ValueError("Company candidate updates require the local SQLite store.")
+
+
+def update_company_posting_candidate_statuses(candidate_ids, status):
+    if using_sqlite():
+        return sqlite_store.update_company_posting_candidate_statuses(candidate_ids, status)
+    raise ValueError("Company candidate updates require the local SQLite store.")
 
 
 def read_company_career_scans(company_id="", limit=200):
@@ -172,9 +280,76 @@ def read_discovery_candidates():
     return []
 
 
+def read_discovery_candidates_snapshot():
+    if using_sqlite():
+        return sqlite_store.read_discovery_candidates_snapshot()
+    return 0, []
+
+
+def reconcile_discovery_candidates(expected_revision, rows):
+    if using_sqlite():
+        return sqlite_store.reconcile_discovery_candidates(expected_revision, rows)
+    raise ValueError("Discovery candidate reconciliation requires the local SQLite store.")
+
+
 def write_discovery_candidates(rows):
     if using_sqlite():
         sqlite_store.write_discovery_candidates(rows)
+
+
+def replace_discovery_candidates_for_import(rows):
+    if using_sqlite():
+        sqlite_store.replace_discovery_candidates_for_import(rows)
+
+
+def read_discovery_candidate(candidate_id):
+    if using_sqlite():
+        return sqlite_store.read_discovery_candidate(candidate_id)
+    return None
+
+
+def upsert_discovery_candidates(rows):
+    if using_sqlite():
+        return sqlite_store.upsert_discovery_candidates(rows)
+    return []
+
+
+def insert_discovery_candidates(rows):
+    if using_sqlite():
+        return sqlite_store.insert_discovery_candidates(rows)
+    return []
+
+
+def update_discovery_candidate_fields(candidate_id, updates):
+    if using_sqlite():
+        return sqlite_store.update_discovery_candidate_fields(candidate_id, updates)
+    raise ValueError("Discovery candidate updates require the local SQLite store.")
+
+
+def compare_and_update_discovery_candidate_fields(candidate_id, expected, updates):
+    if using_sqlite():
+        return sqlite_store.compare_and_update_discovery_candidate_fields(
+            candidate_id,
+            expected,
+            updates,
+        )
+    raise ValueError("Discovery candidate updates require the local SQLite store.")
+
+
+def bulk_update_discovery_candidate_fields(updates_by_id):
+    if using_sqlite():
+        return sqlite_store.bulk_update_discovery_candidate_fields(updates_by_id)
+    raise ValueError("Discovery candidate updates require the local SQLite store.")
+
+
+def update_discovery_candidate_statuses(candidate_ids, status, **status_fields):
+    if using_sqlite():
+        return sqlite_store.update_discovery_candidate_statuses(
+            candidate_ids,
+            status,
+            **status_fields,
+        )
+    raise ValueError("Discovery candidate updates require the local SQLite store.")
 
 
 def read_suggestion_dismissals():

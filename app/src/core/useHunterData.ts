@@ -1,5 +1,9 @@
-import { useCallback, useEffect, useState } from "react";
-import { getAppState } from "./api";
+import { useCallback, useMemo } from "react";
+import { useQueryClient, type InfiniteData } from "@tanstack/react-query";
+import { appShellToLegacyState } from "./readModelAdapters";
+import { appShellQueryOptions, useAppShell } from "./readModelQueries";
+import { readModelQueryKeys } from "./queryKeys";
+import type { AppShell, CandidateDetail, CandidatePage, EntityDetail } from "./readModelTypes";
 import type { Action, AppState, Application, CompanyPostingCandidate, DiscoveryCandidate } from "./types";
 
 export type ActionUpdateResult = {
@@ -8,71 +12,109 @@ export type ActionUpdateResult = {
 };
 
 export function useHunterData() {
-  const [data, setData] = useState<AppState | null>(null);
-  const [error, setError] = useState("");
+  const queryClient = useQueryClient();
+  const shellQuery = useAppShell();
+  const data = useMemo(
+    () => shellQuery.data ? appShellToLegacyState(shellQuery.data) : null,
+    [shellQuery.data]
+  );
 
-  const refresh = useCallback(async () => {
-    const next = await getAppState();
-    setData(next);
-    setError("");
-    return next;
-  }, []);
+  const refresh = useCallback(async (): Promise<AppState> => {
+    await queryClient.invalidateQueries({
+      queryKey: readModelQueryKeys.appShell(),
+      refetchType: "none"
+    });
+    const shell = await queryClient.fetchQuery(appShellQueryOptions());
+    return appShellToLegacyState(shell);
+  }, [queryClient]);
 
   const applyActionUpdate = useCallback((result: ActionUpdateResult) => {
-    setData(current => {
-      if (!current) return current;
-      return {
-        ...current,
-        generated_at: new Date().toISOString(),
-        actions: current.actions.map(action => action.id === result.action.id
-          ? { ...action, ...result.action }
-          : action),
-        applications: result.posting
-          ? current.applications.map(application => application.id === result.posting?.id
-            ? { ...application, ...result.posting }
-            : application)
-          : current.applications
-      };
-    });
-  }, []);
+    queryClient.setQueryData<EntityDetail<"action">>(
+      readModelQueryKeys.entityDetail("action", result.action.id),
+      current => current ? { ...current, item: { ...current.item, ...result.action } } : current
+    );
+    queryClient.setQueryData<AppShell>(readModelQueryKeys.appShell(), current => current ? {
+      ...current,
+      generated_at: new Date().toISOString(),
+      actions: current.actions.map(action => action.id === result.action.id
+        ? { ...action, ...result.action }
+        : action),
+      applications: result.posting
+        ? current.applications.map(application => application.id === result.posting?.id
+          ? { ...application, ...result.posting }
+          : application)
+        : current.applications
+    } : current);
+  }, [queryClient]);
 
   const applyApplicationUpdate = useCallback((application: Application) => {
     const tagList = String(application.tags || "")
       .split(",")
       .map(tag => tag.trim())
       .filter(Boolean);
-    setData(current => {
-      if (!current) return current;
-      return {
-        ...current,
-        generated_at: new Date().toISOString(),
-        applications: current.applications.map(currentApplication => currentApplication.id === application.id
-          ? { ...currentApplication, ...application, tag_list: tagList }
-          : currentApplication)
-      };
-    });
-  }, []);
+    queryClient.setQueryData<EntityDetail<"application">>(
+      readModelQueryKeys.entityDetail("application", application.id),
+      current => current ? { ...current, item: { ...current.item, ...application } } : current
+    );
+    queryClient.setQueryData<AppShell>(readModelQueryKeys.appShell(), current => current ? {
+      ...current,
+      generated_at: new Date().toISOString(),
+      applications: current.applications.map(currentApplication => currentApplication.id === application.id
+        ? { ...currentApplication, ...application, tag_list: tagList }
+        : currentApplication)
+    } : current);
+  }, [queryClient]);
 
   const applyCompanyCandidateUpdates = useCallback((candidates: CompanyPostingCandidate[]) => {
     const updates = new Map(candidates.map(candidate => [candidate.id, candidate]));
-    setData(current => {
-      if (!current || !updates.size) return current;
-      return {
+    if (!updates.size) return;
+    queryClient.setQueriesData<InfiniteData<CandidatePage<"company">>>(
+      { queryKey: readModelQueryKeys.candidateLists("company") },
+      current => current ? {
         ...current,
-        generated_at: new Date().toISOString(),
-        company_posting_candidates: current.company_posting_candidates.map(candidate => (
-          updates.has(candidate.id) ? { ...candidate, ...updates.get(candidate.id) } : candidate
-        ))
-      };
+        pages: current.pages.map(page => ({
+          ...page,
+          items: page.items.map(candidate => updates.has(candidate.id)
+            ? { ...candidate, ...updates.get(candidate.id) }
+            : candidate)
+        }))
+      } : current
+    );
+    candidates.forEach(candidate => {
+      queryClient.setQueriesData<CandidateDetail<"company">>(
+        { queryKey: readModelQueryKeys.candidateDetails("company") },
+        current => current?.item.id === candidate.id
+          ? { ...current, item: { ...current.item, ...candidate } }
+          : current
+      );
     });
-  }, []);
+  }, [queryClient]);
 
   const applyDiscoveryCandidateUpdate = useCallback((
     candidate: DiscoveryCandidate,
     posting: Application | null = null,
     removePostingId = ""
   ) => {
-    setData(current => {
+    const { company: _legacyCompanyName, ...candidateUpdate } = candidate;
+    queryClient.setQueriesData<InfiniteData<CandidatePage<"discovery">>>(
+      { queryKey: readModelQueryKeys.candidateLists("discovery") },
+      current => current ? {
+        ...current,
+        pages: current.pages.map(page => ({
+          ...page,
+          items: page.items.map(currentCandidate => currentCandidate.id === candidate.id
+            ? { ...currentCandidate, ...candidateUpdate }
+            : currentCandidate)
+        }))
+      } : current
+    );
+    queryClient.setQueriesData<CandidateDetail<"discovery">>(
+      { queryKey: readModelQueryKeys.candidateDetails("discovery") },
+      current => current?.item.id === candidate.id
+        ? { ...current, item: { ...current.item, ...candidateUpdate } }
+        : current
+    );
+    queryClient.setQueryData<AppShell>(readModelQueryKeys.appShell(), current => {
       if (!current) return current;
       const existingPosting = posting
         ? current.applications.some(application => application.id === posting.id)
@@ -80,22 +122,21 @@ export function useHunterData() {
       return {
         ...current,
         generated_at: new Date().toISOString(),
-        discovery_candidates: current.discovery_candidates.map(currentCandidate => (
-          currentCandidate.id === candidate.id ? { ...currentCandidate, ...candidate } : currentCandidate
-        )),
         applications: current.applications
           .filter(application => !removePostingId || application.id !== removePostingId)
           .map(application => application.id === posting?.id ? { ...application, ...posting } : application)
           .concat(posting && !existingPosting ? [posting] : [])
       };
     });
-  }, []);
+  }, [queryClient]);
 
-  useEffect(() => {
-    refresh().catch((err: unknown) => {
-      setError(err instanceof Error ? err.message : String(err));
-    });
-  }, [refresh]);
-
-  return { data, error, refresh, applyActionUpdate, applyApplicationUpdate, applyCompanyCandidateUpdates, applyDiscoveryCandidateUpdate };
+  return {
+    data,
+    error: shellQuery.error instanceof Error ? shellQuery.error.message : shellQuery.error ? String(shellQuery.error) : "",
+    refresh,
+    applyActionUpdate,
+    applyApplicationUpdate,
+    applyCompanyCandidateUpdates,
+    applyDiscoveryCandidateUpdate
+  };
 }

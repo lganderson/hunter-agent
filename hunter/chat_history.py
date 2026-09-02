@@ -19,12 +19,12 @@ def _json_value(value, fallback):
 
 
 def list_messages(limit=DEFAULT_HISTORY_LIMIT):
-    sqlite_store.initialize()
+    sqlite_store.ensure_initialized()
     try:
         limit = max(1, min(DEFAULT_HISTORY_LIMIT, int(limit)))
     except (TypeError, ValueError):
         limit = DEFAULT_HISTORY_LIMIT
-    with sqlite_store.connect() as connection:
+    with sqlite_store.read_transaction() as connection:
         rows = connection.execute(
             "SELECT id, role, content, tool_calls_json, context_json, created_at "
             "FROM agent_messages ORDER BY id DESC LIMIT ?",
@@ -51,11 +51,11 @@ def record_exchange(user_content, assistant_content, tool_calls=None, context=No
     if not assistant_content:
         raise ValueError("Assistant response is required.")
 
-    sqlite_store.initialize()
+    sqlite_store.ensure_initialized()
     created_at = datetime.now().isoformat(timespec="seconds")
     tool_calls_json = json.dumps(tool_calls or [], sort_keys=True)
     context_json = json.dumps(context or {}, sort_keys=True)
-    with sqlite_store.connect() as connection:
+    with sqlite_store.write_transaction() as connection:
         user_cursor = connection.execute(
             "INSERT INTO agent_messages(role, content, tool_calls_json, context_json, created_at) "
             "VALUES ('user', ?, '[]', ?, ?)",
@@ -75,8 +75,8 @@ def record_exchange(user_content, assistant_content, tool_calls=None, context=No
 
 
 def clear_messages():
-    sqlite_store.initialize()
-    with sqlite_store.connect() as connection:
+    sqlite_store.ensure_initialized()
+    with sqlite_store.write_transaction() as connection:
         count = int(connection.execute("SELECT COUNT(*) AS total FROM agent_messages").fetchone()["total"])
         connection.execute("DELETE FROM agent_messages")
     return {"cleared": count}

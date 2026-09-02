@@ -178,7 +178,8 @@ export function SettingsPage({ refresh }: { refresh: () => Promise<AppState> }) 
   }
 
   return (
-    <section className="view-section settings-page" id="settings-view" aria-label="Settings">
+    <section className="view-section settings-page" id="settings-view" aria-labelledby="settings-title">
+      <h1 className="sr-only" id="settings-title">Settings</h1>
       <aside className="settings-nav-panel" aria-label="Settings sections">
         <nav className="settings-section-nav">
           {settingsSections.map(([id, label]) => <a key={id} href={`#${id}`}>{label}</a>)}

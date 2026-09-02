@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { Link, Navigate, useNavigate, useParams } from "react-router-dom";
 import { DownloadIcon, ExternalIcon, FilterIcon, GlobeIcon, ListIcon, SearchIcon, XIcon } from "../components/Icons";
 import { SortableHeader } from "../components/Primitives";
@@ -30,6 +31,17 @@ import {
   candidateFitScore,
   candidateRank,
 } from "./candidateUtils";
+import {
+  companyListItemToLegacyCandidate,
+  discoveryListItemToLegacyCandidate
+} from "../core/readModelAdapters";
+import {
+  useCompanyCandidateList,
+  useCompanyDetail,
+  useDiscoveryCandidateList
+} from "../core/readModelQueries";
+import { readModelQueryKeys } from "../core/queryKeys";
+import type { EntityDetail } from "../core/readModelTypes";
 
 type CompaniesPageProps = {
   data: AppState;
@@ -329,7 +341,8 @@ export function CompaniesPage({ data, refresh, discoveryJob = null, startDiscove
   }
 
   return (
-    <section className="view-section" id="companies-view" aria-label="Companies">
+    <section className="view-section" id="companies-view" aria-labelledby="companies-title">
+      <h1 className="sr-only" id="companies-title">Companies</h1>
       <article className="panel">
         <div className="toolbar" aria-label="Company tools">
           <label className="search">
@@ -914,10 +927,50 @@ function MultiFilter({
   );
 }
 
-export function CompanyDetailPage({ data, refresh, applyCompanyCandidateUpdates, createNew = false }: CompanyDetailPageProps) {
+export function CompanyDetailPage({ data: shellData, refresh, applyCompanyCandidateUpdates, createNew = false }: CompanyDetailPageProps) {
   const { id = "" } = useParams();
   const navigate = useNavigate();
   const isNewCompany = createNew || id === "new";
+  const queryClient = useQueryClient();
+  const companyDetailQuery = useCompanyDetail(id, !isNewCompany && Boolean(id));
+  const companyCandidatesQuery = useCompanyCandidateList({ companyId: id }, !isNewCompany && Boolean(id));
+  const discoveryCandidatesQuery = useDiscoveryCandidateList({ companyId: id }, {}, !isNewCompany && Boolean(id));
+  const data = useMemo<AppState>(() => {
+    const detailItem = companyDetailQuery.data?.item;
+    const { company_career_source: careerSource, ...detailedCompany } = detailItem || { company_career_source: null };
+    return {
+      ...shellData,
+      companies: detailItem
+        ? shellData.companies.map(company => company.id === id ? { ...company, ...detailedCompany } : company)
+        : shellData.companies,
+      company_career_sources: detailItem
+        ? [
+            ...shellData.company_career_sources.filter(source => source.company_id !== id),
+            ...(careerSource ? [careerSource] : [])
+          ]
+        : shellData.company_career_sources,
+      company_posting_candidates: (companyCandidatesQuery.data?.pages || [])
+        .flatMap(page => page.items.map(companyListItemToLegacyCandidate)),
+      discovery_candidates: (discoveryCandidatesQuery.data?.pages || [])
+        .flatMap(page => page.items.map(discoveryListItemToLegacyCandidate))
+    };
+  }, [companyCandidatesQuery.data?.pages, companyDetailQuery.data?.item, discoveryCandidatesQuery.data?.pages, id, shellData]);
+  const refreshCandidatePool = async (pool: "company" | "discovery") => {
+    const [next] = await Promise.all([
+      refresh(),
+      queryClient.invalidateQueries({ queryKey: readModelQueryKeys.candidateLists(pool) })
+    ]);
+    return next;
+  };
+  const patchCompanyDetail = (companyUpdate: Partial<Company>) => {
+    queryClient.setQueryData<EntityDetail<"company">>(
+      readModelQueryKeys.entityDetail("company", companyUpdate.id || id),
+      current => current ? {
+        ...current,
+        item: { ...current.item, ...companyUpdate }
+      } : current
+    );
+  };
   const company = isNewCompany ? null : data.companies.find(row => row.id === id) || null;
   const invalidCompany = !isNewCompany && !company;
   const [operationStatus, setOperationStatus] = useState("");
@@ -1029,6 +1082,7 @@ export function CompanyDetailPage({ data, refresh, applyCompanyCandidateUpdates,
         company_profile_url: String(form.get("company_profile_url") || ""),
         notes: String(form.get("notes") || "")
       });
+      patchCompanyDetail(result.company);
       await refresh();
       navigate(routes.companyDetail(result.company.id), { replace: isNewCompany });
       setOperationStatus("Company saved.");
@@ -1043,7 +1097,13 @@ export function CompanyDetailPage({ data, refresh, applyCompanyCandidateUpdates,
     setOperationStatus("Checking careers page...");
     try {
       const result = await checkCompanyPostings(company.id);
-      await refresh();
+      const next = await refreshCandidatePool("company");
+      const refreshedCompany = next.companies.find(item => item.id === company.id);
+      if (refreshedCompany) patchCompanyDetail({
+        id: refreshedCompany.id,
+        last_checked_at: refreshedCompany.last_checked_at,
+        last_check_status: refreshedCompany.last_check_status
+      });
       const detailChecked = result.verification_count ? `; ${result.verification_count} detail checked` : "";
       const detailSkipped = result.verification_skipped_count ? `; ${result.verification_skipped_count} detail skipped` : "";
       setOperationStatus(`Check complete. ${result.new.length} new candidate${result.new.length === 1 ? "" : "s"}; ${result.recommended.length} recommended; ${result.unavailable_count} unavailable${detailChecked}${detailSkipped}.`);
@@ -1060,6 +1120,7 @@ export function CompanyDetailPage({ data, refresh, applyCompanyCandidateUpdates,
     setOperationStatus("Hunter is researching company information in the signed-in browser...");
     try {
       const result = await researchCompany(company.id);
+      patchCompanyDetail(result.company);
       await refresh();
       const filled = result.applied_fields.length;
       const suggested = result.suggestions.length;
@@ -1080,7 +1141,8 @@ export function CompanyDetailPage({ data, refresh, applyCompanyCandidateUpdates,
     setIsTracking(true);
     setOperationStatus("Adding company to explicit tracking...");
     try {
-      await trackCompany(company.id);
+      const result = await trackCompany(company.id);
+      patchCompanyDetail(result.company);
       await refresh();
       setOperationStatus("Company is now tracked. Hunter can use its careers URL in Companies mode.");
     } catch (error) {
@@ -1095,7 +1157,8 @@ export function CompanyDetailPage({ data, refresh, applyCompanyCandidateUpdates,
     setIsTracking(true);
     setOperationStatus("Moving company back to Discovery...");
     try {
-      await untrackCompany(company.id);
+      const result = await untrackCompany(company.id);
+      patchCompanyDetail(result.company);
       await refresh();
       setOperationStatus("Company moved to Discovery. Existing company data was kept.");
     } catch (error) {
@@ -1115,7 +1178,8 @@ export function CompanyDetailPage({ data, refresh, applyCompanyCandidateUpdates,
         : "Returning this company to Discovery..."
     );
     try {
-      await upsertCompany(company.id, { interest_status: interestStatus });
+      const result = await upsertCompany(company.id, { interest_status: interestStatus });
+      patchCompanyDetail(result.company);
       await refresh();
       setOperationStatus(
         interestStatus === "not-interested"
@@ -1134,7 +1198,8 @@ export function CompanyDetailPage({ data, refresh, applyCompanyCandidateUpdates,
     setActiveSuggestionId(suggestion.id);
     setOperationStatus(`${action === "apply" ? "Applying" : "Dismissing"} company information suggestion...`);
     try {
-      await resolveCompanyMetadataSuggestion(company.id, suggestion.id, action);
+      const result = await resolveCompanyMetadataSuggestion(company.id, suggestion.id, action);
+      patchCompanyDetail(result.company);
       await refresh();
       setOperationStatus(action === "apply" ? "Company information updated." : "Suggestion dismissed.");
     } catch (error) {
@@ -1163,7 +1228,8 @@ export function CompanyDetailPage({ data, refresh, applyCompanyCandidateUpdates,
     if (!company) return;
     setOperationStatus("Archiving company...");
     try {
-      await archiveCompany(company.id);
+      const result = await archiveCompany(company.id);
+      patchCompanyDetail(result.company);
       await refresh();
       setOperationStatus("Company archived.");
     } catch (error) {
@@ -1175,7 +1241,8 @@ export function CompanyDetailPage({ data, refresh, applyCompanyCandidateUpdates,
     if (!company) return;
     setOperationStatus("Restoring company...");
     try {
-      await restoreCompany(company.id, "neutral");
+      const result = await restoreCompany(company.id, "neutral");
+      patchCompanyDetail(result.company);
       await refresh();
       setOperationStatus("Company restored.");
     } catch (error) {
@@ -1228,7 +1295,7 @@ export function CompanyDetailPage({ data, refresh, applyCompanyCandidateUpdates,
     setOperationStatus("Adding role to Considering...");
     try {
       await pursueCompanyCandidate(candidateId);
-      await refresh();
+      await refreshCandidatePool("company");
       setOperationStatus("Role added to Considering.");
     } catch (error) {
       setOperationStatus(`Could not add role to Considering. ${error instanceof Error ? error.message : String(error)}`);
@@ -1244,7 +1311,7 @@ export function CompanyDetailPage({ data, refresh, applyCompanyCandidateUpdates,
     try {
       if (action === "ignored") await updateDiscoveryCandidate(candidateId, "ignored");
       else await pursueDiscoveryCandidate(candidateId);
-      await refresh();
+      await refreshCandidatePool("discovery");
       setOperationStatus(action === "ignored" ? "Discovery role ignored." : "Discovery role added to Considering.");
     } catch (error) {
       setOperationStatus(`Could not update Discovery role. ${error instanceof Error ? error.message : String(error)}`);
@@ -1267,6 +1334,14 @@ export function CompanyDetailPage({ data, refresh, applyCompanyCandidateUpdates,
     } finally {
       setIsMerging(false);
     }
+  }
+
+  if (!isNewCompany && companyDetailQuery.isPending) {
+    return <div className="empty-state" style={{ display: "block" }}>Loading company details…</div>;
+  }
+
+  if (!isNewCompany && companyDetailQuery.error) {
+    return <div className="empty-state" style={{ display: "block" }}>Could not load company details. {companyDetailQuery.error.message}</div>;
   }
 
   if (invalidCompany) return <Navigate to={routes.companies} replace />;
@@ -1457,10 +1532,29 @@ export function CompanyDetailPage({ data, refresh, applyCompanyCandidateUpdates,
                 );
               }) : <div className="company-section-empty">
                 {candidateSearch
-                  ? "No candidates match this search."
+                  ? companyCandidatesQuery.hasNextPage || discoveryCandidatesQuery.hasNextPage
+                    ? "No loaded candidates match this search. Load more linked roles to continue."
+                    : "No candidates match this search."
                   : "No candidates have been recorded for this company yet."}
               </div>}
             </div>
+            {companyCandidatesQuery.hasNextPage || discoveryCandidatesQuery.hasNextPage ? (
+              <div className="candidate-load-more">
+                <button
+                  className="button"
+                  type="button"
+                  disabled={companyCandidatesQuery.isFetchingNextPage || discoveryCandidatesQuery.isFetchingNextPage}
+                  onClick={() => {
+                    if (companyCandidatesQuery.hasNextPage) void companyCandidatesQuery.fetchNextPage();
+                    if (discoveryCandidatesQuery.hasNextPage) void discoveryCandidatesQuery.fetchNextPage();
+                  }}
+                >
+                  {companyCandidatesQuery.isFetchingNextPage || discoveryCandidatesQuery.isFetchingNextPage
+                    ? "Loading…"
+                    : "Load more linked roles"}
+                </button>
+              </div>
+            ) : null}
           </article>
 
           <article className="panel company-rail-panel">

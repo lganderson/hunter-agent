@@ -15,6 +15,7 @@ if str(ROOT_FOR_IMPORTS) not in sys.path:
 from hunter import paths as hunter_paths
 from hunter import posting_snapshots as posting_snapshot_store
 from hunter import repository
+from hunter import read_models
 from hunter import resumes as resume_store
 from hunter import agent as hunter_agent
 from hunter import app_state
@@ -37,6 +38,20 @@ import ingest_postings
 
 ROOT = hunter_paths.ROOT
 FRONTEND_DIST = hunter_paths.FRONTEND_DIST
+DEFAULT_JSON_BODY_LIMIT = 1 * 1024 * 1024
+RESUME_UPLOAD_JSON_BODY_LIMIT = 12 * 1024 * 1024
+JSON_BODY_LIMITS = {
+    "/api/settings/resume": RESUME_UPLOAD_JSON_BODY_LIMIT,
+}
+
+
+class RequestRejected(Exception):
+    """A client request that should receive a structured JSON error."""
+
+    def __init__(self, status, message):
+        super().__init__(message)
+        self.status = status
+        self.message = message
 
 
 class AppHandler(SimpleHTTPRequestHandler):
@@ -45,16 +60,66 @@ class AppHandler(SimpleHTTPRequestHandler):
 
     def end_headers(self):
         self.send_header("Cache-Control", "no-store")
+        self.send_header("Cross-Origin-Resource-Policy", "same-origin")
+        self.send_header("X-Content-Type-Options", "nosniff")
         super().end_headers()
 
     def read_json(self):
-        length = int(self.headers.get("Content-Length") or 0)
+        raw_length = self.headers.get("Content-Length")
+        try:
+            length = int(raw_length or 0)
+        except (TypeError, ValueError) as exc:
+            raise RequestRejected(400, "Content-Length must be a non-negative integer.") from exc
+        if length < 0:
+            raise RequestRejected(400, "Content-Length must be a non-negative integer.")
+        path = urlparse(self.path).path
+        limit = JSON_BODY_LIMITS.get(path, DEFAULT_JSON_BODY_LIMIT)
+        if length > limit:
+            raise RequestRejected(413, f"JSON request body exceeds the {limit}-byte limit.")
         if not length:
             return {}
-        return json.loads(self.rfile.read(length).decode("utf-8"))
+        body = self.rfile.read(length)
+        if len(body) != length:
+            raise RequestRejected(400, "JSON request body is incomplete.")
+        try:
+            decoded = body.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise RequestRejected(400, "JSON request body must be valid UTF-8.") from exc
+        try:
+            payload = json.loads(decoded)
+        except json.JSONDecodeError as exc:
+            raise RequestRejected(400, "JSON request body is malformed.") from exc
+        if not isinstance(payload, dict):
+            raise RequestRejected(400, "JSON request body must be an object.")
+        return payload
+
+    def expected_host(self):
+        return f"127.0.0.1:{self.server.server_port}"
+
+    def validate_request_boundary(self):
+        expected_host = self.expected_host()
+        if self.headers.get("Host", "").strip().lower() != expected_host:
+            self.send_json({"error": "Hunter only accepts requests for its generated local URL."}, status=403)
+            return False
+
+        origin = self.headers.get("Origin")
+        if origin is not None and origin.strip().lower() != f"http://{expected_host}":
+            self.send_json({"error": "Cross-origin requests are not allowed."}, status=403)
+            return False
+
+        if self.headers.get("Sec-Fetch-Site", "").strip().lower() == "cross-site":
+            self.send_json({"error": "Cross-site requests are not allowed."}, status=403)
+            return False
+
+        if self.command == "POST":
+            content_type = self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+            if content_type != "application/json":
+                self.send_json({"error": "POST requests require Content-Type: application/json."}, status=415)
+                return False
+        return True
 
     def send_json(self, payload, status=200):
-        body = json.dumps(payload).encode("utf-8")
+        body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
@@ -117,7 +182,19 @@ class AppHandler(SimpleHTTPRequestHandler):
     def do_GET(self):  # noqa: N802 - stdlib API name.
         parsed = urlparse(self.path)
         path = parsed.path
+        if not self.validate_request_boundary():
+            return
         query = parse_qs(parsed.query)
+        if path == "/api/health":
+            self.send_json({"service": "hunter", "status": "ok"})
+            return
+        read_model_route = read_models.READ_MODEL_GET_ROUTES.get(path)
+        if read_model_route is not None:
+            try:
+                self.send_json(read_model_route(query))
+            except read_models.ReadModelError as exc:
+                self.send_json({"error": exc.message}, status=exc.status)
+            return
         if path == "/api/app-state":
             include_excluded_companies = (
                 (query.get("include_excluded_companies") or ["false"])[0].strip().lower()
@@ -200,10 +277,21 @@ class AppHandler(SimpleHTTPRequestHandler):
         if path == "/dashboard" or path.startswith("/dashboard/"):
             self.send_error(404, "Legacy dashboard path removed. Use /")
             return
+        if path.startswith("/api/"):
+            self.send_json({"error": f"Unknown API endpoint: {path}"}, status=404)
+            return
         self.send_frontend(path)
 
     def do_POST(self):  # noqa: N802 - stdlib API name.
         path = urlparse(self.path).path
+        if not self.validate_request_boundary():
+            return
+        try:
+            self.dispatch_POST(path)
+        except RequestRejected as exc:
+            self.send_json({"error": exc.message}, status=exc.status)
+
+    def dispatch_POST(self, path):
         if path == "/api/settings":
             payload = self.read_json()
             status = action_engine.save_settings(

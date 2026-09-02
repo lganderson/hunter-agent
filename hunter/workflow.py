@@ -64,8 +64,8 @@ def normalize_action_type(row):
 
 
 def read_workflow():
-    sqlite_store.initialize()
-    with sqlite_store.connect() as connection:
+    sqlite_store.ensure_initialized()
+    with sqlite_store.read_transaction() as connection:
         stages = connection.execute(
             "SELECT id, label, sort_order, is_terminal, is_active "
             "FROM workflow_stages ORDER BY CAST(sort_order AS INTEGER), label"
@@ -134,8 +134,8 @@ def validate_action_type(action_type_id, allow_inactive=False):
 
 def upsert_stage(payload):
     row = normalize_stage(payload or {})
-    sqlite_store.initialize()
-    with sqlite_store.connect() as connection:
+    sqlite_store.ensure_initialized()
+    with sqlite_store.write_transaction() as connection:
         connection.execute(
             "INSERT INTO workflow_stages(id, label, sort_order, is_terminal, is_active) "
             "VALUES (?, ?, ?, ?, ?) "
@@ -151,7 +151,7 @@ def archive_stage(stage_id):
     stage_id = validate_stage(stage_id, allow_inactive=True)
     if stage_id == "closed":
         raise ValueError("The closed stage cannot be archived.")
-    with sqlite_store.connect() as connection:
+    with sqlite_store.write_transaction() as connection:
         connection.execute("UPDATE workflow_stages SET is_active = '' WHERE id = ?", (stage_id,))
     return {"id": stage_id, "is_active": ""}
 
@@ -163,8 +163,8 @@ def upsert_action_type(payload):
     unknown = sorted(allowed - known)
     if unknown:
         raise ValueError(f"Unknown allowed stage for action type: {unknown[0]}")
-    sqlite_store.initialize()
-    with sqlite_store.connect() as connection:
+    sqlite_store.ensure_initialized()
+    with sqlite_store.write_transaction() as connection:
         connection.execute(
             "INSERT INTO workflow_action_types("
             "id, label, description, default_priority, default_due_days, allowed_stages, sort_order, is_active"
@@ -180,6 +180,6 @@ def upsert_action_type(payload):
 
 def archive_action_type(action_type_id):
     action_type_id = validate_action_type(action_type_id, allow_inactive=True)
-    with sqlite_store.connect() as connection:
+    with sqlite_store.write_transaction() as connection:
         connection.execute("UPDATE workflow_action_types SET is_active = '' WHERE id = ?", (action_type_id,))
     return {"id": action_type_id, "is_active": ""}
