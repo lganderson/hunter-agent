@@ -8,7 +8,6 @@ from . import agent, api_usage, candidate_eligibility, companies, repository, se
 
 
 OPENAI_RESULTS_PER_FAMILY = 10
-OPENAI_FALLBACK_MIN_NOVEL_RESULTS_PER_FAMILY = 3
 OPENAI_DISCOVERY_MODEL = "gpt-5.6-luna"
 ADZUNA_RESULTS_PER_QUERY = 25
 ADZUNA_QUERY_LIMIT = 20
@@ -68,6 +67,7 @@ def provider_bundle(
     openai_requester=None,
     result_is_novel=None,
     progress=None,
+    run_id="",
 ):
     results = []
     sources = []
@@ -126,33 +126,40 @@ def provider_bundle(
         results,
         result_is_novel=result_is_novel,
     )
-    fallback_families = [
-        family
-        for family in selected_families
-        if novel_counts.get(family.get("id", ""), 0)
-        < OPENAI_FALLBACK_MIN_NOVEL_RESULTS_PER_FAMILY
-    ]
-    fallback_ids = {family.get("id", "") for family in fallback_families}
-    openai_results = []
-    if fallback_families:
-        fallback_search = {
-            **search,
-            "role_family_ids": [family.get("id", "") for family in fallback_families],
+    # OpenAI exploration is intentionally independent of ATS/Adzuna coverage. Cheap-source
+    # novelty is retained as telemetry so value can be compared without suppressing a source
+    # that is better at finding adjacent, responsibility-aligned roles.
+    try:
+        openai_report = openai_role_results(
+            search,
+            family_definitions,
+            requester=openai_requester,
+            include_report=True,
+            run_id=run_id,
+        )
+    except (RuntimeError, ValueError, TimeoutError, OSError) as exc:
+        # Compatibility for injected providers; the built-in implementation isolates
+        # failures per family and normally returns them in its report.
+        openai_report = {"results": [], "runs": [], "errors": [f"OpenAI web search: {storage.clean(str(exc))}"]}
+    if isinstance(openai_report, dict):
+        openai_results = openai_report.get("results", [])
+        openai_runs = {
+            run.get("role_family_id", ""): run
+            for run in openai_report.get("runs", [])
         }
-        try:
-            # Do not retry automatically: a timed-out request may still be running and billable.
-            openai_results = openai_role_results(
-                fallback_search,
-                family_definitions,
-                requester=openai_requester,
-            )
-            results.extend(openai_results)
-        except (RuntimeError, ValueError, TimeoutError, OSError) as exc:
-            errors.append(f"OpenAI web search: {storage.clean(str(exc))}")
+        errors.extend(openai_report.get("errors", []))
+    else:
+        # Keep compatibility with injected providers used by local tests and extensions.
+        openai_results = openai_report or []
+        openai_runs = {}
+    results.extend(openai_results)
 
     for family in selected_families:
         family_id = family.get("id", "")
-        attempted = family_id in fallback_ids
+        family_run = openai_runs.get(family_id, {})
+        family_status = family_run.get("status") or (
+            "failed" if isinstance(openai_report, dict) and openai_report.get("errors") else "completed"
+        )
         sources.append(
             {
                 "source": "openai-web",
@@ -167,20 +174,16 @@ def provider_bundle(
                     for result in openai_results
                 ),
                 "cheap_novel_count": novel_counts.get(family_id, 0),
-                "page_count": 1 if attempted and not any(
-                    error.startswith("OpenAI web search:") for error in errors
-                ) else 0,
-                "engine": (
-                    "openai-web-search"
-                    if attempted
-                    else "skipped-sufficient-novel-coverage"
-                ),
-                "skipped": not attempted,
+                "page_count": 1 if family_status == "completed" else 0,
+                "engine": "openai-web-search",
+                "model": family_run.get("model", OPENAI_DISCOVERY_MODEL),
+                "run_id": run_id,
+                "skipped": False,
             }
         )
     _progress(
         progress,
-        "Filling uncovered role families from direct employer postings…",
+        "Exploring every role family on direct employer postings…",
         3,
         3,
         "openai-web",
@@ -306,7 +309,14 @@ def matching_family_ids(title, search, family_definitions):
     return ["saved"] if keywords and keywords in normalized_title else []
 
 
-def openai_role_results(search, family_definitions, requester=None):
+def openai_role_results(
+    search,
+    family_definitions,
+    requester=None,
+    *,
+    include_report=False,
+    run_id="",
+):
     config = agent._settings()
     selected_families = _selected_families(search, family_definitions)
     lane_lines = "\n".join(
@@ -314,25 +324,40 @@ def openai_role_results(search, family_definitions, requester=None):
         for lane in search.get("lanes", [])
     )
     excluded = ", ".join(search.get("excluded_terms", [])) or "none"
+    excluded_companies = ", ".join(
+        storage.clean(company.get("name", ""))
+        for company in repository.read_companies()
+        if candidate_eligibility.company_is_excluded(company)
+        and storage.clean(company.get("name", ""))
+    )[:4_000] or "none"
+    goal_context = settings.search_goals_context(max_chars=4_000) or "No additional Search Goals configured."
     allowed_lane_ids = {lane.get("id", "") for lane in search.get("lanes", [])}
     results = []
+    runs = []
+    errors = []
     seen = set()
     for family in selected_families:
         family_id = family.get("id", "")
         prompt = (
-            "Find currently open jobs that match this role family and at least one location lane below. "
+            "Find currently open jobs whose actual work matches this role family and at least one location lane below. "
             f"Return at most {OPENAI_RESULTS_PER_FAMILY} roles distributed across the eligible lanes. Search official "
             "employer career sites and direct employer ATS job-detail pages. Do not return LinkedIn, Adzuna, "
             "Indeed, Glassdoor, ZipRecruiter, staffing-agency reposts, search-result pages, career indexes, or "
             "expired postings. job_url must be the current individual posting URL that supports the returned "
             "title, company, location, and summary. The location and work mode must actually satisfy the selected "
             "lane; do not infer remote eligibility from a nationwide salary disclaimer. Do not invent missing facts. "
-            "description_summary should be a concise source-backed summary of responsibilities and requirements. "
+            "Include adjacent job titles when the posting body clearly shows product-platform strategy, technical "
+            "program leadership, cross-functional delivery, product systems, operations, or prototyping work that "
+            "matches the role family and Search Goals. Exclude adjacent titles whose responsibilities do not support "
+            "that match. description_summary should be a concise source-backed summary of responsibilities and requirements. "
             "Use only the role_family_id and lane_id values listed below.\n\n"
             f"Role family:\n- {family_id}: {', '.join(family.get('terms', []))}\n\n"
             f"Location lanes:\n{lane_lines}\n\n"
             f"Required additional focus: {storage.clean(search.get('keywords', '')) or 'none'}\n"
-            f"Excluded title terms: {excluded}\n"
+            f"Excluded title terms: {excluded}\n\n"
+            "Company-interest hard gate: do not open, read, assess, or return postings from these companies: "
+            f"{excluded_companies}.\n\n"
+            f"Bounded Search Goals (preferences, not private resume text):\n{goal_context}\n"
         )
         payload = {
             "model": OPENAI_DISCOVERY_MODEL,
@@ -356,13 +381,27 @@ def openai_role_results(search, family_definitions, requester=None):
                 "feature": "candidate-discovery",
                 "source": "openai-web-search",
                 "role_family": family_id,
+                "run_id": run_id,
             },
         }
-        response = (requester or agent._request_json)(
-            f"{config['api_base']}/responses",
-            config["token"],
-            payload,
-        )
+        try:
+            response = (requester or agent._request_json)(
+                f"{config['api_base']}/responses",
+                config["token"],
+                payload,
+            )
+        except (RuntimeError, ValueError, TimeoutError, OSError) as exc:
+            message = storage.clean(str(exc)) or "OpenAI request failed."
+            errors.append(f"OpenAI web search · {family.get('label', family_id)}: {message}")
+            runs.append(
+                {
+                    "role_family_id": family_id,
+                    "status": "failed",
+                    "model": OPENAI_DISCOVERY_MODEL,
+                    "error": message,
+                }
+            )
+            continue
         api_usage.log_usage(
             "candidate-discovery",
             response.get("model") or OPENAI_DISCOVERY_MODEL,
@@ -371,12 +410,23 @@ def openai_role_results(search, family_definitions, requester=None):
             context={
                 "search_id": search.get("id", ""),
                 "role_family_id": family_id,
+                **({"run_id": run_id} if run_id else {}),
             },
         )
         try:
             decoded = json.loads(agent._output_text(response))
         except (TypeError, json.JSONDecodeError) as exc:
-            raise RuntimeError("OpenAI returned an unreadable candidate search result.") from exc
+            message = "OpenAI returned an unreadable candidate search result."
+            errors.append(f"OpenAI web search · {family.get('label', family_id)}: {message}")
+            runs.append(
+                {
+                    "role_family_id": family_id,
+                    "status": "failed",
+                    "model": response.get("model") or OPENAI_DISCOVERY_MODEL,
+                    "error": message,
+                }
+            )
+            continue
         roles = decoded.get("roles", []) if isinstance(decoded, dict) else []
         if not isinstance(roles, list):
             continue
@@ -412,7 +462,19 @@ def openai_role_results(search, family_definitions, requester=None):
                     "lane_ids": [lane_id],
                 }
             )
-    return results
+        runs.append(
+            {
+                "role_family_id": family_id,
+                "status": "completed",
+                "model": response.get("model") or OPENAI_DISCOVERY_MODEL,
+                "found_count": sum(
+                    family_id in result.get("role_family_ids", [])
+                    for result in results
+                ),
+            }
+        )
+    report = {"results": results, "runs": runs, "errors": errors}
+    return report if include_report else results
 
 
 def openai_source_keys(response):

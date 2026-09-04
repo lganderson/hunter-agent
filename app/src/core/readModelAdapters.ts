@@ -107,6 +107,7 @@ export function companyListItemToLegacyCandidate(
 ): CompanyPostingCandidate {
   return {
     ...item,
+    review_state: item.review_state === "needs-qualification" ? "needs-detail" : item.review_state,
     matched_queries: "",
     description_hash: "",
     score_inputs_hash: "",
@@ -135,6 +136,8 @@ export function discoveryListItemToLegacyCandidate(
     warnings: "",
     source_urls_json: "",
     source_urls: [],
+    acquisition_provenance_json: "",
+    acquisition_provenance: [],
     ignore_reason: "",
     ignore_reason_detail: "",
     fit_strengths: [],

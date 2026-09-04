@@ -183,7 +183,9 @@ export function DiscoveryMode({ data, refresh, applyDiscoveryCandidateUpdate, en
   const selectedCandidates = useMemo(
     () => canonicalCandidateRows(data.discovery_candidates).filter(
       candidate => (!candidate.company_id || !discoveryExcludedCompanyIds.has(candidate.company_id))
-        && (candidate.status !== "new" || Boolean(candidate.lane_match))
+        && (candidate.status !== "new"
+          || Boolean(candidate.lane_match)
+          || candidate.qualification_status === "needs-verification")
     ),
     [data.discovery_candidates, discoveryExcludedCompanyIds]
   );
@@ -197,7 +199,7 @@ export function DiscoveryMode({ data, refresh, applyDiscoveryCandidateUpdate, en
   const refreshableCandidates = useMemo(
     () => selectedCandidates.filter(candidate => (
       candidate.status === "new"
-      && ["needs-detail", "needs-freshness"].includes(candidate.review_state)
+      && ["needs-qualification", "needs-detail", "needs-freshness"].includes(candidate.review_state)
     )),
     [selectedCandidates]
   );
@@ -1238,7 +1240,7 @@ export function DiscoveryMode({ data, refresh, applyDiscoveryCandidateUpdate, en
                       <button
                         className="button compact primary"
                         type="button"
-                        disabled={pending || rowPending || Boolean(refreshingCandidateId) || enrichmentActive || !["ready", "needs-detail", "needs-freshness"].includes(candidate.review_state)}
+                        disabled={pending || rowPending || Boolean(refreshingCandidateId) || enrichmentActive || !["ready", "needs-qualification", "needs-detail", "needs-freshness"].includes(candidate.review_state)}
                         title={candidate.review_state === "ready" ? "Add to Postings in Considering" : candidate.review_next_action}
                         onClick={() => candidate.review_state === "ready"
                           ? void pursueCandidate(candidate)
@@ -1252,7 +1254,7 @@ export function DiscoveryMode({ data, refresh, applyDiscoveryCandidateUpdate, en
                             ? "Consider"
                             : candidate.freshness_status === "needs-review"
                               ? "Review"
-                              : candidate.review_state === "needs-freshness" ? "Check" : "Resolve"}
+                              : candidate.review_state === "needs-qualification" ? "Verify" : candidate.review_state === "needs-freshness" ? "Check" : "Resolve"}
                       </button>
                     ) : null}
                     {candidate.status === "new" ? (
@@ -1542,13 +1544,13 @@ function CandidateReviewModal({
             <button className="button" type="button" disabled={pending || !applications.length} onClick={() => setDuplicateOpen(true)}>
               Mark duplicate
             </button>
-            {candidate.review_state === "needs-freshness" || candidate.review_state === "needs-detail" ? (
+            {candidate.review_state === "needs-freshness" || candidate.review_state === "needs-detail" || candidate.review_state === "needs-qualification" ? (
               <button className="button primary" type="button" disabled={pending} onClick={refresh}>
                 <RefreshIcon size={15} /> {pending
                   ? "Checking…"
                   : candidate.freshness_status === "needs-review"
                     ? "Check again"
-                    : candidate.review_state === "needs-freshness" ? "Check posting" : "Resolve details"}
+                    : candidate.review_state === "needs-qualification" ? "Verify location" : candidate.review_state === "needs-freshness" ? "Check posting" : "Resolve details"}
               </button>
             ) : (
               <button className="button primary" type="button" disabled={pending || candidate.review_state !== "ready"} onClick={() => { setDecision("pursued"); consider(); }}>{pending && decision === "pursued" ? "Saving…" : "Consider"}</button>
@@ -2095,6 +2097,7 @@ function candidateMatchesExclusionTerms(candidate: DiscoveryCandidate, terms: st
 
 function processingLabel(candidate: DiscoveryCandidate) {
   if (candidate.review_state === "ready") return "Ready";
+  if (candidate.review_state === "needs-qualification") return "Needs location verification";
   if (candidate.review_state === "needs-detail") return "Needs detail";
   if (candidate.freshness_status === "needs-review") return "Freshness could not be verified";
   if (candidate.review_state === "needs-freshness") return "Needs freshness";

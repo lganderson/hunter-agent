@@ -147,6 +147,36 @@ test("switching the acquisition search preserves the shared Discovery review que
   await expect(candidateTitles).toHaveText(before);
 });
 
+test("uncertain location candidates stay visible with a verification action", async ({ page }) => {
+  const base = syntheticAppState.discovery_candidates[0];
+  const candidate = {
+    ...base,
+    id: "DC1099",
+    title: "Director, Platform Delivery",
+    location: "",
+    work_mode: "",
+    lane_match: "",
+    qualification_status: "needs-verification" as const,
+    qualification_reason: "location eligibility still needs verification",
+    review_state: "needs-qualification" as const,
+    review_next_action: "Verify the posting location and work mode",
+    recommendation_eligible: false
+  };
+  await page.route("**/api/candidates/discovery?**", route => route.fulfill({
+    json: candidatePage("discovery", [{
+      ...candidate,
+      company: syntheticAppState.companies.find(company => company.id === candidate.company_id) || null,
+      description_truncated: false
+    }], "DS1001")
+  }));
+
+  await page.goto("/candidates?mode=discovery&search_id=DS1001");
+
+  await expect(page.getByText("Director, Platform Delivery", { exact: true })).toBeVisible();
+  await expect(page.getByText("Needs location verification")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Verify" })).toBeVisible();
+});
+
 test("candidate selection controls have accessible names and minimum targets", async ({ page }) => {
   await page.goto("/candidates?mode=discovery&search_id=DS1001");
 

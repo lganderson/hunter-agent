@@ -108,6 +108,24 @@ class McpDiscoverySearchesTest(unittest.TestCase):
         self.assertEqual(len(calls), 3)
         self.assertTrue(all(call[1]["timeout"] == 5 for call in calls))
 
+    def test_run_searches_does_not_replay_a_timed_out_paid_search_by_default(self):
+        searches = [{"id": "DS0001", "name": "Stuck search"}]
+        with (
+            patch("hunter.mcp_server.discovery_store.list_searches", return_value=searches),
+            patch(
+                "hunter.mcp_server.subprocess.run",
+                side_effect=subprocess.TimeoutExpired(["hunter"], 5),
+            ) as run,
+        ):
+            response = mcp_server.call_named_tool(
+                "hunter_run_discovery_searches",
+                {"timeout_seconds": 5},
+            )
+
+        payload = json.loads(response["content"][0]["text"])
+        self.assertEqual(run.call_count, 1)
+        self.assertEqual(payload["results"][0]["attempt_count"], 1)
+
     def test_refresh_existing_candidates_does_not_run_acquisition_and_defaults_to_full_backlog(self):
         result = {
             "target_count": 12,

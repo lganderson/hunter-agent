@@ -611,6 +611,8 @@ def _discovery_list_item(row, context):
         "status": row.get("status", ""),
         "canonical_status": row.get("canonical_status", ""),
         "processing_status": row.get("processing_status", ""),
+        "qualification_status": row.get("qualification_status", ""),
+        "qualification_reason": row.get("qualification_reason", ""),
         "detail_last_error": storage.clean(row.get("detail_last_error", ""))[:LIST_DESCRIPTION_LIMIT],
         "detail_next_action": discovery_store.candidate_detail_next_action(row),
         "review_next_action": discovery_store.candidate_review_next_action(row),

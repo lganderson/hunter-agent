@@ -868,6 +868,42 @@ class HunterDiscoveryTest(unittest.TestCase):
         chrome.assert_not_called()
         self.assertEqual(result["new_count"], 1)
         self.assertEqual(result["captured"][0]["source_platform"], "greenhouse")
+        self.assertTrue(result["run_id"].startswith("DR-"))
+        provenance = discovery.candidate_acquisition_provenance(result["captured"][0])
+        self.assertEqual(provenance[0]["provider"], "openai")
+        self.assertEqual(provenance[0]["run_id"], result["run_id"])
+
+    def test_ats_inventory_without_verification_timestamp_is_not_confirmed_open(self):
+        search = self.save_search("Technical platforms", "technical program manager")
+        posting_url = "https://jobs.example.com/roles/123"
+        bundle = {
+            "results": [
+                {
+                    "provider": "ats",
+                    "url": posting_url,
+                    "title": "Technical Program Manager",
+                    "company": "Example Labs",
+                    "location": "United States",
+                    "work_mode": "Remote",
+                    "description_text": "Lead technical delivery, dependencies, risk management, and launch readiness. " * 12,
+                    "snippet": "Lead technical delivery and launch readiness.",
+                    "fit_score": "80",
+                    "role_family_ids": ["technical-program"],
+                    "lane_ids": ["default"],
+                    "last_verified_at": "",
+                }
+            ],
+            "sources": [],
+            "errors": [],
+        }
+
+        with patch("hunter.discovery.candidate_sources.provider_bundle", return_value=bundle):
+            result = discovery.run_search(search["id"])
+
+        candidate = result["captured"][0]
+        self.assertEqual(candidate["freshness_status"], "")
+        self.assertEqual(candidate["freshness_checked_at"], "")
+        self.assertEqual(discovery.candidate_review_state(candidate), "needs-freshness")
 
     def test_api_search_measures_cheap_source_coverage_by_eligible_unseen_results(self):
         search = self.save_search("Technical platforms", "technical program manager")
@@ -2096,6 +2132,55 @@ class HunterDiscoveryTest(unittest.TestCase):
 
         self.assertFalse(admitted)
         self.assertIn("outside the configured location lanes", reason)
+
+    def test_unknown_location_remains_recoverable_without_overwriting_user_decisions(self):
+        search = self.save_search(
+            "US remote TPM",
+            "technical program manager",
+            lanes=[
+                {
+                    "id": "remote-us",
+                    "label": "United States remote",
+                    "location": "United States",
+                    "work_modes": ["remote"],
+                }
+            ],
+        )
+        base = {
+            "title": "Technical Program Manager",
+            "canonical_url": "https://jobs.example.com/roles/123",
+            "source_platform": "employer",
+            "processing_status": "partial",
+            "fit_score": "80",
+            "freshness_status": "",
+            "description_text": "",
+            "location": "",
+            "work_mode": "",
+        }
+        candidate = {**base, "status": discovery.SCREENED_STATUS}
+        ignored = {**base, "status": "ignored"}
+
+        self.assertFalse(discovery.apply_candidate_review_admission(candidate, search=search))
+        self.assertEqual(candidate["status"], "new")
+        self.assertEqual(candidate["qualification_status"], "needs-verification")
+        self.assertEqual(discovery.candidate_review_state(candidate), "needs-qualification")
+        self.assertEqual(discovery.detail_enrichment_targets(rows=[candidate]), [candidate])
+        self.assertFalse(discovery.apply_candidate_review_admission(ignored, search=search))
+        self.assertEqual(ignored["status"], "ignored")
+
+    def test_adjacent_title_requires_responsibility_evidence(self):
+        search = self.save_search("TPM", "technical program manager")
+        relevant = {
+            "title": "Director, Platform Delivery",
+            "description_text": "Own cross-functional technical delivery, dependencies, risk management, and launch readiness.",
+        }
+        unrelated = {
+            "title": "Director, Sales",
+            "description_text": "Own pipeline development and account growth.",
+        }
+
+        self.assertTrue(discovery.candidate_title_matches_search(relevant, search))
+        self.assertFalse(discovery.candidate_title_matches_search(unrelated, search))
 
     def test_us_remote_lane_rejects_foreign_remote_role(self):
         lane = {

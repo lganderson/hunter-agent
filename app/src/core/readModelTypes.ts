@@ -65,7 +65,7 @@ type CandidateListItemBase = {
   canonical_status: string;
   fit_score: string;
   fit_checked_at: string;
-  review_state: "ready" | "needs-detail" | "needs-freshness" | "failed-extraction";
+  review_state: "ready" | "needs-qualification" | "needs-detail" | "needs-freshness" | "failed-extraction";
   matching_posting_ids: string[];
   description_excerpt: string;
   description_truncated: boolean;
@@ -87,6 +87,8 @@ export type DiscoveryCandidateListItem = CandidateListItemBase & {
   canonical_url: string;
   captured_at: string;
   processing_status: string;
+  qualification_status: DiscoveryCandidate["qualification_status"];
+  qualification_reason: string;
   detail_last_error: string;
   detail_next_action: string;
   review_next_action: string;

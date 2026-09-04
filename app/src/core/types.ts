@@ -353,10 +353,12 @@ export type DiscoveryPreferenceSuggestion = {
 };
 
 export type DiscoveryLastRunSummary = {
+  run_id?: string;
   evaluated_count?: number;
   known_count?: number;
   associated_count?: number;
   qualified_count?: number;
+  qualification_pending_count?: number;
   screened_count?: number;
   skip_reasons?: Record<string, number>;
   screened_reasons?: Record<string, number>;
@@ -394,13 +396,15 @@ export type DiscoveryCandidate = {
   last_seen_at: string;
   status: string;
   processing_status: string;
+  qualification_status: "" | "eligible" | "needs-verification" | "ineligible";
+  qualification_reason: string;
   detail_attempt_count: string;
   detail_last_attempt_at: string;
   detail_last_error: string;
   detail_state: DiscoveryDetailState;
   detail_gaps: DiscoveryDetailGap[];
   detail_next_action: string;
-  review_state: "ready" | "needs-detail" | "needs-freshness" | "failed-extraction";
+  review_state: "ready" | "needs-qualification" | "needs-detail" | "needs-freshness" | "failed-extraction";
   review_next_action: string;
   requisition_ids: string[];
   matching_posting_ids: string[];
@@ -412,6 +416,8 @@ export type DiscoveryCandidate = {
   warnings: string;
   source_urls_json: string;
   source_urls: string[];
+  acquisition_provenance_json: string;
+  acquisition_provenance: Array<{ run_id: string; search_id: string; provider: string; acquired_at: string }>;
   freshness_status: string;
   freshness_checked_at: string;
   ignore_reason: string;
@@ -465,15 +471,21 @@ export type DiscoverySourceRun = {
   found_count: number;
   page_count: number;
   engine: string;
+  model?: string;
+  run_id?: string;
+  cheap_novel_count?: number;
+  skipped?: boolean;
 };
 
 export type DiscoveryRunResult = {
+  run_id: string;
   search: DiscoverySearch;
   captured: DiscoveryCandidate[];
   evaluated_count: number;
   known_count: number;
   associated_count: number;
   qualified_count: number;
+  qualification_pending_count: number;
   screened_count: number;
   skip_reasons: Record<string, number>;
   screened_reasons: Record<string, number>;

@@ -184,15 +184,24 @@ def compact_discovery_candidate(candidate, detail=False):
             "recommendation_eligible",
         ]:
             row[field] = candidate.get(field, [] if field.endswith("_ids") else "")
+        row["acquisition_provenance"] = discovery_store.candidate_acquisition_provenance(candidate)
         row["status_label"] = candidate_status_label(candidate)
         return row
     fields = [
         "id", "company_id", "company", "title", "canonical_url", "url", "location",
         "work_mode", "source_platform", "status", "processing_status", "freshness_status",
+        "qualification_status", "qualification_reason",
         "fit_score", "fit_summary", "recommendation_eligible", "lane_match", "detail_state",
         "review_state", "review_next_action", "requisition_ids", "matching_posting_ids",
     ]
     row = {field: candidate.get(field, "") for field in fields}
+    row["acquisition_providers"] = list(
+        dict.fromkeys(
+            acquisition.get("provider", "")
+            for acquisition in discovery_store.candidate_acquisition_provenance(candidate)
+            if acquisition.get("provider", "")
+        )
+    )
     row["status_label"] = candidate_status_label(candidate)
     row["notes_preview"] = preview_text(candidate.get("notes", ""))
     return row
@@ -766,6 +775,7 @@ def tool_run_discovery_search(args):
     )
     return text_result(
         {
+            "run_id": result.get("run_id", ""),
             "search": compact_discovery_search(result.get("search", {})),
             "new_count": result.get("new_count", 0),
             "updated_count": result.get("updated_count", 0),
@@ -774,6 +784,7 @@ def tool_run_discovery_search(args):
             "evaluated_count": result.get("evaluated_count", 0),
             "known_count": result.get("known_count", 0),
             "screened_count": result.get("screened_count", 0),
+            "qualification_pending_count": result.get("qualification_pending_count", 0),
             "needs_details_count": result.get("needs_details_count", 0),
             "enrichment": result.get("enrichment", {}),
             "sources": result.get("sources", []),
@@ -808,7 +819,7 @@ def tool_run_discovery_searches(args):
     try:
         enrichment_limit = max(0, min(250, int(args.get("enrichment_limit", 100))))
         timeout_seconds = max(1, min(600, int(args.get("timeout_seconds", 180))))
-        retry_count = max(0, min(2, int(args.get("retry_count", 1))))
+        retry_count = max(0, min(2, int(args.get("retry_count", 0))))
     except (TypeError, ValueError) as exc:
         raise ValueError("enrichment_limit, timeout_seconds, and retry_count must be integers.") from exc
 
@@ -1422,7 +1433,7 @@ TOOLS = {
         "handler": tool_run_discovery_search,
     },
     "hunter_run_discovery_searches": {
-        "description": "Run saved Discovery searches independently. Every search gets its own subprocess timeout, retry budget, and completion result so one stuck search cannot block the rest.",
+        "description": "Run saved Discovery searches independently. Every search gets its own subprocess timeout and completion result so one stuck search cannot block the rest. Automatic retries default off because an interrupted paid search may still have completed; opt in explicitly when replay is acceptable.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -1434,7 +1445,7 @@ TOOLS = {
                 "enrichment_limit": {"type": "integer", "minimum": 0, "maximum": 250, "default": 100},
                 "use_browser_fallback": {"type": "boolean", "default": False},
                 "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 600, "default": 180},
-                "retry_count": {"type": "integer", "minimum": 0, "maximum": 2, "default": 1},
+                "retry_count": {"type": "integer", "minimum": 0, "maximum": 2, "default": 0},
             },
         },
         "handler": tool_run_discovery_searches,

@@ -3,11 +3,12 @@
 import html
 import json
 import re
+import uuid
 from difflib import SequenceMatcher
 from datetime import datetime, timedelta
 from urllib.parse import parse_qs, quote_plus, unquote, urljoin, urlparse, urlunparse
 
-from . import applications, browser_discovery, candidate_eligibility, candidate_sources, companies, posting_snapshots, repository, schema, settings, storage
+from . import applications, browser_discovery, candidate_eligibility, candidate_sources, companies, paths, posting_snapshots, repository, schema, settings, storage
 
 
 URL_PATTERN = re.compile(r"https?://[^\s<>'\"]+", re.I)
@@ -38,6 +39,23 @@ MIN_READY_DESCRIPTION_CHARS = 500
 MIN_REVIEW_FIT_SCORE = 45
 SCREENED_STATUS = "screened"
 SCREENING_WARNING_PREFIX = "Screened from New: "
+DISCOVERY_RUN_HISTORY_FILE = "discovery_run_history.jsonl"
+QUALIFICATION_ELIGIBLE = "eligible"
+QUALIFICATION_NEEDS_VERIFICATION = "needs-verification"
+QUALIFICATION_INELIGIBLE = "ineligible"
+ADJACENT_ROLE_TITLE_TERMS = {
+    "delivery",
+    "operations",
+    "platform",
+    "product",
+    "program",
+    "project",
+    "prototype",
+    "strategy",
+    "systems",
+    "technology",
+    "technologist",
+}
 DISCOVERY_EXCLUDED_COMPANY_INTEREST_STATUSES = candidate_eligibility.EXCLUDED_COMPANY_INTEREST_STATUSES
 ROLE_QUERY_FAMILIES = [
     {
@@ -1417,6 +1435,8 @@ def candidate_detail_next_action(candidate):
 
 def candidate_review_state(candidate):
     """Return the explicit gate state used by review and recommendation queues."""
+    if candidate.get("qualification_status") == QUALIFICATION_NEEDS_VERIFICATION:
+        return "needs-qualification"
     detail_state = candidate_detail_state(candidate)
     if detail_state != "ready":
         if detail_state == "needs-input" and any(
@@ -1435,6 +1455,8 @@ def candidate_review_next_action(candidate):
         return "Ready for review"
     if state == "needs-freshness":
         return "Confirm the employer posting is still open"
+    if state == "needs-qualification":
+        return "Verify the posting location and work mode"
     if state == "failed-extraction":
         return "Add a direct posting or complete requirements after extraction failed"
     return candidate_detail_next_action(candidate)
@@ -1909,6 +1931,63 @@ def sync_candidate_source_urls(candidate):
     return candidate
 
 
+def candidate_acquisition_provenance(candidate):
+    try:
+        decoded = json.loads(candidate.get("acquisition_provenance_json", "") or "[]")
+    except (TypeError, ValueError):
+        decoded = []
+    return [row for row in decoded if isinstance(row, dict)] if isinstance(decoded, list) else []
+
+
+def add_candidate_acquisition(candidate, *, run_id, search_id, provider, acquired_at):
+    acquisition = {
+        "run_id": storage.clean(run_id),
+        "search_id": storage.clean(search_id).upper(),
+        "provider": storage.clean(provider).lower(),
+        "acquired_at": storage.clean(acquired_at),
+    }
+    rows = candidate_acquisition_provenance(candidate)
+    identity = (acquisition["run_id"], acquisition["search_id"], acquisition["provider"])
+    if any(
+        (row.get("run_id", ""), row.get("search_id", ""), row.get("provider", "")) == identity
+        for row in rows
+    ):
+        return candidate
+    rows.append(acquisition)
+    candidate["acquisition_provenance_json"] = json.dumps(rows, ensure_ascii=False)
+    return candidate
+
+
+def append_discovery_run_history(result, timestamp):
+    """Keep private append-only run telemetry so cost and downstream value can be joined later."""
+    paths.DATA_DIR.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "run_id": result.get("run_id", ""),
+        "search_id": (result.get("search") or {}).get("id", ""),
+        "search_name": (result.get("search") or {}).get("name", ""),
+        "created_at": timestamp,
+        **{
+            field: result.get(field, 0)
+            for field in [
+                "evaluated_count",
+                "known_count",
+                "associated_count",
+                "qualified_count",
+                "qualification_pending_count",
+                "screened_count",
+                "new_count",
+                "updated_count",
+                "skipped_count",
+                "duplicate_count",
+            ]
+        },
+        "sources": result.get("sources", []),
+        "errors": result.get("errors", []),
+    }
+    with (paths.DATA_DIR / DISCOVERY_RUN_HISTORY_FILE).open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, sort_keys=True) + "\n")
+
+
 def candidate_search_ids(candidate):
     """Return every saved search associated with one canonical candidate."""
     search_ids = []
@@ -2368,6 +2447,7 @@ def run_search(
 ):
     search = get_search(search_id)
     timestamp = now_iso()
+    run_id = f"DR-{uuid.uuid4().hex[:12].upper()}"
     found = []
     source_runs = []
     errors = []
@@ -2375,6 +2455,7 @@ def run_search(
     evaluated_count = 0
     known_candidate_ids = set()
     known_membership_candidate_ids = set()
+    known_acquisitions = {}
     duplicate_count = 0
     skip_reasons = {}
     screened_reasons = {}
@@ -2418,6 +2499,7 @@ def run_search(
                 excluded_company_identity,
             ),
             progress=progress,
+            run_id=run_id,
         )
         source_runs.extend(bundle["sources"])
         errors.extend(bundle["errors"])
@@ -2438,11 +2520,18 @@ def run_search(
             existing = found_by_url.get(normalized_url)
             if existing:
                 duplicate_count += 1
+                provider = storage.clean(item.get("provider", "")) or "unknown"
+                if provider not in existing["acquisition_providers"]:
+                    existing["acquisition_providers"].append(provider)
                 existing["matches"].extend(
                     match for match in matches if match not in existing["matches"]
                 )
                 continue
-            combined = {**item, "matches": matches}
+            combined = {
+                **item,
+                "matches": matches,
+                "acquisition_providers": [storage.clean(item.get("provider", "")) or "unknown"],
+            }
             found_by_url[normalized_url] = combined
             found.append(combined)
     else:
@@ -2567,6 +2656,10 @@ def run_search(
         existing = matching_candidate(stored_candidates, candidate)
         if existing:
             known_candidate_ids.add(existing.get("id", ""))
+            known_acquisitions.setdefault(existing.get("id", ""), []).extend(
+                result.get("acquisition_providers", [])
+                or [storage.clean(result.get("provider", "")) or "unknown"]
+            )
             if candidate_matches_search(candidate, search):
                 known_membership_candidate_ids.add(existing.get("id", ""))
             continue
@@ -2592,6 +2685,7 @@ def run_search(
             record_reason(skip_reasons, "not-interested-company")
             continue
         if result.get("provider") == "ats":
+            verified_at = storage.clean(result.get("last_verified_at", ""))
             candidate.update(
                 {
                     "url": result.get("url", ""),
@@ -2605,8 +2699,8 @@ def run_search(
                     "fit_score": result.get("fit_score", ""),
                     "fit_summary": result.get("fit_summary", ""),
                     "fit_checked_at": result.get("fit_checked_at", ""),
-                    "freshness_status": "confirmed-open",
-                    "freshness_checked_at": result.get("last_verified_at", "") or timestamp,
+                    "freshness_status": "confirmed-open" if verified_at else "",
+                    "freshness_checked_at": verified_at,
                     "processing_status": (
                         "ready" if meaningful_description(result.get("description_text", "")) else "partial"
                     ),
@@ -2699,6 +2793,14 @@ def run_search(
             }
         )
         add_candidate_search(candidate, search["id"])
+        for provider in result.get("acquisition_providers", []) or [result.get("provider", "") or "unknown"]:
+            add_candidate_acquisition(
+                candidate,
+                run_id=run_id,
+                search_id=search["id"],
+                provider=provider,
+                acquired_at=timestamp,
+            )
         score_candidate(candidate, timestamp)
         apply_candidate_review_admission(candidate, search=search)
         candidate["_match_context"] = matched_context
@@ -2834,7 +2936,11 @@ def run_search(
         else:
             duplicate["_lane_matched"] = lane_matched
     prepared = deduped_prepared
-    qualified_count = sum(candidate.get("status") == "new" for candidate in prepared)
+    qualified_count = sum(
+        candidate.get("status") == "new"
+        and candidate.get("qualification_status") == QUALIFICATION_ELIGIBLE
+        for candidate in prepared
+    )
     screened_count = sum(candidate.get("status") == SCREENED_STATUS for candidate in prepared)
     selected = select_balanced_role_candidates(prepared, search, DISCOVERY_RESULT_LIMIT)
     limited_count = max(0, len(prepared) - len(selected))
@@ -2924,6 +3030,14 @@ def run_search(
     for candidate in rows:
         if candidate.get("id", "") in known_membership_candidate_ids:
             add_candidate_search(candidate, search["id"])
+        for provider in known_acquisitions.get(candidate.get("id", ""), []):
+            add_candidate_acquisition(
+                candidate,
+                run_id=run_id,
+                search_id=search["id"],
+                provider=provider,
+                acquired_at=timestamp,
+            )
     captured = []
     new_count = 0
     updated_count = 0
@@ -2963,12 +3077,17 @@ def run_search(
         if role_family:
             role_family_counts[role_family["label"]] = role_family_counts.get(role_family["label"], 0) + 1
     result = {
+        "run_id": run_id,
         "search": get_search(search["id"]),
         "captured": captured,
         "evaluated_count": evaluated_count,
         "known_count": len(known_candidate_ids),
         "associated_count": len(known_membership_candidate_ids),
         "qualified_count": qualified_count,
+        "qualification_pending_count": sum(
+            candidate.get("qualification_status") == QUALIFICATION_NEEDS_VERIFICATION
+            for candidate in captured
+        ),
         "screened_count": screened_count,
         "skip_reasons": skip_reasons,
         "screened_reasons": screened_reasons,
@@ -2996,10 +3115,12 @@ def run_search(
             {
                 field: result[field]
                 for field in [
+                    "run_id",
                     "evaluated_count",
                     "known_count",
                     "associated_count",
                     "qualified_count",
+                    "qualification_pending_count",
                     "screened_count",
                     "found_count",
                     "new_count",
@@ -3024,6 +3145,7 @@ def run_search(
         )
         repository.write_discovery_searches(stored_rows)
     result["search"] = get_search(search["id"])
+    append_discovery_run_history(result, timestamp)
     return result
 
 
@@ -3299,7 +3421,7 @@ def detail_enrichment_targets(rows=None, search_id="", candidate_id="", company_
         if candidate.get("status") == "new"
         and (not wanted_candidate or candidate.get("id", "").upper() == wanted_candidate)
         and (not wanted_search or candidate_belongs_to_search(candidate, wanted_search))
-        and candidate_review_state(candidate) in {"needs-detail", "needs-freshness"}
+        and candidate_review_state(candidate) in {"needs-qualification", "needs-detail", "needs-freshness"}
         and detail_attempt_count(candidate) < MAX_DETAIL_ATTEMPTS
         and not ignored_discovery_source(candidate.get("canonical_url") or candidate.get("url", ""))
         and (
@@ -3430,7 +3552,7 @@ def enrich_candidate_backlog(
             and candidate_review_state(candidate) == state
             for candidate in refreshed
         )
-        for state in ["ready", "needs-detail", "needs-freshness", "failed-extraction"]
+        for state in ["ready", "needs-qualification", "needs-detail", "needs-freshness", "failed-extraction"]
     }
     remaining_targets = detail_enrichment_targets(
         rows=[candidate for candidate in refreshed if candidate_in_scope(candidate)],
@@ -3613,7 +3735,23 @@ def candidate_title_matches_search(candidate, search=None):
     if not title:
         return True
     if search.get("role_family_ids"):
-        return candidate_role_family(candidate, search) is not None
+        if candidate_role_family(candidate, search) is not None:
+            return True
+        global_family = candidate_role_family(candidate)
+        if global_family and global_family.get("id") not in set(search.get("role_family_ids", [])):
+            return False
+        if not any(
+            companies.text_contains_phrase_variant(title, term)
+            for term in ADJACENT_ROLE_TITLE_TERMS
+        ):
+            return False
+        # Adjacent titles can qualify from source-backed work shape. This is deliberately
+        # stricter than a keyword hit: at least two independent responsibility signals
+        # must be present in posting detail or the provider's cited summary.
+        detail = storage.clean(candidate.get("description_text", "")) or storage.clean(
+            candidate.get("description_excerpt", "")
+        )
+        return bool(detail) and len(candidate_responsibility_signals(candidate)) >= 2
     if not keywords:
         return True
     role_terms = [keywords]
@@ -3669,16 +3807,34 @@ def candidate_matches_search_lane(candidate, search=None):
     return any(candidate_matches_lane(candidate, {}, lane) for lane in lanes)
 
 
+def candidate_search_lane_status(candidate, search=None):
+    lanes = (search or {}).get("lanes", [])
+    if not lanes or candidate_matches_search_lane(candidate, search):
+        return QUALIFICATION_ELIGIBLE
+    inferred_mode = work_mode_from_text(
+        candidate.get("location", ""),
+        candidate.get("description_text", "") or candidate.get("description_excerpt", ""),
+    ) or storage.clean(candidate.get("work_mode", ""))
+    if not storage.clean(candidate.get("location", "")) or not storage.clean(inferred_mode):
+        return QUALIFICATION_NEEDS_VERIFICATION
+    return QUALIFICATION_INELIGIBLE
+
+
 def candidate_matches_search(candidate, search):
     return (
         not candidate_is_excluded(search, candidate)
         and candidate_title_matches_search(candidate, search)
         and candidate_matches_search_focus(candidate, search)
-        and candidate_matches_search_lane(candidate, search)
+        and candidate_search_lane_status(candidate, search) != QUALIFICATION_INELIGIBLE
     )
 
 
 def candidate_review_admission(candidate, company=None, search=None):
+    qualification, reason = candidate_review_qualification(candidate, company, search)
+    return qualification == QUALIFICATION_ELIGIBLE, reason
+
+
+def candidate_review_qualification(candidate, company=None, search=None):
     source_url = candidate.get("canonical_url") or candidate.get("url", "")
     detected_platform = source_platform(source_url)
     platform = (
@@ -3687,15 +3843,16 @@ def candidate_review_admission(candidate, company=None, search=None):
         else candidate.get("source_platform") or detected_platform
     )
     if platform in DIRECT_ATS_PLATFORMS and not individual_ats_posting_url(source_url, platform):
-        return False, "the ATS URL is a board, redirect, or error page"
+        return QUALIFICATION_INELIGIBLE, "the ATS URL is a board, redirect, or error page"
     if not candidate_title_matches_search(candidate, search):
-        return False, "the role title does not match this search focus"
+        return QUALIFICATION_INELIGIBLE, "the title and posting responsibilities do not match this search focus"
     if not candidate_matches_search_focus(candidate, search):
-        return False, "the posting does not contain this search's additional focus"
-    if search and not candidate_matches_search_lane(candidate, search):
-        if not storage.clean(candidate.get("location", "")) or not storage.clean(candidate.get("work_mode", "")):
-            return False, "location eligibility still needs verification"
-        return False, "the role is outside the configured location lanes"
+        return QUALIFICATION_INELIGIBLE, "the posting does not contain this search's additional focus"
+    lane_status = candidate_search_lane_status(candidate, search)
+    if lane_status == QUALIFICATION_NEEDS_VERIFICATION:
+        return lane_status, "location eligibility still needs verification"
+    if lane_status == QUALIFICATION_INELIGIBLE:
+        return lane_status, "the role is outside the configured location lanes"
     role_family = candidate_role_family(candidate, search)
     responsibility_signals = candidate_responsibility_signals(candidate)
     if (
@@ -3704,23 +3861,26 @@ def candidate_review_admission(candidate, company=None, search=None):
         and candidate.get("processing_status") == "ready"
         and len(responsibility_signals) < 2
     ):
-        return False, "the adjacent title lacks enough relevant delivery responsibilities"
+        return QUALIFICATION_INELIGIBLE, "the adjacent title lacks enough relevant delivery responsibilities"
     try:
         fit_score = int(candidate.get("fit_score", "") or 0)
     except (TypeError, ValueError):
         fit_score = 0
     if fit_score < MIN_REVIEW_FIT_SCORE:
-        return False, f"the role match score is below {MIN_REVIEW_FIT_SCORE}"
+        return QUALIFICATION_INELIGIBLE, f"the role match score is below {MIN_REVIEW_FIT_SCORE}"
     trust = candidate_source_trust(candidate, company)
     if trust["id"] == "aggregator" and candidate.get("source_platform") != "adzuna":
-        return False, "the posting is from an aggregator without a verified employer source"
+        return QUALIFICATION_INELIGIBLE, "the posting is from an aggregator without a verified employer source"
     if candidate.get("freshness_status") == "closed":
-        return False, "the posting is closed"
-    return True, ""
+        return QUALIFICATION_INELIGIBLE, "the posting is closed"
+    return QUALIFICATION_ELIGIBLE, ""
 
 
 def apply_candidate_review_admission(candidate, company=None, search=None):
-    admitted, reason = candidate_review_admission(candidate, company, search)
+    qualification, reason = candidate_review_qualification(candidate, company, search)
+    admitted = qualification == QUALIFICATION_ELIGIBLE
+    candidate["qualification_status"] = qualification
+    candidate["qualification_reason"] = reason
     warning_lines = [
         line
         for line in (candidate.get("warnings", "") or "").splitlines()
@@ -3729,9 +3889,16 @@ def apply_candidate_review_admission(candidate, company=None, search=None):
     if admitted:
         if candidate.get("status") == SCREENED_STATUS:
             candidate["status"] = "new"
-    else:
-        candidate["status"] = SCREENED_STATUS
+    elif qualification == QUALIFICATION_INELIGIBLE:
+        if candidate.get("status") in {"", "new", SCREENED_STATUS}:
+            candidate["status"] = SCREENED_STATUS
         warning_lines.append(f"{SCREENING_WARNING_PREFIX}{reason}.")
+    else:
+        # Uncertain machine qualification is recoverable. It must not overwrite a
+        # user decision, and it remains visible for automatic detail/freshness repair.
+        if candidate.get("status") in {"", SCREENED_STATUS}:
+            candidate["status"] = "new"
+        warning_lines.append(LANE_REVIEW_WARNING)
     candidate["warnings"] = "\n".join(dict.fromkeys(warning_lines))
     return admitted
 
@@ -3749,12 +3916,18 @@ def apply_candidate_review_admission_for_memberships(candidate, company=None, se
     if not memberships:
         return apply_candidate_review_admission(candidate, company, None)
     reasons = []
+    pending_search = None
     for search in memberships:
-        admitted, reason = candidate_review_admission(candidate, company, search)
-        if admitted:
+        qualification, reason = candidate_review_qualification(candidate, company, search)
+        if qualification == QUALIFICATION_ELIGIBLE:
             return apply_candidate_review_admission(candidate, company, search)
+        if qualification == QUALIFICATION_NEEDS_VERIFICATION and pending_search is None:
+            pending_search = search
         if reason:
             reasons.append(reason)
+    if pending_search is not None:
+        apply_candidate_review_admission(candidate, company, pending_search)
+        return False
     apply_candidate_review_admission(candidate, company, memberships[0])
     if reasons:
         warning_lines = [
@@ -4058,6 +4231,7 @@ def candidate_payload(candidate, company_by_id=None, searches=None, tracked_cont
     role_family = candidate_role_family(candidate)
     responsibility_signals = candidate_responsibility_signals(candidate)
     payload["source_urls"] = candidate_source_urls(candidate)
+    payload["acquisition_provenance"] = candidate_acquisition_provenance(candidate)
     payload["search_ids"] = candidate_search_ids(candidate)
     payload["fit_strengths"] = fit_strengths(candidate, company, role_family, responsibility_signals)
     payload["fit_gaps"] = fit_gaps(candidate, company)
@@ -4743,6 +4917,15 @@ def merge_candidate(existing, incoming):
     ]
     existing["warnings"] = "\n".join(dict.fromkeys(warning_lines))
     existing["source_urls_json"] = json.dumps(source_urls, ensure_ascii=False)
+    acquisition_rows = []
+    seen_acquisitions = set()
+    for row in [*candidate_acquisition_provenance(existing), *candidate_acquisition_provenance(incoming)]:
+        identity = (row.get("run_id", ""), row.get("search_id", ""), row.get("provider", ""))
+        if identity in seen_acquisitions:
+            continue
+        seen_acquisitions.add(identity)
+        acquisition_rows.append(row)
+    existing["acquisition_provenance_json"] = json.dumps(acquisition_rows, ensure_ascii=False)
     set_candidate_search_ids(
         existing,
         [*candidate_search_ids(existing), *candidate_search_ids(incoming)],
@@ -4761,6 +4944,9 @@ def merge_candidate(existing, incoming):
     if incoming.get("freshness_checked_at", "") > existing.get("freshness_checked_at", ""):
         existing["freshness_checked_at"] = incoming.get("freshness_checked_at", "")
         existing["freshness_status"] = incoming.get("freshness_status", "")
+    if incoming.get("qualification_status"):
+        existing["qualification_status"] = incoming.get("qualification_status", "")
+        existing["qualification_reason"] = incoming.get("qualification_reason", "")
     if existing.get("status") not in {"pursued", "duplicate", "ignored", "unavailable"}:
         existing["status"] = incoming.get("status") or "new"
     return existing
