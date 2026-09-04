@@ -173,9 +173,13 @@ def enrich_company_candidates(candidate_rows, discovery_candidates, searches):
     enriched = []
     for candidate in candidate_rows:
         payload = dict(candidate)
-        payload["review_state"] = company_store.candidate_review_state(candidate)
+        payload["qualification_status"], payload["qualification_reason"] = company_store.candidate_qualification(
+            candidate,
+            searches,
+        )
+        payload["review_state"] = company_store.candidate_review_state(candidate, searches)
         payload["requisition_ids"] = sorted(
-            company_store.normalized_requisition_ids(candidate.get("url", ""))
+            company_store.candidate_requisition_ids(candidate)
         )
         candidate_company_id = candidate.get("company_id", "").upper()
         company = company_by_id.get(candidate_company_id)

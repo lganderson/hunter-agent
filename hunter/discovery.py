@@ -8,14 +8,14 @@ from difflib import SequenceMatcher
 from datetime import datetime, timedelta
 from urllib.parse import parse_qs, quote_plus, unquote, urljoin, urlparse, urlunparse
 
-from . import applications, browser_discovery, candidate_eligibility, candidate_sources, companies, paths, posting_snapshots, repository, schema, settings, storage
+from . import applications, candidate_eligibility, candidate_sources, companies, paths, posting_snapshots, repository, schema, settings, storage
 
 
 URL_PATTERN = re.compile(r"https?://[^\s<>'\"]+", re.I)
 LINKEDIN_HOSTS = {"linkedin.com", "www.linkedin.com"}
 MAX_DESCRIPTION_CHARS = 80_000
 LINKEDIN_DETAILS_WARNING = "LinkedIn-assisted result needs copied posting details or an employer posting URL."
-BROWSER_VALIDATION_WARNING = "Search result needs browser-verified posting details."
+SOURCE_VALIDATION_WARNING = "Search result needs source-verified posting details."
 LANE_REVIEW_WARNING = "Search lane match is uncertain; review location and work mode."
 WORK_MODE_CODES = {"on-site": "1", "remote": "2", "hybrid": "3"}
 ALL_WORK_MODES = ["on-site", "hybrid", "remote"]
@@ -1086,10 +1086,11 @@ def normalize_browser_results(items, limit=SEARCH_RESULT_LIMIT):
     return results
 
 
-def fetch_browser_results(engine, value, page=0, searcher=None):
-    browser_search = searcher or browser_discovery.search
-    items = browser_search(engine, value, page)
-    limit = browser_discovery.LINKEDIN_PAGE_SIZE if engine == "linkedin" else browser_discovery.GOOGLE_PAGE_SIZE
+def fetch_injected_search_results(engine, value, page=0, searcher=None):
+    if searcher is None:
+        raise RuntimeError("A search provider is required.")
+    items = searcher(engine, value, page)
+    limit = 25 if engine == "linkedin" else 10
     return normalize_browser_results(items, limit=limit)
 
 
@@ -1523,7 +1524,7 @@ def apply_browser_details(candidate, details):
         candidate["warnings"] = "\n".join(
             line
             for line in (candidate.get("warnings", "") or "").splitlines()
-            if line not in {LINKEDIN_DETAILS_WARNING, BROWSER_VALIDATION_WARNING}
+            if line not in {LINKEDIN_DETAILS_WARNING, SOURCE_VALIDATION_WARNING}
         )
     availability = storage.clean((details or {}).get("availability_status", "")).lower()
     if (
@@ -1797,7 +1798,7 @@ def resolve_candidate_details(
     ):
         try:
             browser_details = browser_detailer(target_url) or {}
-        except (browser_discovery.BrowserDiscoveryError, RuntimeError) as exc:
+        except RuntimeError as exc:
             browser_details = {}
             errors.append(storage.clean(str(exc)))
         if browser_details:
@@ -2440,7 +2441,6 @@ def run_search(
     browser_searcher=None,
     browser_detailer=None,
     company_researcher=None,
-    source_mode="api",
     openai_requester=None,
     adzuna_fetcher=None,
     progress=None,
@@ -2460,7 +2460,7 @@ def run_search(
     skip_reasons = {}
     screened_reasons = {}
     blocked_engines = {}
-    reported_browser_errors = set()
+    reported_search_errors = set()
     stored_candidates = canonicalize_candidate_rows(
         repository.read_discovery_candidates()
     )
@@ -2470,20 +2470,10 @@ def run_search(
         if count and reason:
             counter[reason] = counter.get(reason, 0) + count
 
-    chrome_browser = None
     use_api_sources = (
-        source_mode != "browser"
-        and search_fetcher is None
+        search_fetcher is None
         and browser_searcher is None
     )
-    if source_mode == "browser" and search_fetcher is None and browser_searcher is None:
-        chrome_browser = browser_discovery.HunterChrome()
-
-        def browser_searcher(engine, value, page):
-            return browser_discovery.search(engine, value, page=page, browser=chrome_browser)
-
-        browser_detailer = chrome_browser.details
-        company_researcher = chrome_browser.company
 
     attempted_sources = 0
     failed_sources = 0
@@ -2559,29 +2549,27 @@ def run_search(
                                 page_items, attempts = fetch_search_results(query, fetcher=search_fetcher)
                                 engine = attempts[-1]["engine"] if attempts else ""
                             elif strategy["id"] == "linkedin":
-                                engine = "hunter-chrome-linkedin"
-                                page_items = fetch_browser_results(
+                                engine = "injected-linkedin"
+                                page_items = fetch_injected_search_results(
                                     "linkedin",
                                     linkedin_search_url(search, lane, family["query"]),
                                     page=page,
                                     searcher=browser_searcher,
                                 )
                             else:
-                                engine = "hunter-chrome-google"
-                                page_items = fetch_browser_results(
+                                engine = "injected-google"
+                                page_items = fetch_injected_search_results(
                                     "google",
                                     query,
                                     page=page,
                                     searcher=browser_searcher,
                                 )
                             successful_pages += 1
-                        except browser_discovery.BrowserDiscoveryError as exc:
-                            source_error = storage.clean(str(exc))
-                            blocked_engines[browser_engine] = source_error
-                            break
                         except RuntimeError as exc:
                             page_items = []
                             source_error = storage.clean(str(exc))
+                            blocked_engines[browser_engine] = source_error
+                            break
                         attempt_errors = [attempt["error"] for attempt in attempts if attempt.get("error")]
                         if attempt_errors and not page_items:
                             source_error = attempt_errors[-1]
@@ -2608,12 +2596,12 @@ def run_search(
                     if (
                         source_error
                         and not skipped_after_verification
-                        and browser_engine not in reported_browser_errors
+                        and browser_engine not in reported_search_errors
                     ):
                         errors.append(
                             f"{strategy['label']} · {lane.get('label') or lane.get('location')}: {source_error}"
                         )
-                        reported_browser_errors.add(browser_engine)
+                        reported_search_errors.add(browser_engine)
                     source_runs.append(
                         {
                             "source": strategy["id"],
@@ -2746,7 +2734,7 @@ def run_search(
                         *(
                             candidate.get("warnings", "") or ""
                         ).splitlines(),
-                        BROWSER_VALIDATION_WARNING,
+                        SOURCE_VALIDATION_WARNING,
                     ]
                 )
             )
@@ -2851,8 +2839,6 @@ def run_search(
         for candidate in enrichment_candidates:
             try:
                 details = browser_detailer(candidate.get("canonical_url") or candidate.get("url", ""))
-            except browser_discovery.BrowserDiscoveryError as exc:
-                raise RuntimeError(storage.clean(str(exc))) from exc
             except RuntimeError as exc:
                 errors.append(f"Posting detail enrichment: {storage.clean(str(exc))}")
                 continue
@@ -3009,10 +2995,21 @@ def run_search(
                 break
             company_research_attempt_count += 1
             try:
-                research = companies.research_company(
+                before_suggestions = len(companies.company_metadata_suggestions(company))
+                metadata = company_researcher(
+                    company.get("name", ""),
+                    company.get("company_profile_url", ""),
+                ) or {}
+                updated_company = companies.update_company_metadata(
                     company_id,
-                    researcher=company_researcher,
+                    metadata,
+                    source_url=metadata.get("company_metadata_source", ""),
+                    checked_at=timestamp,
                 )
+                research = {
+                    "company": updated_company,
+                    "suggestions": companies.company_metadata_suggestions(updated_company)[before_suggestions:],
+                }
             except RuntimeError as exc:
                 errors.append(
                     f"Company research for {company.get('name', 'company')}: "
@@ -3241,12 +3238,6 @@ def continue_enrichment(
     )[:max(1, int(limit or CONTINUE_ENRICHMENT_LIMIT))]
 
     chrome_browser = None
-    if selected and (browser_detailer is None or company_researcher is None):
-        chrome_browser = browser_discovery.HunterChrome()
-        chrome_browser.find_window()
-        browser_detailer = browser_detailer or chrome_browser.details
-        company_researcher = company_researcher or chrome_browser.company
-
     timestamp = now_iso()
     posting_checked_count = 0
     posting_enriched_count = 0
@@ -3271,8 +3262,13 @@ def continue_enrichment(
                 candidate.get("description_text", ""),
             )
             try:
-                details = browser_detailer(target_url) or {}
-            except (browser_discovery.BrowserDiscoveryError, RuntimeError) as exc:
+                if browser_detailer is not None:
+                    details = browser_detailer(target_url) or {}
+                else:
+                    details, provider_error = provider_candidate_details(target_url)
+                    if provider_error:
+                        raise RuntimeError(provider_error)
+            except RuntimeError as exc:
                 candidate["freshness_status"] = "needs-review"
                 candidate["freshness_checked_at"] = timestamp
                 errors.append(
@@ -3312,19 +3308,27 @@ def continue_enrichment(
         company_id = company.get("id", "")
         companies_by_id[company_id] = company
         if (
-            company_research_needed(company)
+            company_researcher is not None
+            and company_research_needed(company)
             and company_id not in researched_company_ids
             and len(researched_company_ids) < COMPANY_RESEARCH_LIMIT
         ):
             researched_company_ids.add(company_id)
             try:
-                research = companies.research_company(
+                metadata = company_researcher(
+                    company.get("name", ""),
+                    company.get("company_profile_url", ""),
+                ) or {}
+                updated_company = companies.update_company_metadata(
                     company_id,
-                    researcher=company_researcher,
+                    metadata,
+                    source_url=metadata.get("company_metadata_source", ""),
+                    checked_at=timestamp,
                 )
+                research = {"company": updated_company}
                 companies_by_id[company_id] = research.get("company", company)
                 company_researched_count += 1
-            except (browser_discovery.BrowserDiscoveryError, RuntimeError) as exc:
+            except RuntimeError as exc:
                 errors.append(
                     f"Company research for {company.get('name', 'company')}: "
                     f"{storage.clean(str(exc))}"
@@ -3353,14 +3357,23 @@ def continue_enrichment(
     for company in company_queue[:max(0, COMPANY_RESEARCH_LIMIT - len(researched_company_ids))]:
         company_id = company.get("id", "")
         researched_company_ids.add(company_id)
+        if company_researcher is None:
+            continue
         try:
-            research = companies.research_company(
+            metadata = company_researcher(
+                company.get("name", ""),
+                company.get("company_profile_url", ""),
+            ) or {}
+            updated_company = companies.update_company_metadata(
                 company_id,
-                researcher=company_researcher,
+                metadata,
+                source_url=metadata.get("company_metadata_source", ""),
+                checked_at=timestamp,
             )
+            research = {"company": updated_company}
             companies_by_id[company_id] = research.get("company", company)
             company_researched_count += 1
-        except (browser_discovery.BrowserDiscoveryError, RuntimeError) as exc:
+        except RuntimeError as exc:
             errors.append(
                 f"Company research for {company.get('name', 'company')}: "
                 f"{storage.clean(str(exc))}"
@@ -3437,7 +3450,6 @@ def enrich_candidate_backlog(
     limit=DETAIL_ENRICHMENT_BATCH_LIMIT,
     fetcher=None,
     browser_detailer=None,
-    use_browser_fallback=False,
     progress=None,
 ):
     canonicalize_candidates()
@@ -3461,19 +3473,6 @@ def enrich_candidate_backlog(
     )
     requested_limit = int(limit or 0)
     selected = targets[:requested_limit] if requested_limit > 0 else targets
-    chrome_browser = None
-
-    def lazy_browser_detailer(url):
-        nonlocal chrome_browser
-        if browser_detailer is not None:
-            return browser_detailer(url)
-        if not use_browser_fallback:
-            return {}
-        if chrome_browser is None:
-            chrome_browser = browser_discovery.HunterChrome()
-            chrome_browser.find_window()
-        return chrome_browser.details(url)
-
     ready_count = 0
     needs_input_count = 0
     changed_count = 0
@@ -3483,11 +3482,7 @@ def enrich_candidate_backlog(
         result = resolve_candidate_details(
             candidate,
             fetcher=fetcher,
-            browser_detailer=(
-                lazy_browser_detailer
-                if browser_detailer is not None or use_browser_fallback
-                else None
-            ),
+            browser_detailer=browser_detailer,
             company_rows=company_rows,
             company_candidates=company_candidates,
         )
@@ -3581,31 +3576,12 @@ def enrich_candidate_backlog(
 def continue_discovery(
     search_id,
     enrichment_limit=CONTINUE_ENRICHMENT_LIMIT,
-    use_browser_fallback=False,
     progress=None,
 ):
     search = get_search(search_id)
-    chrome_browser = None
-    browser_searcher = None
-    browser_detailer = None
-    company_researcher = None
-    if use_browser_fallback:
-        chrome_browser = browser_discovery.HunterChrome()
-        chrome_browser.find_window()
-
-        def browser_searcher(engine, value, page):
-            return browser_discovery.search(engine, value, page=page, browser=chrome_browser)
-
-        browser_detailer = chrome_browser.details
-        company_researcher = chrome_browser.company
-
     try:
         result = run_search(
             search_id,
-            browser_searcher=browser_searcher,
-            browser_detailer=browser_detailer,
-            company_researcher=company_researcher,
-            source_mode="browser" if use_browser_fallback else "api",
             progress=progress,
         )
     except RuntimeError as exc:
@@ -3636,8 +3612,6 @@ def continue_discovery(
         enrichment = enrich_candidate_backlog(
             search_id=search_id,
             limit=enrichment_limit,
-            browser_detailer=browser_detailer,
-            use_browser_fallback=use_browser_fallback,
             progress=progress,
         )
     else:
@@ -4175,7 +4149,7 @@ def fit_gaps(candidate, company=None):
             storage.clean(line)
             for line in candidate.get("warnings", "").splitlines()
             if storage.clean(line)
-            and line not in {LINKEDIN_DETAILS_WARNING, BROWSER_VALIDATION_WARNING}
+            and line not in {LINKEDIN_DETAILS_WARNING, SOURCE_VALIDATION_WARNING}
         )
     return list(dict.fromkeys(gaps))
 

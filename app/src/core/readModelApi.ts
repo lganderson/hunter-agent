@@ -48,8 +48,16 @@ export function candidateListSearchParams(
     query.set("minimum_fit_score", String(normalized.minimumFitScore));
   }
   if (normalized.companyId) query.set("company_id", normalized.companyId);
+  normalized.companyIds.forEach(companyId => query.append("company_id", companyId));
+  normalized.interestStatuses.forEach(status => query.append("interest_status", status));
   if (normalized.trackingStatus) query.set("tracking_status", normalized.trackingStatus);
+  if (normalized.fitBand !== "all") query.set("fit_band", normalized.fitBand);
+  if (normalized.latestOnly) query.set("latest_only", "true");
+  if (normalized.laneMatchOnly) query.set("lane_match_only", "true");
+  if (normalized.sort !== "fit") query.set("sort", normalized.sort);
+  if (normalized.direction !== "desc") query.set("direction", normalized.direction);
   if (normalized.includeExcludedCompanies) query.set("include_excluded_companies", "true");
+  if (normalized.includeOutOfScope) query.set("include_out_of_scope", "true");
   const searchId = context.searchId?.trim().toUpperCase();
   if (searchId) query.set("search_id", searchId);
   return query;

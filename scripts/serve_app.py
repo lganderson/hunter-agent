@@ -905,7 +905,6 @@ class AppHandler(SimpleHTTPRequestHandler):
                 job = discovery_jobs.start_search_job(
                     {
                         "search_id": payload.get("id", payload.get("search_id", "")),
-                        "use_browser_fallback": payload.get("use_browser_fallback", False),
                         "enrichment_limit": payload.get("enrichment_limit", 100),
                     }
                 )

@@ -84,6 +84,7 @@ function candidatePage(pool: "company" | "discovery", items: unknown[], searchId
       filtered: items.length,
       returned: items.length,
       excluded_companies: 0,
+      out_of_scope: 0,
       ignored_sources: 0
     },
     facets: { statuses: [], tracking: [], companies: [] },
@@ -97,6 +98,7 @@ function candidatePage(pool: "company" | "discovery", items: unknown[], searchId
         tracking_status: "",
         company_id: "",
         include_excluded_companies: false,
+        include_out_of_scope: false,
         search_id: searchId
       },
       canonical_hidden_count: 0,
@@ -194,6 +196,50 @@ test("candidate selection controls have accessible names and minimum targets", a
   await expect(checkbox).toBeChecked();
 });
 
+test("bulk tracked-company check skips not-interested companies", async ({ page }) => {
+  const eligible = syntheticAppState.companies[0];
+  const excluded = { ...syntheticAppState.companies[1], interest_status: "not-interested" as const };
+  const checkedIds: string[] = [];
+  await page.route("**/api/app-shell", route => {
+    const {
+      company_posting_candidates: _companyCandidates,
+      discovery_candidates: _discoveryCandidates,
+      company_career_scans: _careerScans,
+      ...shell
+    } = syntheticAppState;
+    return route.fulfill({ json: {
+      ...shell,
+      companies: [eligible, excluded],
+      api_version: 1,
+      revision: 1,
+      candidate_counts: { company: 0, discovery: syntheticAppState.discovery_candidates.length },
+      audit: { stable_revision: true, omitted_large_fields: ["candidate pools", "notes"] }
+    } });
+  });
+  await page.route("**/api/companies/check", async route => {
+    const body = route.request().postDataJSON() as { id: string };
+    checkedIds.push(body.id);
+    await route.fulfill({ json: {
+      company: eligible,
+      career_source: null,
+      candidates: [],
+      new: [],
+      recommended: [],
+      unavailable_count: 0,
+      verification_count: 0,
+      verification_skipped_count: 0,
+      scan: {}
+    } });
+  });
+
+  await page.goto("/candidates");
+  await page.getByRole("button", { name: "Check tracked companies" }).click();
+
+  await expect(page.getByRole("status")).toContainText("Checked 1 companies");
+  await expect(page.getByRole("status")).toContainText("1 skipped");
+  expect(checkedIds).toEqual([eligible.id]);
+});
+
 test("candidate review fetches the selected heavy detail only", async ({ page }) => {
   const detailRequests: string[] = [];
   page.on("request", request => {
@@ -228,6 +274,30 @@ test("company detail uses scoped candidate lists and the full company detail res
     "/api/candidates/discovery"
   ]));
   expect(candidateRequests.every(request => new URL(request).searchParams.get("company_id") === "CO1001")).toBe(true);
+});
+
+test("company detail research uses OpenAI and reports the evaluation result", async ({ page }) => {
+  const company = syntheticAppState.companies[0];
+  let requestBody: { id?: string; provider?: string } = {};
+  await page.route("**/api/companies/research", async route => {
+    requestBody = route.request().postDataJSON() as { id?: string; provider?: string };
+    await route.fulfill({ json: {
+      company: { ...company, industry: "Software Development", company_evaluation_status: "ready" },
+      applied_fields: ["industry"],
+      suggestions: [],
+      source_url: "https://example.invalid/company",
+      provider: "openai",
+      run_id: "company-evaluation-test",
+      evaluation_status: "ready"
+    } });
+  });
+
+  await page.goto(`/companies/${company.id}`);
+  await page.getByRole("button", { name: "Research company" }).click();
+
+  await expect(page.getByRole("status")).toContainText("Research complete");
+  await expect(page.getByRole("status")).toContainText("Evaluation: ready");
+  expect(requestBody).toEqual({ id: company.id });
 });
 
 test("primary desktop routes expose one level-one heading", async ({ page }) => {

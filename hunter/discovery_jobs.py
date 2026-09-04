@@ -98,7 +98,6 @@ def start_search_job(payload=None):
     global _active_thread
     request = {
         "search_id": storage.clean((payload or {}).get("search_id", "")).upper(),
-        "use_browser_fallback": bool((payload or {}).get("use_browser_fallback", False)),
         "enrichment_limit": max(
             0,
             min(250, int((payload or {}).get("enrichment_limit", 100))),
@@ -116,13 +115,12 @@ def start_search_job(payload=None):
         ):
             return _copy(existing)
         timestamp = now_iso()
-        provider_label = "Chrome fallback" if request["use_browser_fallback"] else "ATS, OpenAI, and Adzuna"
         job = {
             "id": f"DSJ-{uuid.uuid4().hex[:12]}",
             "job_type": "candidate-discovery",
             "status": "queued",
             "phase": "queued",
-            "message": f"Candidate Discovery is queued with {provider_label}…",
+            "message": "Candidate Discovery is queued with ATS, OpenAI, and Adzuna…",
             "completed_steps": 0,
             "total_steps": 1,
             "source": "candidate-discovery",
@@ -215,7 +213,6 @@ def _run_search_job(job_id, request):
         result = discovery.continue_discovery(
             request["search_id"],
             enrichment_limit=request["enrichment_limit"],
-            use_browser_fallback=request["use_browser_fallback"],
             progress=progress,
         )
     except Exception as exc:  # noqa: BLE001 - background failures must remain inspectable.

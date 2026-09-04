@@ -107,11 +107,11 @@ export function companyListItemToLegacyCandidate(
 ): CompanyPostingCandidate {
   return {
     ...item,
-    review_state: item.review_state === "needs-qualification" ? "needs-detail" : item.review_state,
     matched_queries: "",
     description_hash: "",
     score_inputs_hash: "",
     normalization_warnings: "",
+    last_scan_run_id: "",
     notes: "",
     requisition_ids: [],
     is_canonical: true,

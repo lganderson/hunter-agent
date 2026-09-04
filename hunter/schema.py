@@ -139,6 +139,9 @@ COMPANY_POSTING_CANDIDATE_FIELDS = [
     "description_hash",
     "score_inputs_hash",
     "normalization_warnings",
+    "qualification_status",
+    "qualification_reason",
+    "last_scan_run_id",
     "scan_state",
     "last_verified_at",
     "status",
@@ -153,6 +156,7 @@ COMPANY_POSTING_CANDIDATE_FIELDS = [
 COMPANY_CAREER_SCAN_FIELDS = [
     "company_id",
     "checked_at",
+    "run_id",
     "platform_type",
     "status",
     "requests_succeeded",

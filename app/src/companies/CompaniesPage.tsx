@@ -1117,7 +1117,7 @@ export function CompanyDetailPage({ data: shellData, refresh, applyCompanyCandid
   async function researchCurrentCompany() {
     if (!company || isResearching) return;
     setIsResearching(true);
-    setOperationStatus("Hunter is researching company information in the signed-in browser...");
+    setOperationStatus("Hunter is researching current public company information with OpenAI...");
     try {
       const result = await researchCompany(company.id);
       patchCompanyDetail(result.company);
@@ -1126,8 +1126,8 @@ export function CompanyDetailPage({ data: shellData, refresh, applyCompanyCandid
       const suggested = result.suggestions.length;
       setOperationStatus(
         filled || suggested
-          ? `Research complete. Filled ${filled} blank field${filled === 1 ? "" : "s"} and added ${suggested} suggestion${suggested === 1 ? "" : "s"} for review.`
-          : "Research complete. Hunter found no new company information."
+          ? `Research complete. Filled ${filled} blank field${filled === 1 ? "" : "s"} and added ${suggested} suggestion${suggested === 1 ? "" : "s"} for review. Evaluation: ${result.evaluation_status || "complete"}.`
+          : `Research complete. Hunter found no new company information. Evaluation: ${result.evaluation_status || "complete"}.`
       );
     } catch (error) {
       setOperationStatus(`Could not research company. ${error instanceof Error ? error.message : String(error)}`);
@@ -1398,7 +1398,7 @@ export function CompanyDetailPage({ data: shellData, refresh, applyCompanyCandid
               {isUpdatingInterest ? "Updating…" : "Not interested"}
             </button>
           ) : null}
-          <button className="button" type="button" disabled={isResearching} onClick={researchCurrentCompany}>
+          <button className="button" type="button" disabled={isResearching} onClick={researchCurrentCompany} title="Research current public sources with OpenAI and save source-backed company details">
             <SearchIcon size={16} /> {isResearching ? "Researching…" : "Research company"}
           </button>
           {company.tracking_status === "discovered" ? (

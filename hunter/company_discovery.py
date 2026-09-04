@@ -5,7 +5,7 @@ import json
 from datetime import datetime
 from urllib.parse import urlparse
 
-from . import agent, api_usage, browser_discovery, companies, repository, settings, storage
+from . import agent, api_usage, companies, repository, settings, storage
 
 
 DEFAULT_FOCUS = (
@@ -1085,7 +1085,7 @@ def run_company_discovery(
                 )
             else:
                 items = searcher(source["engine"], query, 0) or []
-        except (browser_discovery.BrowserDiscoveryError, RuntimeError) as exc:
+        except RuntimeError as exc:
             errors.append(f"{source['label']}: {storage.clean(str(exc))}")
             items = []
         kept = 0
@@ -1250,7 +1250,7 @@ def run_company_discovery(
                 ) or {}
                 metadata.update({key: value for key, value in researched.items() if value})
                 metadata["company"] = candidate["company"]
-            except (browser_discovery.BrowserDiscoveryError, RuntimeError) as exc:
+            except RuntimeError as exc:
                 research_errors.append(f"{candidate['company']}: {storage.clean(str(exc))}")
 
         if size_matches(metadata.get("company_size", ""), selected_sizes) is False:

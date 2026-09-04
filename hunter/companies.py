@@ -801,39 +801,39 @@ def set_company_research_status(company_id, status, checked_at=""):
     return get_company(row.get("id", ""))
 
 
-def research_company(company_id, researcher=None):
-    company = get_company(company_id)
-    if researcher is None:
-        from . import browser_discovery
+def research_company_with_openai(company_id, evaluator=None):
+    from . import company_evaluation
 
-        browser = browser_discovery.HunterChrome()
-        browser.find_window()
-        researcher = browser.company
+    company = get_company(company_id)
     before = dict(company)
     before_suggestion_ids = {
         item.get("id", "")
         for item in company_metadata_suggestions(company)
     }
-    try:
-        researched = researcher(
-            company.get("name", ""),
-            company.get("company_profile_url", ""),
-        ) or {}
-    except RuntimeError as exc:
-        set_company_research_status(company_id, f"error: {storage.clean(str(exc))}")
-        raise
-    source_url = (
-        researched.get("company_metadata_source")
-        or researched.get("company_profile_url")
-        or company.get("company_profile_url", "")
+    result = company_evaluation.evaluate_companies(
+        company_ids=[company.get("id", "")],
+        tracking_status="",
+        force=True,
+        evaluator=evaluator,
+        reason="manual-research",
+        max_attempts=1,
     )
-    updated = update_company_metadata(
-        company_id,
-        researched,
-        source_url=source_url,
-        checked_at=now_iso(),
-    )
-    fields = ["industry", "company_size", "company_profile_url", "website"]
+    if result.get("failed_count") or not result.get("evaluated_count"):
+        message = "; ".join(result.get("errors", [])) or "No company research result was returned."
+        set_company_research_status(company_id, f"error: {message}", checked_at=now_iso())
+        raise RuntimeError(message)
+    updated = get_company(company_id)
+    fields = [
+        "industry",
+        "company_size",
+        "company_profile_url",
+        "website",
+        "careers_url",
+        "company_location_fit",
+        "company_location",
+        "company_remote_policy",
+        "company_fit_score",
+    ]
     applied_fields = [
         field
         for field in fields
@@ -845,20 +845,25 @@ def research_company(company_id, researcher=None):
         for item in suggestions
         if item.get("id", "") not in before_suggestion_ids
     ]
-    if applied_fields or new_suggestions:
-        status = (
-            f"ok: filled {len(applied_fields)}, "
-            f"suggested {len(new_suggestions)}"
-        )
-    else:
-        status = "ok: no new company information"
+    status = (
+        f"ok: filled {len(applied_fields)}, suggested {len(new_suggestions)}"
+        if applied_fields or new_suggestions
+        else "ok: no new company information"
+    )
     updated = set_company_research_status(company_id, status, checked_at=now_iso())
     return {
         "company": updated,
         "applied_fields": applied_fields,
         "suggestions": new_suggestions,
-        "source_url": storage.clean(source_url),
+        "source_url": storage.clean(updated.get("company_metadata_source", "")),
+        "provider": "openai",
+        "run_id": result.get("run_id", ""),
+        "evaluation_status": updated.get("company_evaluation_status", ""),
     }
+
+
+def research_company(company_id):
+    return research_company_with_openai(company_id)
 
 
 def resolve_company_metadata_suggestion(company_id, suggestion_id, action):
@@ -1089,6 +1094,41 @@ def normalized_requisition_ids(url):
     return set(_normalized_requisition_ids_cached(normalized))
 
 
+def normalized_source_requisition_ids(source_job_id):
+    """Return stable requisition identifiers from a structured source job id."""
+    value = storage.clean(source_job_id).lower()
+    if not value:
+        return set()
+    for prefix in ["greenhouse:", "apple:", "microsoft:", "smartrecruiters:", "external-job-id:", "job-id:"]:
+        if value.startswith(prefix):
+            value = value[len(prefix):]
+            break
+    if value.startswith("query:"):
+        value = value.rsplit(":", 1)[-1]
+    if value.startswith("path:"):
+        value = value.rsplit(":", 1)[-1]
+    if re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", value):
+        return {value}
+    if re.fullmatch(r"[a-z]*\d{3,}(?:-\d+)?", value):
+        return {value}
+    trailing = re.search(r"(?:^|[-_/])((?:r|req[-_]?)?\d{4,}(?:-\d+)?)$", value)
+    return {trailing.group(1)} if trailing else set()
+
+
+def candidate_requisition_ids(candidate):
+    return normalized_requisition_ids(candidate.get("canonical_url") or candidate.get("url", "")) | normalized_source_requisition_ids(
+        candidate.get("source_job_id", "")
+    )
+
+
+def candidate_identity_keys(candidate):
+    url = candidate.get("canonical_url") or candidate.get("url", "")
+    return posting_identity_keys(url) | {
+        f"requisition:{requisition_id}"
+        for requisition_id in candidate_requisition_ids(candidate)
+    }
+
+
 def posting_identity_match(left_url, right_url):
     """Compare requisitions before considering lower-confidence URL identity keys."""
     left_requisitions = normalized_requisition_ids(left_url)
@@ -1130,8 +1170,8 @@ def tracked_posting_context(company, application_rows=None):
 
 def candidate_is_tracked(item, tracked):
     candidate_url = item.get("url", "")
-    candidate_requisitions = normalized_requisition_ids(candidate_url)
-    candidate_keys = posting_identity_keys(candidate_url)
+    candidate_requisitions = candidate_requisition_ids(item)
+    candidate_keys = candidate_identity_keys(item)
     title_key = normalized_key(item.get("title", ""))
     postings = tracked.get("postings")
     if postings is None:
@@ -1156,8 +1196,8 @@ def matching_tracked_posting_ids(item, company=None, tracked=None):
     company = company or get_company(item.get("company_id", ""))
     context = tracked or tracked_posting_context(company)
     candidate_url = item.get("canonical_url") or item.get("url", "")
-    candidate_requisitions = normalized_requisition_ids(candidate_url)
-    candidate_keys = posting_identity_keys(candidate_url)
+    candidate_requisitions = candidate_requisition_ids(item)
+    candidate_keys = candidate_identity_keys(item)
     title_key = normalized_key(item.get("title", ""))
     matches = []
     for posting in context["postings"]:
@@ -1202,6 +1242,7 @@ def cross_pool_candidates_match(company_candidate, discovery_candidate):
     company_requisitions = set().union(
         *(normalized_requisition_ids(url) for url in company_urls)
     ) if company_urls else set()
+    company_requisitions.update(normalized_source_requisition_ids(company_candidate.get("source_job_id", "")))
     discovery_requisitions = set().union(
         *(normalized_requisition_ids(url) for url in discovery_urls)
     ) if discovery_urls else set()
@@ -1368,6 +1409,9 @@ def normalized_candidate(item, platform_type, score_context=None):
 
 
 def candidate_identity_key(candidate):
+    requisition_ids = sorted(candidate_requisition_ids(candidate))
+    if requisition_ids:
+        return f"requisition:{requisition_ids[0]}"
     identity_keys = sorted(
         key for key in posting_identity_keys(candidate.get("url", "")) if not key.startswith("url:")
     )
@@ -1834,7 +1878,37 @@ def candidate_fit_score(candidate):
         return 0
 
 
-def candidate_review_state(candidate):
+def candidate_qualification(candidate, searches=None):
+    """Classify a tracked-company candidate against the configured location lanes."""
+    from . import discovery
+
+    configured_searches = searches if searches is not None else discovery.list_searches()
+    lanes = []
+    seen_lane_ids = set()
+    for search in configured_searches:
+        for lane in search.get("lanes", []):
+            lane_key = storage.clean(lane.get("id", "")) or json.dumps(lane, sort_keys=True)
+            if lane_key in seen_lane_ids:
+                continue
+            seen_lane_ids.add(lane_key)
+            lanes.append(lane)
+    status = discovery.candidate_search_lane_status(
+        {**candidate, "description_text": candidate.get("description_excerpt", "")},
+        {"lanes": lanes},
+    )
+    if status == discovery.QUALIFICATION_NEEDS_VERIFICATION:
+        return status, "location or work mode still needs verification"
+    if status == discovery.QUALIFICATION_INELIGIBLE:
+        return status, "the role is outside the configured location lanes"
+    return status, ""
+
+
+def candidate_review_state(candidate, searches=None):
+    qualification_status, _reason = candidate_qualification(candidate, searches)
+    if qualification_status == "needs-verification":
+        return "needs-qualification"
+    if qualification_status == "ineligible":
+        return "ineligible"
     description = storage.clean(candidate.get("description_excerpt", ""))
     if len(description) < MIN_REVIEW_DESCRIPTION_CHARS:
         source_platform = storage.clean(candidate.get("source_platform", "")).lower()
@@ -1860,12 +1934,12 @@ def candidate_review_state(candidate):
     return "ready"
 
 
-def recommended_candidates(candidates):
+def recommended_candidates(candidates, searches=None):
     rows = [
         candidate
         for candidate in candidates
         if candidate.get("status") == "new"
-        and candidate_review_state(candidate) == "ready"
+        and candidate_review_state(candidate, searches) == "ready"
         and candidate_fit_score(candidate) >= FIT_RECOMMENDATION_THRESHOLD
     ]
     return sorted(rows, key=lambda candidate: (-candidate_fit_score(candidate), candidate.get("title", ""), candidate.get("url", "")))[:RECOMMENDED_CANDIDATE_LIMIT]
@@ -1875,7 +1949,7 @@ def candidate_seen_in_scan(candidate, seen_urls, seen_identity_keys):
     url = normalize_url(candidate.get("url", ""))
     if url and url in seen_urls:
         return True
-    return bool(posting_identity_keys(url) & seen_identity_keys)
+    return bool(candidate_identity_keys(candidate) & seen_identity_keys)
 
 
 def detail_page_says_unavailable(fetched):
@@ -5414,6 +5488,10 @@ def fetch_official_web_search_candidates(careers_url, fetch, config=None):
             response.get("model") or CAREER_SEARCH_MODEL,
             response,
             operation="official-site-waf-fallback",
+            context={
+                "run_id": config.get("_run_id", ""),
+                "company_id": config.get("_company_id", ""),
+            },
         )
         result = json.loads(agent._output_text(response))
     except (ValueError, RuntimeError, URLError, TypeError, json.JSONDecodeError) as exc:
@@ -6032,13 +6110,15 @@ def current_company_career_source(company, fetch):
     return discover_company_career_source(company, fetch)
 
 
-def fetch_career_candidates_with_source(source, fetch):
+def fetch_career_candidates_with_source(source, fetch, *, run_id="", company_id=""):
     platform_type = source.get("platform_type", "")
     executor = CAREER_PLATFORM_EXECUTORS.get(platform_type)
     if not executor:
         return [], 0, [f"Unsupported career platform: {platform_type or 'unknown'}"]
     careers_url = source.get("source_url", "")
-    return executor(careers_url, fetch, career_source_config(source))
+    config = career_source_config(source)
+    config.update({"_run_id": run_id, "_company_id": company_id})
+    return executor(careers_url, fetch, config)
 
 
 def career_sources_equivalent(left, right):
@@ -6065,9 +6145,15 @@ def check_company_postings(company_id, fetcher=None):
         raise ValueError("Company careers_url is required before checking postings.")
 
     checked_at = now_scan_iso()
+    scan_run_id = f"company-scan-{company.get('id', '').lower()}-{checked_at.replace(':', '').replace('-', '')}"
     fetch = fetcher or fetch_careers_page
     source = current_company_career_source(company, fetch)
-    raw_extracted, search_count, errors = fetch_career_candidates_with_source(source, fetch)
+    raw_extracted, search_count, errors = fetch_career_candidates_with_source(
+        source,
+        fetch,
+        run_id=scan_run_id,
+        company_id=company.get("id", ""),
+    )
     extracted = normalize_extracted_candidates(raw_extracted, source.get("platform_type", ""))
     if search_count == 0 or not extracted:
         try:
@@ -6077,7 +6163,10 @@ def check_company_postings(company_id, fetcher=None):
         if rediscovered and not career_sources_equivalent(source, rediscovered):
             source = rediscovered
             rediscovered_rows, rediscovered_search_count, rediscovered_errors = fetch_career_candidates_with_source(
-                source, fetch
+                source,
+                fetch,
+                run_id=scan_run_id,
+                company_id=company.get("id", ""),
             )
             raw_extracted = [*raw_extracted, *rediscovered_rows]
             search_count += rediscovered_search_count
@@ -6089,6 +6178,7 @@ def check_company_postings(company_id, fetcher=None):
             {
                 "company_id": company.get("id", ""),
                 "checked_at": checked_at,
+                "run_id": scan_run_id,
                 "platform_type": source.get("platform_type", ""),
                 "status": "error",
                 "requests_succeeded": "0",
@@ -6117,7 +6207,7 @@ def check_company_postings(company_id, fetcher=None):
     existing_by_identity = {}
     for row in candidates:
         row_company_id = row.get("company_id", "").upper()
-        for identity_key in posting_identity_keys(row.get("url", "")):
+        for identity_key in candidate_identity_keys(row):
             existing_by_identity.setdefault((row_company_id, identity_key), row)
     new_rows = []
     seen_urls = set()
@@ -6128,7 +6218,7 @@ def check_company_postings(company_id, fetcher=None):
         if not url or url in seen_urls:
             continue
         item["url"] = url
-        item_identity_keys = posting_identity_keys(url)
+        item_identity_keys = candidate_identity_keys(item)
         if item_identity_keys and item_identity_keys & seen_identity_keys:
             continue
         seen_identity_keys.update(item_identity_keys)
@@ -6158,9 +6248,12 @@ def check_company_postings(company_id, fetcher=None):
                 "description_hash",
                 "score_inputs_hash",
                 "normalization_warnings",
+                "qualification_status",
+                "qualification_reason",
             ]:
                 existing[field] = item.get(field, "") or existing.get(field, "")
             existing["last_seen_at"] = checked_at
+            existing["last_scan_run_id"] = scan_run_id
             existing["scan_state"] = "current"
             if candidate_is_tracked(item, tracked):
                 existing["status"] = "pursued"
@@ -6187,6 +6280,7 @@ def check_company_postings(company_id, fetcher=None):
                 "description_hash": item.get("description_hash", ""),
                 "score_inputs_hash": item.get("score_inputs_hash", ""),
                 "normalization_warnings": item.get("normalization_warnings", ""),
+                "last_scan_run_id": scan_run_id,
                 "scan_state": "current",
                 "status": "new",
                 "first_seen_at": checked_at,
@@ -6194,6 +6288,7 @@ def check_company_postings(company_id, fetcher=None):
             }
         )
         row.update(score_candidate_fit({**row, **item}, resume_text, checked_at))
+        row["qualification_status"], row["qualification_reason"] = candidate_qualification(row)
         candidates.append(row)
         new_rows.append(row)
 
@@ -6240,6 +6335,8 @@ def check_company_postings(company_id, fetcher=None):
     verification["unavailable_count"] += invalid_candidate_count
     annotate_candidate_fit(candidates, company.get("id", ""), checked_at, only_missing=True)
     current_candidates = [row for row in company_candidates if row.get("last_seen_at") == checked_at]
+    for candidate in company_candidates:
+        candidate["qualification_status"], candidate["qualification_reason"] = candidate_qualification(candidate)
     recommended = recommended_candidates(current_candidates)
     field_updates = {}
     status_updates = []
@@ -6295,6 +6392,7 @@ def check_company_postings(company_id, fetcher=None):
         {
             "company_id": company.get("id", ""),
             "checked_at": checked_at,
+            "run_id": scan_run_id,
             "platform_type": source.get("platform_type", ""),
             "status": scan_status,
             "requests_succeeded": str(search_count),

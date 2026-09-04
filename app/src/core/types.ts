@@ -228,7 +228,6 @@ export type CandidateEnrichmentJob = {
     search_id?: string;
     candidate_id?: string;
     limit?: number;
-    use_browser_fallback?: boolean;
     enrichment_limit?: number;
   };
   result: CandidateEnrichmentResult | DiscoveryRunResult | null;
@@ -292,6 +291,9 @@ export type CompanyPostingCandidate = {
   description_hash: string;
   score_inputs_hash: string;
   normalization_warnings: string;
+  qualification_status: "eligible" | "needs-verification" | "ineligible" | "";
+  qualification_reason: string;
+  last_scan_run_id: string;
   scan_state: string;
   last_verified_at: string;
   status: string;
@@ -303,7 +305,7 @@ export type CompanyPostingCandidate = {
   notes: string;
   lane_match: string;
   discovery_candidate_id: string;
-  review_state: "ready" | "needs-detail" | "needs-freshness" | "failed-extraction";
+  review_state: "ready" | "needs-qualification" | "needs-detail" | "needs-freshness" | "failed-extraction" | "ineligible";
   requisition_ids: string[];
   matching_posting_ids: string[];
   is_canonical?: boolean;
@@ -314,6 +316,7 @@ export type CompanyPostingCandidate = {
 export type CompanyCareerScan = {
   company_id: string;
   checked_at: string;
+  run_id: string;
   platform_type: string;
   status: string;
   requests_succeeded: string;
@@ -404,7 +407,7 @@ export type DiscoveryCandidate = {
   detail_state: DiscoveryDetailState;
   detail_gaps: DiscoveryDetailGap[];
   detail_next_action: string;
-  review_state: "ready" | "needs-qualification" | "needs-detail" | "needs-freshness" | "failed-extraction";
+  review_state: "ready" | "needs-qualification" | "needs-detail" | "needs-freshness" | "failed-extraction" | "ineligible";
   review_next_action: string;
   requisition_ids: string[];
   matching_posting_ids: string[];

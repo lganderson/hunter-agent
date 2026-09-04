@@ -218,7 +218,6 @@ export function App({ data, refresh, applyActionUpdate, applyApplicationUpdate, 
   const beginCandidateDiscovery = useCallback(async (payload: CandidateEnrichmentJob["request"]) => {
     const response = await startCandidateDiscovery({
       search_id: payload.search_id || "",
-      use_browser_fallback: payload.use_browser_fallback,
       enrichment_limit: payload.enrichment_limit
     });
     setCandidateEnrichmentJob(response.job);

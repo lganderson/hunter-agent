@@ -535,6 +535,57 @@ class CandidateReadModelTest(unittest.TestCase):
         self.assertEqual(result["audit"]["filters"]["minimum_fit_score"], 80)
         self.assertEqual(result["audit"]["filters"]["tracking_status"], "active")
 
+    def test_company_status_facets_and_pages_share_the_same_filter_scope(self):
+        company_row = {
+            **company("CO0001"),
+            "last_checked_at": "2026-09-04T09:00:00",
+        }
+        rows = [
+            {
+                **company_candidate("CP0001", "CO0001", fit_score=91, status="new"),
+                "last_seen_at": "2026-09-04T09:00:00",
+            },
+            {
+                **company_candidate("CP0002", "CO0001", fit_score=75, status="new"),
+                "last_seen_at": "2026-09-04T09:00:00",
+            },
+            {
+                **company_candidate("CP0003", "CO0001", fit_score=70, status="ignored"),
+                "last_seen_at": "2026-09-04T09:00:00",
+            },
+            {
+                **company_candidate("CP0004", "CO0001", fit_score=80, status="pursued"),
+                "last_seen_at": "2026-09-04T09:00:00",
+            },
+        ]
+        context = read_models.CandidateReadContext.from_rows(
+            companies=[company_row],
+            applications=[],
+            searches=searches(),
+            company_candidates=rows,
+            discovery_candidates=[],
+            revision=23,
+        )
+
+        page = read_models.company_candidate_page(
+            {
+                "status": ["new"],
+                "tracking_status": ["active"],
+                "interest_status": ["interested"],
+                "fit_band": ["recommended"],
+                "limit": ["1"],
+            },
+            context,
+        )
+
+        self.assertEqual(page["counts"]["filtered"], 2)
+        self.assertEqual(page["counts"]["returned"], 1)
+        self.assertTrue(page["page"]["has_more"])
+        self.assertEqual(
+            {item["value"]: item["count"] for item in page["facets"]["statuses"]},
+            {"ignored": 1, "new": 2, "pursued": 1},
+        )
+
     def test_transitional_filter_aliases_remain_supported_but_audit_is_canonical(self):
         result = read_models.company_candidate_page(
             {"q": ["platform"], "min_fit": ["80"], "tracking": ["active"]},
@@ -550,7 +601,15 @@ class CandidateReadModelTest(unittest.TestCase):
                 "minimum_fit_score": 80,
                 "tracking_status": "active",
                 "company_id": "",
+                "company_ids": [],
+                "interest_statuses": [],
+                "fit_band": "all",
+                "latest_only": False,
+                "lane_match_only": False,
+                "sort": "fit",
+                "direction": "desc",
                 "include_excluded_companies": False,
+                "include_out_of_scope": False,
                 "search_id": "",
             },
         )

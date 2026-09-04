@@ -422,7 +422,7 @@ export function DiscoveryMode({ data, refresh, applyDiscoveryCandidateUpdate, en
     }
   }
 
-  async function runSearch(useBrowserFallback = false) {
+  async function runSearch() {
     if (!selectedSearch || !startDiscoveryJob || enrichmentActive) return;
     setPending(true);
     setIngestedPostingId("");
@@ -431,7 +431,6 @@ export function DiscoveryMode({ data, refresh, applyDiscoveryCandidateUpdate, en
     try {
       const job = await startDiscoveryJob({
         search_id: selectedSearch.id,
-        use_browser_fallback: useBrowserFallback,
         enrichment_limit: 100
       });
       setOperationStatus(job.message);
@@ -776,15 +775,6 @@ export function DiscoveryMode({ data, refresh, applyDiscoveryCandidateUpdate, en
             <button className="button" type="button" disabled={!selectedSearch} onClick={editSelectedSearch}>Edit search</button>
             <button className="button" type="button" disabled={!selectedSearch} onClick={() => setCaptureOpen(value => !value)}>
               <PlusIcon size={15} /> Add found roles
-            </button>
-            <button
-              className="button"
-              type="button"
-              disabled={!selectedSearch || pending || enrichmentActive || !startDiscoveryJob}
-              title="Uses the signed-in Hunter Chrome profile when API providers miss a role"
-              onClick={() => void runSearch(true)}
-            >
-              Use Chrome fallback
             </button>
           </div>
         </details>

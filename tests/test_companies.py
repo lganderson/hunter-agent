@@ -302,32 +302,90 @@ class HunterCompaniesTest(unittest.TestCase):
             },
         )
 
-        result = companies.research_company(
+        updated = companies.update_company_metadata(
             company["id"],
-            researcher=lambda name, profile: {
+            {
                 "company_industry": "Technology, Information and Internet",
                 "company_size": "201-500 employees",
                 "company_profile_url": "https://www.linkedin.com/company/example-labs/about/",
                 "company_metadata_source": "https://www.linkedin.com/company/example-labs/about/",
             },
+            source_url="https://www.linkedin.com/company/example-labs/about/",
         )
+        suggestions = companies.company_metadata_suggestions(updated)
 
-        self.assertEqual(result["company"]["industry"], "Software Development")
-        self.assertEqual(result["company"]["company_size"], "201–500 employees")
+        self.assertEqual(updated["industry"], "Software Development")
+        self.assertEqual(updated["company_size"], "201–500 employees")
         self.assertEqual(
-            result["company"]["company_profile_url"],
+            updated["company_profile_url"],
             "https://www.linkedin.com/company/example-labs",
         )
-        self.assertEqual(result["applied_fields"], ["company_size", "company_profile_url"])
-        self.assertEqual(result["suggestions"][0]["field"], "industry")
+        self.assertEqual(suggestions[0]["field"], "industry")
 
         resolved = companies.resolve_company_metadata_suggestion(
             company["id"],
-            result["suggestions"][0]["id"],
+            suggestions[0]["id"],
             "apply",
         )
         self.assertEqual(resolved["industry"], "Technology, Information and Internet")
         self.assertEqual(companies.company_metadata_suggestions(resolved), [])
+
+    def test_openai_company_research_updates_evaluation_and_returns_attribution(self):
+        sqlite_store.initialize()
+        company = companies.upsert_company(
+            "",
+            {
+                "name": "Example Labs",
+                "tracking_status": "tracked",
+                "interest_status": "neutral",
+            },
+        )
+
+        result = companies.research_company_with_openai(
+            company["id"],
+            evaluator=lambda batch, profile, batch_number: [{
+                "company_id": company["id"],
+                "name": company["name"],
+                "website": "https://example.com",
+                "careers_url": "https://example.com/careers",
+                "industry": "Software Development",
+                "company_size": "201–500 employees",
+                "description": "Builds workflow software.",
+                "location_fit": "us-remote",
+                "location": "United States",
+                "remote_policy": "Remote roles available in the United States.",
+                "location_evidence": "The official careers page lists US remote roles.",
+                "source_urls": ["https://example.com", "https://example.com/careers"],
+            }],
+        )
+
+        self.assertEqual(result["provider"], "openai")
+        self.assertTrue(result["run_id"].startswith("company-evaluation-"))
+        self.assertEqual(result["evaluation_status"], "ready")
+        self.assertEqual(result["company"]["careers_url"], "https://example.com/careers")
+        self.assertEqual(result["company"]["company_location_fit"], "us-remote")
+        self.assertIn("careers_url", result["applied_fields"])
+
+    def test_mcp_company_research_defaults_to_openai_provider(self):
+        result = {
+            "company": {field: "" for field in schema.COMPANY_FIELDS} | {
+                "id": "CO0001",
+                "name": "Example",
+            },
+            "applied_fields": ["industry"],
+            "suggestions": [],
+            "source_url": "https://example.com",
+            "provider": "openai",
+            "run_id": "company-evaluation-test",
+            "evaluation_status": "ready",
+        }
+        with patch("hunter.mcp_server.company_store.research_company", return_value=result) as research:
+            response = mcp_server.call_named_tool("hunter_research_company", {"id": "CO0001"})
+
+        payload = json.loads(response["content"][0]["text"])
+        research.assert_called_once_with("CO0001")
+        self.assertEqual(payload["provider"], "openai")
+        self.assertEqual(payload["run_id"], "company-evaluation-test")
 
     def test_company_recommendation_uses_discovery_fit_without_changing_tracking(self):
         sqlite_store.initialize()
@@ -1650,6 +1708,9 @@ class HunterCompaniesTest(unittest.TestCase):
         self.assertEqual(request_json.call_count, 1)
         usage_rows = (paths.DATA_DIR / "agent_usage.jsonl").read_text(encoding="utf-8")
         self.assertIn('"feature": "career-search"', usage_rows)
+        usage = json.loads(usage_rows.splitlines()[-1])
+        self.assertEqual(usage["context"]["company_id"], company["id"])
+        self.assertEqual(usage["context"]["run_id"], result["scan"]["run_id"])
         self.assertNotIn("example.com/jobs/33235", json.dumps(result))
 
     def test_cloudflare_blocked_official_site_uses_guarded_web_search(self):
@@ -4104,6 +4165,108 @@ class HunterCompaniesTest(unittest.TestCase):
         self.assertEqual([row["id"] for row in payload["tables"]["applications"]], ["A0001"])
         self.assertEqual([row["id"] for row in payload["tables"]["actions"]], ["T0001"])
         self.assertEqual(payload["tables"]["company_career_scans"][0]["company_id"], company["id"])
+
+
+    def test_company_candidate_qualification_uses_all_saved_location_lanes(self):
+        searches = [{
+            "lanes": [{
+                "id": "remote-us",
+                "label": "United States remote",
+                "location": "United States",
+                "work_modes": ["remote"],
+            }]
+        }]
+        eligible = {
+            "location": "United States",
+            "work_mode": "Remote",
+            "description_excerpt": "This role may be held remotely in the United States.",
+        }
+        uncertain = {"location": "", "work_mode": "", "description_excerpt": ""}
+        ineligible = {
+            "location": "Bengaluru, India",
+            "work_mode": "Remote",
+            "description_excerpt": "Remote role based in India.",
+        }
+
+        self.assertEqual(companies.candidate_qualification(eligible, searches)[0], "eligible")
+        self.assertEqual(companies.candidate_review_state(uncertain, searches), "needs-qualification")
+        self.assertEqual(companies.candidate_review_state(ineligible, searches), "ineligible")
+
+    def test_company_candidate_requisition_ids_prefer_structured_source_identity(self):
+        first = {
+            "url": "https://jobs.example.com/careers",
+            "source_job_id": "job-id:8109626",
+        }
+        second = {
+            "url": "https://jobs.example.com/careers",
+            "source_job_id": "job-id:8026543",
+        }
+        workday = {
+            "url": "https://jobs.example.com/careers",
+            "source_job_id": "senior-product-manager-r76154-1",
+        }
+
+        self.assertEqual(companies.candidate_requisition_ids(first), {"8109626"})
+        self.assertEqual(companies.candidate_requisition_ids(second), {"8026543"})
+        self.assertEqual(companies.candidate_requisition_ids(workday), {"r76154-1"})
+        self.assertFalse(companies.candidate_requisition_ids(first) & companies.candidate_requisition_ids(second))
+        tracked = {
+            "postings": [{
+                "requisition_ids": {"8026543"},
+                "identity_keys": companies.posting_identity_keys(second["url"]),
+                "title_key": companies.normalized_key("Product Manager"),
+            }]
+        }
+        self.assertFalse(companies.candidate_is_tracked({**first, "title": "Product Manager"}, tracked))
+
+    def test_mcp_company_candidates_excludes_out_of_scope_by_default(self):
+        sqlite_store.initialize()
+        company = companies.upsert_company("", {
+            "name": "Example",
+            "tracking_status": "tracked",
+            "interest_status": "interested",
+        })
+        discovery.upsert_search("", {
+            "name": "US remote",
+            "keywords": "program manager",
+            "lanes": [{
+                "id": "remote-us",
+                "label": "United States remote",
+                "location": "United States",
+                "work_modes": ["remote"],
+            }],
+        })
+        rows = []
+        for candidate_id, location, work_mode in [
+            ("CP0001", "Remote, United States", "Remote"),
+            ("CP0002", "Bengaluru, India", "Remote"),
+            ("CP0003", "", ""),
+        ]:
+            row = {field: "" for field in schema.COMPANY_POSTING_CANDIDATE_FIELDS}
+            row.update({
+                "id": candidate_id,
+                "company_id": company["id"],
+                "title": "Technical Program Manager",
+                "url": f"https://jobs.example.com/jobs/{candidate_id.lower()}",
+                "location": location,
+                "work_mode": work_mode,
+                "status": "new",
+                "fit_score": "80",
+                "description_excerpt": "Responsibilities and requirements. " * 30 if location else "",
+                "scan_state": "current",
+            })
+            rows.append(row)
+        repository.write_company_posting_candidates(rows)
+
+        default_payload = json.loads(mcp_server.tool_list_company_candidates({})["content"][0]["text"])
+        audit_payload = json.loads(mcp_server.tool_list_company_candidates({"include_out_of_scope": True})["content"][0]["text"])
+
+        self.assertEqual({row["id"] for row in default_payload["candidates"]}, {"CP0001", "CP0003"})
+        self.assertEqual(default_payload["out_of_scope_candidate_count"], 1)
+        self.assertEqual({row["id"] for row in audit_payload["candidates"]}, {"CP0001", "CP0002", "CP0003"})
+        uncertain = next(row for row in default_payload["candidates"] if row["id"] == "CP0003")
+        self.assertEqual(uncertain["review_state"], "needs-qualification")
+        self.assertFalse(uncertain["recommended"])
 
 
 def table_names(connection):

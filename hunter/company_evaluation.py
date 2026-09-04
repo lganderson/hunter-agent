@@ -206,7 +206,14 @@ def evaluation_batch_count(company_ids=None, tracking_status="discovered", profi
     )
 
 
-def openai_company_evaluation(config, company_rows, profile, batch_number=1, reason="backfill"):
+def openai_company_evaluation(
+    config,
+    company_rows,
+    profile,
+    batch_number=1,
+    reason="backfill",
+    run_id="",
+):
     targets = []
     for company in (company_rows or [])[:BATCH_SIZE]:
         targets.append(
@@ -272,6 +279,10 @@ def openai_company_evaluation(config, company_rows, profile, batch_number=1, rea
         response.get("model") or MODEL,
         response,
         operation=f"{storage.clean(reason) or 'backfill'}-batch-{batch_number}",
+        context={
+            "run_id": run_id,
+            "company_ids": ",".join(target["company_id"] for target in targets),
+        },
     )
     try:
         result = json.loads(agent._output_text(response))
@@ -398,7 +409,10 @@ def evaluate_companies(
     evaluator=None,
     progress=None,
     reason="backfill",
+    run_id="",
+    max_attempts=MAX_BATCH_ATTEMPTS,
 ):
+    run_id = storage.clean(run_id) or f"company-evaluation-{now_iso().replace(':', '').replace('-', '')}"
     normalized_profile = save_profile(profile or load_profile())
     targets = evaluation_targets(
         company_ids=company_ids,
@@ -417,6 +431,7 @@ def evaluate_companies(
                 current_profile,
                 batch_number=batch_number,
                 reason=reason,
+                run_id=run_id,
             )
 
     evaluated_ids = []
@@ -444,7 +459,7 @@ def evaluate_companies(
             )
         results = None
         failure = None
-        for _attempt in range(1, MAX_BATCH_ATTEMPTS + 1):
+        for _attempt in range(1, max(1, int(max_attempts or 1)) + 1):
             try:
                 results = evaluator(batch, normalized_profile, batch_number) or []
                 failure = None
@@ -496,4 +511,5 @@ def evaluate_companies(
         "evaluation_version": evaluation_version(normalized_profile),
         "profile": normalized_profile,
         "errors": errors,
+        "run_id": run_id,
     }

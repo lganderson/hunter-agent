@@ -247,6 +247,9 @@ export function researchCompany(id: string): Promise<{
   applied_fields: string[];
   suggestions: CompanyMetadataSuggestion[];
   source_url: string;
+  provider: "openai";
+  run_id: string;
+  evaluation_status: string;
 }> {
   return postJson("/api/companies/research", { id });
 }
@@ -394,7 +397,6 @@ export async function getCandidateEnrichmentJob(): Promise<{ job: CandidateEnric
 
 export function startCandidateDiscovery(payload: {
   search_id: string;
-  use_browser_fallback?: boolean;
   enrichment_limit?: number;
 }): Promise<{ job: CandidateEnrichmentJob }> {
   return postJson<{ job: CandidateEnrichmentJob }>("/api/discovery/search-jobs", payload);

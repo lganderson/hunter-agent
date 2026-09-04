@@ -71,11 +71,32 @@ export function CandidatesPage({ data: shellData, refresh, applyCompanyCandidate
   const mode = viewParams.get("mode") === "discovery" ? "discovery" : "companies";
   const search = viewParams.get("q") || "";
   const candidateFilter = candidateFilterFromQuery(viewParams.get("status"));
+  const interestStatuses = selectionFromParam(viewParams.get("interest"), INTEREST_VALUES, INTEREST_VALUES);
+  const requestedFitFilter = viewParams.get("fit") || "";
+  const fitFilter = FIT_VALUES.includes(requestedFitFilter)
+    ? requestedFitFilter
+    : candidateFilter === "needs-decision" ? "recommended" : "all";
+  const requestedLatestFilter = viewParams.get("latest");
+  const latestOnly = requestedLatestFilter
+    ? requestedLatestFilter === "true"
+    : candidateFilter === "needs-decision";
+  const requestedScopeFilter = viewParams.get("scope");
+  const searchScopeOnly = requestedScopeFilter
+    ? requestedScopeFilter === "matching"
+    : candidateFilter === "needs-decision";
+  const sort = sortFromParams(viewParams, "sort", "direction", CANDIDATE_SORT_KEYS, { key: "fit", direction: "desc" });
   const queryClient = useQueryClient();
   const companyCandidatesQuery = useCompanyCandidateList({
     search,
     status: candidateFilter === "needs-decision" ? "new" : candidateFilter,
-    trackingStatus: "tracked"
+    trackingStatus: "tracked",
+    companyIds: selectionValuesForQuery(viewParams.get("companies")),
+    interestStatuses: selectionValuesForQuery(viewParams.get("interest")),
+    fitBand: fitFilter as "all" | "strong" | "recommended" | "low",
+    latestOnly,
+    laneMatchOnly: searchScopeOnly,
+    sort: sort.key,
+    direction: sort.direction
   }, mode === "companies");
   const discoveryResultFilter = legacyDiscoveryFilterForQuery(viewParams.get("discovery_status"));
   const discoveryCandidatesQuery = useDiscoveryCandidateList({
@@ -105,7 +126,6 @@ export function CandidatesPage({ data: shellData, refresh, applyCompanyCandidate
     ]);
     return next;
   };
-  const interestStatuses = selectionFromParam(viewParams.get("interest"), INTEREST_VALUES, INTEREST_VALUES);
   const [operationStatus, setOperationStatus] = useState("");
   const [operationPending, setOperationPending] = useState(false);
   const [ingestedPostingId, setIngestedPostingId] = useState("");
@@ -130,20 +150,6 @@ export function CandidatesPage({ data: shellData, refresh, applyCompanyCandidate
   );
   const companyOptionIds = companyOptions.map(company => company.id);
   const companyIds = selectionFromParam(viewParams.get("companies"), companyOptionIds, companyOptionIds);
-  const requestedFitFilter = viewParams.get("fit") || "";
-  const fitFilter = FIT_VALUES.includes(requestedFitFilter)
-    ? requestedFitFilter
-    : candidateFilter === "needs-decision" ? "recommended" : "all";
-  const requestedLatestFilter = viewParams.get("latest");
-  const latestOnly = requestedLatestFilter
-    ? requestedLatestFilter === "true"
-    : candidateFilter === "needs-decision";
-  const requestedScopeFilter = viewParams.get("scope");
-  const searchScopeOnly = requestedScopeFilter
-    ? requestedScopeFilter === "matching"
-    : candidateFilter === "needs-decision";
-  const sort = sortFromParams(viewParams, "sort", "direction", CANDIDATE_SORT_KEYS, { key: "fit", direction: "desc" });
-
   const allRows = useMemo<CandidateRow[]>(
     () => canonicalCandidateRows(data.company_posting_candidates).map(candidate => {
       const company = companyById.get(candidate.company_id) || null;
@@ -165,7 +171,7 @@ export function CandidatesPage({ data: shellData, refresh, applyCompanyCandidate
       if (!company && interestStatuses.length !== INTEREST_VALUES.length) return false;
       if (!matchesSelection(candidate.company_id, companyIds, companyOptions.map(item => item.id))) return false;
       if (latestOnly && !isCurrentNewCandidate(candidate, row.latestCheckAt)) return false;
-      if (searchScopeOnly && !candidate.lane_match) return false;
+      if (searchScopeOnly && !candidate.lane_match && candidate.review_state !== "needs-qualification") return false;
       if (["strong", "recommended"].includes(fitFilter) && candidate.review_state !== "ready") return false;
       if (!matchesFitFilter(fitScore, fitFilter)) return false;
       if (query) {
@@ -204,12 +210,12 @@ export function CandidatesPage({ data: shellData, refresh, applyCompanyCandidate
           .map(facet => [facet.value, facet.count])
       );
       return {
-        "needs-decision": statusCounts.get("new") ?? rowsBeforeStatus.filter(row => row.candidate.status === "new").length,
-        ignored: statusCounts.get("ignored") ?? rowsBeforeStatus.filter(row => row.candidate.status === "ignored").length,
-        pursued: statusCounts.get("pursued") ?? rowsBeforeStatus.filter(row => row.candidate.status === "pursued").length
+        "needs-decision": statusCounts.get("new") ?? 0,
+        ignored: statusCounts.get("ignored") ?? 0,
+        pursued: statusCounts.get("pursued") ?? 0
       };
     },
-    [companyCandidatesQuery.data?.pages, rowsBeforeStatus]
+    [companyCandidatesQuery.data?.pages]
   );
 
   const rows = useMemo(
@@ -358,12 +364,12 @@ export function CandidatesPage({ data: shellData, refresh, applyCompanyCandidate
   }
 
   async function checkAllCompanies() {
-    const companiesToCheck = data.companies.filter(
-      company => company.tracking_status === "tracked"
-        && company.interest_status.toLowerCase() !== "archived"
+    const trackedCompanies = data.companies.filter(company => company.tracking_status === "tracked");
+    const companiesToCheck = trackedCompanies.filter(
+      company => !["archived", "not-interested"].includes(company.interest_status.toLowerCase())
         && company.careers_url.trim()
     );
-    const skippedCount = data.companies.length - companiesToCheck.length;
+    const skippedCount = trackedCompanies.length - companiesToCheck.length;
     const totals = {
       checked: 0,
       errors: 0,
@@ -789,6 +795,12 @@ function matchesSelection(value: string, selected: string[], values: string[]) {
   return selected.includes(value);
 }
 
+function selectionValuesForQuery(value: string | null) {
+  if (!value || value === "all") return [];
+  if (value === "none") return ["__none__"];
+  return value.split(",").map(item => item.trim()).filter(Boolean);
+}
+
 function candidateFilterFromQuery(value: string | null): CandidateFilter {
   const normalized = value === "recommended" || value === "new" || value === "all" ? "needs-decision" : value === "ingested" ? "pursued" : value;
   return CANDIDATE_FILTERS.some(filter => filter.id === normalized) ? normalized as CandidateFilter : "needs-decision";
@@ -803,6 +815,8 @@ function matchesFitFilter(score: number, filter: string) {
 
 function candidateReviewStateLabel(value: CompanyPostingCandidate["review_state"]) {
   if (value === "ready") return "Ready";
+  if (value === "needs-qualification") return "Verify location";
+  if (value === "ineligible") return "Out of scope";
   if (value === "needs-detail") return "Needs detail";
   if (value === "needs-freshness") return "Needs freshness";
   return "Failed extraction";

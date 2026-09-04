@@ -34,6 +34,7 @@ MUTATING_TOOLS = {
     "hunter_untrack_company",
     "hunter_resolve_company_metadata_suggestion",
     "hunter_check_company_postings",
+    "hunter_check_tracked_company_postings",
     "hunter_link_company_contact",
     "hunter_unlink_company_contact",
     "hunter_ingest_company_candidate",
@@ -68,9 +69,9 @@ withdrawn, accepted, declined, archived, or closed-posting.
 Companies are local records with two distinct tracking states. Discovery
 companies were encountered while finding roles; tracked companies were
 explicitly promoted into Companies career-page workflows. Use
-hunter_research_company to fill blank company fields from the signed-in browser
-and create reviewable suggestions when source-backed values conflict with
-existing data. Never claim a suggestion changed the record until
+hunter_research_company to research current public evidence with OpenAI, fill
+blank company fields, and create reviewable suggestions when source-backed
+values conflict with existing data. Never claim a suggestion changed the record until
 hunter_resolve_company_metadata_suggestion applies it. Use hunter_track_company
 when the user approves promoting a discovered company. Use hunter_untrack_company
 to move it back to Discovery without deleting linked data. Careers-page checks
@@ -235,6 +236,8 @@ def _tool_receipt(name, arguments):
         return "Refreshed existing Discovery candidate posting details and freshness."
     if name == "hunter_check_company_postings":
         return f'Checked the careers page for {arguments.get("id", "the company")}.'
+    if name == "hunter_check_tracked_company_postings":
+        return "Checked tracked company careers pages with isolated per-company results."
     if name == "hunter_research_company":
         return f'Researched {arguments.get("id", "the company")} and saved source-backed findings locally.'
     if name == "hunter_track_company":

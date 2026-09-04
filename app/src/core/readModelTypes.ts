@@ -23,8 +23,16 @@ export type CandidateListFilters = {
   status?: string | readonly string[];
   minimumFitScore?: number;
   companyId?: string;
+  companyIds?: readonly string[];
+  interestStatuses?: readonly string[];
   trackingStatus?: string;
+  fitBand?: "all" | "strong" | "recommended" | "low";
+  latestOnly?: boolean;
+  laneMatchOnly?: boolean;
+  sort?: "title" | "company" | "fit" | "status" | "last_seen";
+  direction?: "asc" | "desc";
   includeExcludedCompanies?: boolean;
+  includeOutOfScope?: boolean;
 };
 
 export type CompanyCandidateListFilters = CandidateListFilters;
@@ -42,8 +50,16 @@ export type NormalizedCandidateListFilters = {
   statuses: readonly string[];
   minimumFitScore: number;
   companyId: string;
+  companyIds: readonly string[];
+  interestStatuses: readonly string[];
   trackingStatus: string;
+  fitBand: "all" | "strong" | "recommended" | "low";
+  latestOnly: boolean;
+  laneMatchOnly: boolean;
+  sort: "title" | "company" | "fit" | "status" | "last_seen";
+  direction: "asc" | "desc";
   includeExcludedCompanies: boolean;
+  includeOutOfScope: boolean;
 };
 
 export type CandidateCompanySummary = Pick<
@@ -65,7 +81,7 @@ type CandidateListItemBase = {
   canonical_status: string;
   fit_score: string;
   fit_checked_at: string;
-  review_state: "ready" | "needs-qualification" | "needs-detail" | "needs-freshness" | "failed-extraction";
+  review_state: "ready" | "needs-qualification" | "needs-detail" | "needs-freshness" | "failed-extraction" | "ineligible";
   matching_posting_ids: string[];
   description_excerpt: string;
   description_truncated: boolean;
@@ -78,6 +94,8 @@ export type CompanyCandidateListItem = CandidateListItemBase & {
   last_verified_at: string;
   first_seen_at: string;
   fit_summary: string;
+  qualification_status: "eligible" | "needs-verification" | "ineligible" | "";
+  qualification_reason: string;
   lane_match: string;
   discovery_candidate_id: string;
 };
@@ -113,6 +131,7 @@ export type CandidatePageCounts = {
   filtered: number;
   returned: number;
   excluded_companies: number;
+  out_of_scope: number;
   ignored_sources: number;
 };
 
@@ -130,7 +149,15 @@ export type CandidatePageAudit = {
     minimum_fit_score: number;
     tracking_status: string;
     company_id: string;
+    company_ids: string[];
+    interest_statuses: string[];
+    fit_band: string;
+    latest_only: boolean;
+    lane_match_only: boolean;
+    sort: string;
+    direction: string;
     include_excluded_companies: boolean;
+    include_out_of_scope: boolean;
     search_id: string;
   };
   canonical_hidden_count: number;

@@ -2,11 +2,10 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
 from urllib.parse import quote, unquote_plus
 from unittest.mock import patch
 
-from hunter import applications, app_state, browser_discovery, companies, discovery, paths, repository, schema, sqlite_store
+from hunter import applications, app_state, companies, discovery, paths, repository, schema, sqlite_store
 
 
 class HunterDiscoveryTest(unittest.TestCase):
@@ -40,190 +39,6 @@ class HunterDiscoveryTest(unittest.TestCase):
         for name, value in self.original_paths.items():
             setattr(paths, name, value)
         self.tempdir.cleanup()
-
-    def test_hunter_chrome_paces_consecutive_searches(self):
-        delays = []
-        browser = browser_discovery.HunterChrome(
-            sleeper=delays.append,
-            min_delay_seconds=1.25,
-            max_delay_seconds=2.25,
-            randomizer=lambda minimum, maximum: 1.75,
-        )
-        browser.window_id = "123"
-        browser.last_search_at = browser_discovery.time.monotonic()
-        browser._open_tab = lambda url: "456"
-        browser._wait_until_ready = lambda tab_id, expected_url="": {"ready": "complete"}
-        browser._execute = lambda tab_id, script: '{"blocked": false, "items": []}'
-        browser._close_tab = lambda tab_id: None
-
-        browser._search_tab("https://www.google.com/search?q=test", "ignored")
-
-        self.assertEqual(len(delays), 1)
-        self.assertGreater(delays[0], 1.25)
-        self.assertLessEqual(delays[0], 1.75)
-
-    def test_hunter_chrome_uses_absolute_osascript_path_for_thread_safe_spawn(self):
-        calls = []
-
-        def runner(command, **kwargs):
-            calls.append((command, kwargs))
-            return SimpleNamespace(returncode=0, stdout="123\n", stderr="")
-
-        browser = browser_discovery.HunterChrome(runner=runner)
-
-        self.assertEqual(browser.find_window(), "123")
-        self.assertEqual(calls[0][0][0], "/usr/bin/osascript")
-        self.assertFalse(calls[0][1]["close_fds"])
-
-    def test_hunter_chrome_waits_past_about_blank_during_navigation(self):
-        states = iter(
-            [
-                '{"ready":"complete","href":"about:blank","title":""}',
-                '{"ready":"interactive","href":"https://www.linkedin.com/company/example/","title":"Example"}',
-            ]
-        )
-        delays = []
-        browser = browser_discovery.HunterChrome(
-            sleeper=delays.append,
-            timeout_seconds=1,
-        )
-        browser._execute = lambda tab_id, script: next(states)
-
-        state = browser._wait_until_ready(
-            "456",
-            expected_url="https://www.linkedin.com/company/example/",
-        )
-
-        self.assertEqual(state["href"], "https://www.linkedin.com/company/example/")
-        self.assertEqual(delays, [0.25])
-
-    def test_company_research_uses_linkedin_only_and_ignores_website_profile(self):
-        opened_urls = []
-        browser = browser_discovery.HunterChrome()
-
-        def search_tab(url, extraction_script, scroll=False):
-            opened_urls.append((url, extraction_script, scroll))
-            if "/search/results/companies/" in url:
-                return [{"url": "https://www.linkedin.com/company/2k-games/"}]
-            return [
-                {
-                    "company": "2K",
-                    "company_industry": "Computer Games",
-                    "company_size": "1,001-5,000 employees",
-                }
-            ]
-
-        browser._search_tab = search_tab
-        browser.google = lambda query, page=0: self.fail("Google fallback should not run")
-
-        result = browser.company("2K Games", "https://2k.com/about")
-
-        self.assertEqual(result["company_industry"], "Computer Games")
-        self.assertIn("keywords=2K+Games", opened_urls[0][0])
-        self.assertEqual(opened_urls[1][0], "https://www.linkedin.com/company/2k-games/about/")
-        self.assertTrue(opened_urls[0][2])
-        self.assertTrue(opened_urls[1][2])
-
-    def test_hunter_chrome_builds_second_google_and_linkedin_pages(self):
-        opened_urls = []
-        browser = browser_discovery.HunterChrome()
-        browser._search_tab = (
-            lambda url, extraction_script, scroll=False: opened_urls.append((url, scroll)) or []
-        )
-
-        browser.google("technical program manager", page=1)
-        browser.linkedin(
-            "https://www.linkedin.com/jobs/search/?keywords=technical+program+manager&location=Minnesota",
-            page=1,
-        )
-        browser.linkedin_companies("developer tools", page=1)
-
-        self.assertIn("start=10", opened_urls[0][0])
-        self.assertFalse(opened_urls[0][1])
-        self.assertIn("start=25", opened_urls[1][0])
-        self.assertTrue(opened_urls[1][1])
-        self.assertIn("keywords=developer+tools", opened_urls[2][0])
-        self.assertIn("page=2", opened_urls[2][0])
-        self.assertTrue(opened_urls[2][1])
-
-    def test_linkedin_result_scrolls_until_cards_stabilize_at_end(self):
-        browser = browser_discovery.HunterChrome(sleeper=lambda _seconds: None)
-        browser.window_id = "123"
-        browser._open_tab = lambda _url: "456"
-        browser._wait_until_ready = lambda _tab_id, expected_url="": {"ready": "complete"}
-        browser._close_tab = lambda _tab_id: None
-        scroll_states = iter(
-            [
-                '{"count":7,"atEnd":false}',
-                '{"count":15,"atEnd":false}',
-                '{"count":15,"atEnd":true}',
-                '{"count":15,"atEnd":true}',
-            ]
-        )
-        scroll_calls = []
-
-        def execute(_tab_id, script):
-            if script == browser_discovery.LINKEDIN_RESULTS_SCROLL_SCRIPT:
-                scroll_calls.append(script)
-                return next(scroll_states)
-            return '{"blocked":false,"items":[]}'
-
-        browser._execute = execute
-
-        browser._search_tab(
-            "https://www.linkedin.com/jobs/search/?keywords=technical+program+manager",
-            browser_discovery.LINKEDIN_RESULTS_SCRIPT,
-            scroll="linkedin-results",
-        )
-
-        self.assertEqual(len(scroll_calls), 4)
-
-    def test_hunter_chrome_leaves_verification_tab_open_for_attention(self):
-        browser = browser_discovery.HunterChrome(sleeper=lambda _seconds: None)
-        browser.window_id = "123"
-        browser._open_tab = lambda _url: "456"
-        browser._wait_until_ready = lambda _tab_id, expected_url="": {"ready": "complete"}
-        closed_tabs = []
-        browser._close_tab = closed_tabs.append
-        browser._execute = lambda _tab_id, _script: (
-            '{"blocked":true,"reason":"Google needs verification in the Hunter Chrome profile.","items":[]}'
-        )
-
-        with self.assertRaisesRegex(
-            browser_discovery.BrowserDiscoveryError,
-            "needs verification",
-        ):
-            browser._search_tab(
-                "https://www.google.com/search?q=test",
-                browser_discovery.GOOGLE_RESULTS_SCRIPT,
-            )
-
-        self.assertEqual(closed_tabs, [])
-
-    def test_hunter_chrome_rechecks_transient_verification_before_pausing(self):
-        delays = []
-        browser = browser_discovery.HunterChrome(sleeper=delays.append)
-        browser.window_id = "123"
-        browser._open_tab = lambda _url: "456"
-        browser._wait_until_ready = lambda _tab_id, expected_url="": {"ready": "complete"}
-        closed_tabs = []
-        browser._close_tab = closed_tabs.append
-        payloads = iter(
-            [
-                '{"blocked":true,"reason":"Google needs verification in the Hunter Chrome profile.","items":[]}',
-                '{"blocked":false,"reason":"","items":[{"url":"https://example.com/job/1"}]}',
-            ]
-        )
-        browser._execute = lambda _tab_id, _script: next(payloads)
-
-        results = browser._search_tab(
-            "https://www.google.com/search?q=test",
-            browser_discovery.GOOGLE_RESULTS_SCRIPT,
-        )
-
-        self.assertEqual(results, [{"url": "https://example.com/job/1"}])
-        self.assertEqual(delays, [browser_discovery.VERIFICATION_RECHECK_SECONDS])
-        self.assertEqual(closed_tabs, ["456"])
 
     def test_browser_results_exclude_builtin_aggregator_network(self):
         results = discovery.normalize_browser_results(
@@ -673,7 +488,7 @@ class HunterDiscoveryTest(unittest.TestCase):
         self.assertEqual(rerun["known_count"], 2)
         self.assertEqual(len(repository.read_discovery_candidates()), 2)
 
-    def test_search_now_uses_hunter_chrome_google_and_linkedin_sources(self):
+    def test_search_now_supports_injected_google_and_linkedin_sources(self):
         search = self.save_search(
             "Minnesota plus remote",
             "technical program manager",
@@ -751,7 +566,7 @@ class HunterDiscoveryTest(unittest.TestCase):
         )
         self.assertTrue(any("google.com" not in value and "Minnesota" in value for engine, value, _page in browser_requests if engine == "google"))
         self.assertTrue(any("linkedin.com/jobs/search" in value for engine, value, _page in browser_requests if engine == "linkedin"))
-        self.assertEqual({source["engine"] for source in result["sources"]}, {"hunter-chrome-google", "hunter-chrome-linkedin"})
+        self.assertEqual({source["engine"] for source in result["sources"]}, {"injected-google", "injected-linkedin"})
         self.assertEqual({source["page_count"] for source in result["sources"]}, {1})
         self.assertEqual(
             {source["query_family"] for source in result["sources"]},
@@ -839,10 +654,7 @@ class HunterDiscoveryTest(unittest.TestCase):
             "improvement with product and engineering teams."
         )
 
-        with (
-            patch("hunter.discovery.candidate_sources.provider_bundle", return_value=bundle),
-            patch("hunter.discovery.browser_discovery.HunterChrome") as chrome,
-        ):
+        with patch("hunter.discovery.candidate_sources.provider_bundle", return_value=bundle):
             result = discovery.run_search(
                 search["id"],
                 posting_fetcher=lambda url: {
@@ -865,7 +677,6 @@ class HunterDiscoveryTest(unittest.TestCase):
                 },
             )
 
-        chrome.assert_not_called()
         self.assertEqual(result["new_count"], 1)
         self.assertEqual(result["captured"][0]["source_platform"], "greenhouse")
         self.assertTrue(result["run_id"].startswith("DR-"))
@@ -1176,7 +987,7 @@ class HunterDiscoveryTest(unittest.TestCase):
         self.assertEqual(result["needs_details_count"], 1)
         self.assertEqual(detail_calls, [posting_url])
         self.assertIn(
-            discovery.BROWSER_VALIDATION_WARNING,
+            discovery.SOURCE_VALIDATION_WARNING,
             result["captured"][0]["warnings"],
         )
 
@@ -1613,7 +1424,7 @@ class HunterDiscoveryTest(unittest.TestCase):
         self.assertEqual(result["limited_count"], 1)
         self.assertEqual(len(repository.read_discovery_candidates()), 2)
 
-    def test_search_preserves_partial_results_and_pauses_blocked_engine(self):
+    def test_search_preserves_partial_results_when_an_injected_provider_fails(self):
         search = self.save_search("Technical platforms", "technical program manager")
         browser_requests = []
 
@@ -1622,7 +1433,7 @@ class HunterDiscoveryTest(unittest.TestCase):
             if engine == "linkedin":
                 return []
             if page == 1:
-                raise browser_discovery.BrowserDiscoveryError("Google needs verification in Hunter Chrome.")
+                raise RuntimeError("Injected search provider failed.")
             return [
                 {
                     "url": f"https://www.linkedin.com/jobs/view/{1234567800 + index}",
@@ -1641,7 +1452,7 @@ class HunterDiscoveryTest(unittest.TestCase):
         self.assertEqual(result["evaluated_count"], 10)
         self.assertEqual(result["found_count"], 10)
         self.assertEqual(len(result["errors"]), 1)
-        self.assertIn("needs verification", result["errors"][0])
+        self.assertIn("provider failed", result["errors"][0])
 
     def test_open_web_source_keeps_postings_but_rejects_career_indexes(self):
         self.assertFalse(discovery.likely_individual_posting("https://example.com/careers", "Careers"))

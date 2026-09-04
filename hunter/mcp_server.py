@@ -143,12 +143,15 @@ def candidate_status_label(candidate):
     return "Considering" if status == "pursued" else status.replace("-", " ").title()
 
 
-def compact_company_candidate(candidate, detail=False):
+def compact_company_candidate(candidate, detail=False, searches=None):
+    qualification_status, qualification_reason = company_store.candidate_qualification(candidate, searches)
     if detail:
         row = {field: candidate.get(field, "") for field in schema.COMPANY_POSTING_CANDIDATE_FIELDS}
-        row["review_state"] = company_store.candidate_review_state(candidate)
+        row["qualification_status"] = qualification_status
+        row["qualification_reason"] = qualification_reason
+        row["review_state"] = company_store.candidate_review_state(candidate, searches)
         row["status_label"] = candidate_status_label(candidate)
-        row["requisition_ids"] = sorted(company_store.normalized_requisition_ids(candidate.get("url", "")))
+        row["requisition_ids"] = sorted(company_store.candidate_requisition_ids(candidate))
         return row
     fields = [
         "id",
@@ -160,15 +163,19 @@ def compact_company_candidate(candidate, detail=False):
         "source_platform",
         "scan_state",
         "normalization_warnings",
+        "qualification_status",
+        "qualification_reason",
         "status",
         "last_seen_at",
         "fit_score",
         "fit_summary",
     ]
     row = {field: candidate.get(field, "") for field in fields}
-    row["review_state"] = company_store.candidate_review_state(candidate)
+    row["qualification_status"] = qualification_status
+    row["qualification_reason"] = qualification_reason
+    row["review_state"] = company_store.candidate_review_state(candidate, searches)
     row["status_label"] = candidate_status_label(candidate)
-    row["requisition_ids"] = sorted(company_store.normalized_requisition_ids(candidate.get("url", "")))
+    row["requisition_ids"] = sorted(company_store.candidate_requisition_ids(candidate))
     row["notes_preview"] = preview_text(candidate.get("notes", ""))
     return row
 
@@ -514,6 +521,9 @@ def tool_research_company(args):
             "applied_fields": result.get("applied_fields", []),
             "suggestions": result.get("suggestions", []),
             "source_url": result.get("source_url", ""),
+            "provider": result.get("provider", ""),
+            "run_id": result.get("run_id", ""),
+            "evaluation_status": result.get("evaluation_status", ""),
         }
     )
 
@@ -555,6 +565,120 @@ def tool_check_company_postings(args):
             "candidates": candidates[:candidate_limit],
         }
     )
+
+
+def _isolated_company_check_command(company_id):
+    return [
+        sys.executable,
+        str(paths.ROOT / "scripts" / "run_company_postings_check.py"),
+        company_id,
+    ]
+
+
+def tool_check_tracked_company_postings(args):
+    companies = company_store.list_companies()
+    company_by_id = {row.get("id", "").upper(): row for row in companies}
+    requested_ids = [
+        storage.clean(value).upper()
+        for value in (args.get("ids") or [
+            row.get("id", "")
+            for row in companies
+            if row.get("tracking_status", "").lower() == "tracked"
+        ])
+        if storage.clean(value)
+    ]
+    try:
+        timeout_seconds = max(1, min(900, int(args.get("timeout_seconds", 240))))
+        retry_count = max(0, min(2, int(args.get("retry_count", 0))))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("timeout_seconds and retry_count must be integers.") from exc
+
+    results = []
+    excluded_count = 0
+    missing_careers_url_count = 0
+    for company_id in dict.fromkeys(requested_ids):
+        company = company_by_id.get(company_id)
+        if not company:
+            results.append({
+                "id": company_id,
+                "name": "",
+                "status": "failed",
+                "attempt_count": 0,
+                "errors": [f"No company found with id {company_id}."],
+            })
+            continue
+        if company.get("tracking_status", "").lower() != "tracked":
+            results.append({
+                "id": company_id,
+                "name": company.get("name", ""),
+                "status": "skipped",
+                "attempt_count": 0,
+                "errors": ["Company is not tracked."],
+            })
+            continue
+        if candidate_eligibility.company_is_excluded(company):
+            excluded_count += 1
+            continue
+        if not storage.clean(company.get("careers_url", "")):
+            missing_careers_url_count += 1
+            continue
+
+        result = None
+        attempt_errors = []
+        for attempt in range(1, retry_count + 2):
+            try:
+                completed = subprocess.run(
+                    _isolated_company_check_command(company_id),
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=timeout_seconds,
+                )
+                output_lines = [line for line in completed.stdout.splitlines() if line.strip()]
+                payload = json.loads(output_lines[-1]) if output_lines else {}
+                if not isinstance(payload, dict):
+                    payload = {}
+                if completed.returncode and not payload.get("errors"):
+                    payload["errors"] = [
+                        storage.clean(completed.stderr or completed.stdout) or "Company check subprocess failed."
+                    ]
+                payload.setdefault("id", company_id)
+                payload.setdefault("name", company.get("name", ""))
+                payload.setdefault("status", "failed" if completed.returncode else "completed")
+                payload["attempt_count"] = attempt
+                result = payload
+            except subprocess.TimeoutExpired:
+                attempt_errors.append(f"Timed out after {timeout_seconds} seconds on attempt {attempt}.")
+                result = {
+                    "id": company_id,
+                    "name": company.get("name", ""),
+                    "status": "timed-out",
+                    "attempt_count": attempt,
+                    "errors": list(attempt_errors),
+                }
+            except (OSError, json.JSONDecodeError) as exc:
+                attempt_errors.append(storage.clean(str(exc)))
+                result = {
+                    "id": company_id,
+                    "name": company.get("name", ""),
+                    "status": "failed",
+                    "attempt_count": attempt,
+                    "errors": list(attempt_errors),
+                }
+            if result.get("status") not in {"failed", "timed-out"}:
+                break
+        results.append(result)
+
+    return text_result({
+        "company_count": len(results),
+        "completed_count": sum(result.get("status") in {"completed", "completed-with-errors"} for result in results),
+        "failed_count": sum(result.get("status") in {"failed", "timed-out"} for result in results),
+        "excluded_company_count": excluded_count,
+        "missing_careers_url_count": missing_careers_url_count,
+        "new_count": sum(int(result.get("new_count") or 0) for result in results),
+        "recommended_count": sum(int(result.get("recommended_count") or 0) for result in results),
+        "results": results,
+    })
 
 
 def tool_get_company_candidate(args):
@@ -619,6 +743,9 @@ def tool_list_company_candidates(args):
     excluded_count = 0
     other_tracking_status_count = 0
     include_excluded = args.get("include_excluded_companies") is True
+    include_out_of_scope = args.get("include_out_of_scope") is True
+    searches = discovery_store.list_searches()
+    out_of_scope_count = 0
     for candidate in repository.read_company_posting_candidates():
         candidate_company_id = candidate.get("company_id", "").upper()
         if company_id and candidate_company_id != company_id:
@@ -637,6 +764,11 @@ def tool_list_company_candidates(args):
         if excluded:
             excluded_count += 1
             if not include_excluded:
+                continue
+        qualification_status, _qualification_reason = company_store.candidate_qualification(candidate, searches)
+        if qualification_status == discovery_store.QUALIFICATION_INELIGIBLE:
+            out_of_scope_count += 1
+            if not include_out_of_scope:
                 continue
         try:
             fit_score = int(candidate.get("fit_score") or 0)
@@ -659,7 +791,7 @@ def tool_list_company_candidates(args):
             (
                 fit_score,
                 {
-                    **compact_company_candidate(candidate),
+                    **compact_company_candidate(candidate, searches=searches),
                     "company": candidate_company.get("name", ""),
                     "matching_posting_ids": company_store.matching_tracked_posting_ids(
                         candidate,
@@ -670,7 +802,7 @@ def tool_list_company_candidates(args):
                         not excluded
                         and
                         candidate_status == "new"
-                        and company_store.candidate_review_state(candidate) == "ready"
+                        and company_store.candidate_review_state(candidate, searches) == "ready"
                         and fit_score >= company_store.FIT_RECOMMENDATION_THRESHOLD
                     ),
                 },
@@ -690,6 +822,7 @@ def tool_list_company_candidates(args):
             "tracking_status": tracking_status,
             "count": len(rows),
             "excluded_company_candidate_count": excluded_count,
+            "out_of_scope_candidate_count": out_of_scope_count,
             "other_tracking_status_candidate_count": other_tracking_status_count,
             "candidates": rows[:limit],
         }
@@ -771,7 +904,6 @@ def tool_run_discovery_search(args):
     result = discovery_store.continue_discovery(
         search_id,
         enrichment_limit=enrichment_limit,
-        use_browser_fallback=args.get("use_browser_fallback") is True,
     )
     return text_result(
         {
@@ -794,7 +926,7 @@ def tool_run_discovery_search(args):
     )
 
 
-def _isolated_discovery_command(search_id, enrichment_limit, use_browser_fallback):
+def _isolated_discovery_command(search_id, enrichment_limit):
     command = [
         sys.executable,
         str(paths.ROOT / "scripts" / "run_discovery_search.py"),
@@ -802,8 +934,6 @@ def _isolated_discovery_command(search_id, enrichment_limit, use_browser_fallbac
         "--enrichment-limit",
         str(enrichment_limit),
     ]
-    if use_browser_fallback:
-        command.append("--use-browser-fallback")
     return command
 
 
@@ -844,7 +974,6 @@ def tool_run_discovery_searches(args):
                     _isolated_discovery_command(
                         search_id,
                         enrichment_limit,
-                        args.get("use_browser_fallback") is True,
                     ),
                     capture_output=True,
                     text=True,
@@ -1302,7 +1431,7 @@ TOOLS = {
         "handler": tool_restore_company,
     },
     "hunter_research_company": {
-        "description": "Use the signed-in Hunter Chrome profile to research a company. Blank fields are filled automatically; conflicting source-backed values are saved as reviewable suggestions.",
+        "description": "Research one company with current public evidence using OpenAI web research. Blank fields are filled automatically and conflicting source-backed values become reviewable suggestions.",
         "inputSchema": {
             "type": "object",
             "properties": {"id": {"type": "string"}},
@@ -1353,6 +1482,18 @@ TOOLS = {
         },
         "handler": tool_check_company_postings,
     },
+    "hunter_check_tracked_company_postings": {
+        "description": "Check tracked, interest-eligible company careers pages with an independent subprocess timeout per company. Excluded companies and missing careers URLs are counted compactly. Automatic retries default off because a paid fallback may already have completed.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "ids": {"type": "array", "items": {"type": "string"}},
+                "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 900, "default": 240},
+                "retry_count": {"type": "integer", "minimum": 0, "maximum": 2, "default": 0},
+            },
+        },
+        "handler": tool_check_tracked_company_postings,
+    },
     "hunter_get_company_candidate": {
         "description": "Get full detail for one eligible company posting candidate. Excluded companies require explicit opt-in.",
         "inputSchema": {
@@ -1366,7 +1507,7 @@ TOOLS = {
         "handler": tool_get_company_candidate,
     },
     "hunter_list_company_candidates": {
-        "description": "List eligible posting candidates for explicitly tracked companies by default. Use tracking_status=all to audit discovered-company candidates too. Not-interested and archived companies are omitted by default and counted compactly.",
+        "description": "List review-eligible posting candidates for explicitly tracked companies by default. Use tracking_status=all to audit discovered-company candidates, include_out_of_scope=true to audit roles outside configured location lanes, or include_excluded_companies=true to audit excluded companies.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -1381,6 +1522,7 @@ TOOLS = {
                 "minimum_fit_score": {"type": "integer", "minimum": 0, "maximum": 100},
                 "limit": {"type": "integer", "minimum": 1, "maximum": 100},
                 "include_excluded_companies": {"type": "boolean", "default": False},
+                "include_out_of_scope": {"type": "boolean", "default": False},
             },
         },
         "handler": tool_list_company_candidates,
@@ -1426,7 +1568,6 @@ TOOLS = {
             "properties": {
                 "id": {"type": "string", "description": "Configured Discovery search id."},
                 "enrichment_limit": {"type": "integer", "minimum": 0, "maximum": 250, "default": 100},
-                "use_browser_fallback": {"type": "boolean", "default": False},
             },
             "required": ["id"],
         },
@@ -1443,7 +1584,6 @@ TOOLS = {
                     "description": "Search ids to run. Omit to run every configured search.",
                 },
                 "enrichment_limit": {"type": "integer", "minimum": 0, "maximum": 250, "default": 100},
-                "use_browser_fallback": {"type": "boolean", "default": False},
                 "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 600, "default": 180},
                 "retry_count": {"type": "integer", "minimum": 0, "maximum": 2, "default": 0},
             },
@@ -1547,6 +1687,7 @@ OPEN_WORLD_TOOLS = {
     "hunter_ingest_posting",
     "hunter_research_company",
     "hunter_check_company_postings",
+    "hunter_check_tracked_company_postings",
     "hunter_run_discovery_search",
     "hunter_run_discovery_searches",
     "hunter_refresh_discovery_candidates",

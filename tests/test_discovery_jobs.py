@@ -117,7 +117,7 @@ class HunterDiscoveryJobsTest(unittest.TestCase):
 
         def fake_discovery(search_id, **kwargs):
             self.assertEqual(search_id, "DS0001")
-            self.assertFalse(kwargs["use_browser_fallback"])
+            self.assertEqual(set(kwargs), {"enrichment_limit", "progress"})
             kwargs["progress"](
                 {
                     "phase": "searching",

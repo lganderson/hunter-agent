@@ -45,14 +45,12 @@ def main(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("search_id")
     parser.add_argument("--enrichment-limit", type=int, default=100)
-    parser.add_argument("--use-browser-fallback", action="store_true")
     args = parser.parse_args(argv)
     sqlite_store.initialize()
     try:
         result = discovery.continue_discovery(
             args.search_id,
             enrichment_limit=max(0, min(250, args.enrichment_limit)),
-            use_browser_fallback=args.use_browser_fallback,
         )
         print(json.dumps(compact_result(result), sort_keys=True))
     except Exception as exc:  # noqa: BLE001 - parent process records this search independently.

@@ -38,7 +38,6 @@ The older files in `scripts/` are still supported as thin wrappers and implement
 - `hunter/applications.py`: posting/application update operations.
 - `hunter/companies.py`: career-site adapters, canonical candidate normalization, deduplication, availability verification, and scan telemetry.
 - `hunter/discovery.py`: saved open-web search definitions, automatic multi-source retrieval, optional link capture, employer-page extraction, criteria filtering, fit scoring, and posting ingestion.
-- `hunter/browser_discovery.py`: dedicated Hunter Chrome window discovery, paced Google/LinkedIn search tabs, visible result extraction, challenge detection, and temporary-tab cleanup.
 - `hunter/app_state.py`: runtime JSON serialization for the dashboard API.
 - `hunter/mcp_server.py`: dependency-free stdio MCP server for agent access.
 - `hunter/commands.py`: top-level command dispatcher used by `hunter.py`.
@@ -117,19 +116,17 @@ company, candidate, or posting that produced it.
 A local run expands every lane into predefined web-search
 strategies for known ATS domains, direct posting pages across the web, and
 LinkedIn job URLs. It does not invoke watched-company career sources or the
-Companies-mode adapters. Retrieval uses the dedicated Hunter Chrome window:
-Google supplies open-web and ATS result links, while LinkedIn uses the signed-in
-jobs search. The bridge identifies that profile by a local Hunter marker tab,
-does not read cookies or credentials, paces requests, closes temporary tabs, and
-stops on verification challenges. Each lane reads two Google pages for each
-open-web strategy and two LinkedIn result batches. The common `technical program
+Companies-mode adapters. Retrieval combines configured OpenAI web search,
+Adzuna, and supported ATS inventories. Each provider is isolated and reports
+its own attribution and errors. The common `technical program
 manager` definition expands into a bounded Boolean group of senior, staff,
 principal, technical-project, and engineering-program titles. Up to 200 unique
 raw URLs are deduplicated and validated; challenged and collection pages are
 rejected, individual posting pages are extracted, and location/work-mode
 criteria are applied locally. Qualified results run through the shared fit
-scorer before the strongest 50 are persisted. LinkedIn card details produce a
-partial result until an employer URL or copied posting content is available.
+scorer before the strongest 50 are persisted. Search results without usable
+employer posting detail remain partial until a supported source or copied
+posting content provides the requirements.
 Ingestion creates a normal posting and retains a manual posting snapshot when
 description text is available.
 

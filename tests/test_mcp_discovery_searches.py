@@ -60,7 +60,6 @@ class McpDiscoverySearchesTest(unittest.TestCase):
         run.assert_called_once_with(
             "DS0001",
             enrichment_limit=25,
-            use_browser_fallback=False,
         )
         self.assertEqual(payload["new_count"], 2)
         self.assertEqual(payload["captured"][0]["id"], "DC0001")

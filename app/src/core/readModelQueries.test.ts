@@ -151,15 +151,22 @@ describe("read model candidate query foundation", () => {
         search: " Product Platform ",
         status: ["Pursued", "new", "NEW"],
         minimumFitScore: 65,
-        companyId: "cp0007",
+        companyIds: ["cp0007", "CP0008"],
+        interestStatuses: ["Neutral", "interested"],
         trackingStatus: "Tracked",
-        includeExcludedCompanies: true
+        fitBand: "recommended",
+        latestOnly: true,
+        laneMatchOnly: true,
+        sort: "last_seen",
+        direction: "asc",
+        includeExcludedCompanies: true,
+        includeOutOfScope: true
       },
       { searchId: "ds0005" }
     );
 
     expect(query.toString()).toBe(
-      "limit=75&cursor=opaque-cursor&search=product+platform&status=new&status=pursued&minimum_fit_score=65&company_id=CP0007&tracking_status=tracked&include_excluded_companies=true&search_id=DS0005"
+      "limit=75&cursor=opaque-cursor&search=product+platform&status=new&status=pursued&minimum_fit_score=65&company_id=CP0007&company_id=CP0008&interest_status=interested&interest_status=neutral&tracking_status=tracked&fit_band=recommended&latest_only=true&lane_match_only=true&sort=last_seen&direction=asc&include_excluded_companies=true&include_out_of_scope=true&search_id=DS0005"
     );
   });
 

@@ -13,6 +13,10 @@ function normalizeStatuses(status: CandidateListFilters["status"]): readonly str
   return [...new Set(values.map(value => value.trim().toLowerCase()).filter(Boolean))].sort();
 }
 
+function normalizeValues(values: readonly string[] | undefined, transform: (value: string) => string) {
+  return [...new Set((values || []).map(transform).filter(Boolean))].sort();
+}
+
 export function normalizeCandidateListFilters(
   filters: CandidateListFilters = {}
 ): NormalizedCandidateListFilters {
@@ -32,8 +36,16 @@ export function normalizeCandidateListFilters(
     statuses: normalizeStatuses(filters.status),
     minimumFitScore,
     companyId: filters.companyId?.trim().toUpperCase() ?? "",
+    companyIds: normalizeValues(filters.companyIds, value => value.trim().toUpperCase()),
+    interestStatuses: normalizeValues(filters.interestStatuses, value => value.trim().toLowerCase()),
     trackingStatus: filters.trackingStatus?.trim().toLowerCase() ?? "",
-    includeExcludedCompanies: filters.includeExcludedCompanies === true
+    fitBand: filters.fitBand || "all",
+    latestOnly: filters.latestOnly === true,
+    laneMatchOnly: filters.laneMatchOnly === true,
+    sort: filters.sort || "fit",
+    direction: filters.direction || "desc",
+    includeExcludedCompanies: filters.includeExcludedCompanies === true,
+    includeOutOfScope: filters.includeOutOfScope === true
   };
 }
 

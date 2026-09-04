@@ -224,8 +224,7 @@ for smaller employers that may not have a relevant opening on the major boards
 yet. Choose a focus, employee-size bands, and one or more source families:
 startup directories, venture portfolios, and public company profiles. Hunter
 uses the configured OpenAI token with the cost-sensitive `gpt-5.6-luna`
-Responses API web-search tool and allowed-domain filters instead of requiring
-the signed-in Hunter Chrome profile. Each source
+Responses API web-search tool and allowed-domain filters. Each source
 request searches the focus terms as independent lanes, keeps at most two
 results per lane, uses low search context, requests a two-call web-search
 budget, and returns at most twelve company
@@ -279,13 +278,11 @@ companies. Each saved definition owns one or more search lanes. A lane has its
 own label, location, and any combination of on-site, hybrid, and remote work
 modes. One **Search now** action runs every configured lane through Hunter's
 built-in web strategies for direct posting pages, major ATS boards, and
-LinkedIn job postings. Discovery uses the dedicated, signed-in Hunter Chrome
-profile for Google and LinkedIn searches. Searches are paced, temporary tabs
-are closed after result links are collected, and Hunter stops if either site
-asks for verification. This does not scan the watched-company sources
+LinkedIn job postings. Discovery combines configured OpenAI web search, Adzuna,
+and supported ATS inventories without controlling a signed-in browser. Each
+provider reports its own result and errors independently. This does not scan the watched-company sources
 owned by Companies mode. For example, one definition can combine a Minnesota
-lane across all work modes with a U.S.-wide remote-only lane. Hunter
-searches two Google pages and two LinkedIn result batches per lane. A saved
+lane across all work modes with a U.S.-wide remote-only lane. A saved
 `technical program manager` search expands into a bounded set of senior, staff,
 principal, technical-project, and engineering-program variants without adding
 separate user-facing lanes or source controls. Hunter deduplicates up to 200

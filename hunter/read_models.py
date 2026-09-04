@@ -119,10 +119,14 @@ def _truthy_query(query, name):
 
 
 def _status_values(query):
+    return _query_values(query, "status", transform=str.lower)
+
+
+def _query_values(query, name, transform=lambda value: value):
     values = []
-    for raw in (query or {}).get("status") or []:
+    for raw in (query or {}).get(name) or []:
         for value in str(raw).split(","):
-            normalized = storage.clean(value).lower()
+            normalized = transform(storage.clean(value))
             if normalized and normalized not in values:
                 values.append(normalized)
     return values
@@ -207,6 +211,8 @@ def _candidate_identity(candidate):
     for url in urls:
         requisitions.update(company_store.normalized_requisition_ids(url))
         identity_keys.update(company_store.posting_identity_keys(url))
+    requisitions.update(company_store.normalized_source_requisition_ids(candidate.get("source_job_id", "")))
+    identity_keys.update(f"requisition:{value}" for value in requisitions)
     return requisitions, identity_keys
 
 
@@ -403,7 +409,15 @@ class CandidateReadContext:
             company = company_by_id.get(company_id)
             if candidate_eligibility.company_is_excluded(company):
                 excluded_company_ids.add(row.get("id", ""))
-            row["review_state"] = company_store.candidate_review_state(row)
+            row["qualification_status"], row["qualification_reason"] = company_store.candidate_qualification(
+                row,
+                searches,
+            )
+            row["review_state"] = company_store.candidate_review_state(row, searches)
+            row["lane_match"] = discovery_store.candidate_lane_match(
+                {**row, "description_text": row.get("description_excerpt", "")},
+                searches,
+            )
             row_identity = _candidate_identity(row)
             row["requisition_ids"] = sorted(row_identity[0])
             tracked = tracked_context_by_company_id.get(company_id)
@@ -491,14 +505,23 @@ def _query_filters(query, pool):
         "minimum_fit_score": _minimum_fit(query),
         "tracking_status": _first_with_alias(query, "tracking_status", "tracking").lower(),
         "company_id": _first(query, "company_id").upper(),
+        "company_ids": _query_values(query, "company_id", transform=str.upper),
+        "interest_statuses": _query_values(query, "interest_status", transform=str.lower),
+        "fit_band": _first(query, "fit_band", "all").lower(),
+        "latest_only": _truthy_query(query, "latest_only"),
+        "lane_match_only": _truthy_query(query, "lane_match_only"),
+        "sort": _first(query, "sort", "fit").lower(),
+        "direction": _first(query, "direction", "desc").lower(),
         "include_excluded_companies": _truthy_query(query, "include_excluded_companies"),
+        "include_out_of_scope": _truthy_query(query, "include_out_of_scope") if pool == "company" else False,
         "search_id": search_id,
     }
 
 
-def _candidate_matches_filters(row, company, filters):
+def _candidate_matches_filters(row, company, filters, include_status=True):
     if (
-        filters["status"]
+        include_status
+        and filters["status"]
         and storage.clean(row.get("canonical_status") or row.get("status", "")).lower()
         not in filters["status"]
     ):
@@ -511,7 +534,34 @@ def _candidate_matches_filters(row, company, filters):
         != filters["tracking_status"]
     ):
         return False
-    if filters["company_id"] and storage.clean(row.get("company_id", "")).upper() != filters["company_id"]:
+    if filters["company_ids"] and storage.clean(row.get("company_id", "")).upper() not in filters["company_ids"]:
+        return False
+    if (
+        filters["interest_statuses"]
+        and storage.clean((company or {}).get("interest_status", "")).lower()
+        not in filters["interest_statuses"]
+    ):
+        return False
+    fit_score = _fit_score(row)
+    if filters["fit_band"] == "strong" and (fit_score < 70 or row.get("review_state") != "ready"):
+        return False
+    if filters["fit_band"] == "recommended" and (fit_score < 45 or row.get("review_state") != "ready"):
+        return False
+    if filters["fit_band"] == "low" and fit_score >= 45:
+        return False
+    if filters["latest_only"] and (
+        row.get("status") != "new"
+        or (
+            (company or {}).get("last_checked_at")
+            and row.get("last_seen_at") != (company or {}).get("last_checked_at")
+        )
+    ):
+        return False
+    if (
+        filters["lane_match_only"]
+        and not row.get("lane_match")
+        and row.get("review_state") != "needs-qualification"
+    ):
         return False
     if filters["search"]:
         text = " ".join(
@@ -526,6 +576,20 @@ def _candidate_matches_filters(row, company, filters):
         if filters["search"] not in text:
             return False
     return True
+
+
+def _candidate_sort_key(row, company, sort):
+    if sort == "title":
+        primary = storage.clean(row.get("title", "")).lower()
+    elif sort == "company":
+        primary = storage.clean((company or {}).get("name", "")).lower()
+    elif sort == "status":
+        primary = storage.clean(row.get("canonical_status") or row.get("status", "")).lower()
+    elif sort == "last_seen":
+        primary = row.get("last_seen_at") or row.get("first_seen_at") or row.get("captured_at", "")
+    else:
+        primary = _fit_score(row)
+    return primary, storage.clean(row.get("id", ""))
 
 
 def _facet_values(rows, context):
@@ -554,10 +618,6 @@ def _facet_values(rows, context):
 
 def _company_list_item(row, context):
     company = context.company_by_id.get(storage.clean(row.get("company_id", "")).upper())
-    lane_match = discovery_store.candidate_lane_match(
-        {**row, "description_text": row.get("description_excerpt", "")},
-        context.searches,
-    )
     return {
         "id": row.get("id", ""),
         "company_id": row.get("company_id", ""),
@@ -578,10 +638,12 @@ def _company_list_item(row, context):
         "fit_score": row.get("fit_score", ""),
         "fit_summary": storage.clean(row.get("fit_summary", ""))[:LIST_DESCRIPTION_LIMIT],
         "fit_checked_at": row.get("fit_checked_at", ""),
+        "qualification_status": row.get("qualification_status", ""),
+        "qualification_reason": row.get("qualification_reason", ""),
         "review_state": row.get("review_state", ""),
         "matching_posting_ids": row.get("matching_posting_ids", []),
         "discovery_candidate_id": row.get("discovery_candidate_id", ""),
-        "lane_match": lane_match,
+        "lane_match": row.get("lane_match", ""),
         "description_excerpt": storage.clean(row.get("description_excerpt", ""))[:LIST_DESCRIPTION_LIMIT],
         "description_truncated": len(storage.clean(row.get("description_excerpt", ""))) > LIST_DESCRIPTION_LIMIT,
     }
@@ -642,6 +704,12 @@ def candidate_page(pool, query=None, context=None):
         raise ReadModelError(404, "Unknown candidate pool.")
     context = context or CandidateReadContext.read()
     filters = _query_filters(query, pool)
+    if filters["fit_band"] not in {"all", "strong", "recommended", "low"}:
+        raise ReadModelError(400, "fit_band must be all, strong, recommended, or low.")
+    if filters["sort"] not in {"title", "company", "fit", "status", "last_seen"}:
+        raise ReadModelError(400, "sort is not supported.")
+    if filters["direction"] not in {"asc", "desc"}:
+        raise ReadModelError(400, "direction must be asc or desc.")
     limit = _page_limit(query)
     # Saved-search selection configures acquisition and response context only. It
     # must never bind a cursor for the one global Discovery review queue.
@@ -664,6 +732,9 @@ def candidate_page(pool, query=None, context=None):
         for row in all_rows
         if row.get("id", "") not in ignored_ids
         if filters["include_excluded_companies"] or row.get("id", "") not in excluded_ids
+        if pool != "company"
+        or filters["include_out_of_scope"]
+        or row.get("qualification_status") != "ineligible"
     ]
     canonical_rows = [row for row in eligible_rows if row.get("is_canonical", True)]
     filtered_rows = [
@@ -675,7 +746,24 @@ def candidate_page(pool, query=None, context=None):
             filters,
         )
     ]
-    filtered_rows.sort(key=lambda row: (-_fit_score(row), row.get("title", "").lower(), row.get("id", "")))
+    filtered_rows.sort(
+        key=lambda row: _candidate_sort_key(
+            row,
+            context.company_by_id.get(storage.clean(row.get("company_id", "")).upper()),
+            filters["sort"],
+        ),
+        reverse=filters["direction"] == "desc",
+    )
+    status_facet_rows = [
+        row
+        for row in canonical_rows
+        if _candidate_matches_filters(
+            row,
+            context.company_by_id.get(storage.clean(row.get("company_id", "")).upper()),
+            filters,
+            include_status=False,
+        )
+    ]
     selected = filtered_rows[offset : offset + limit]
     next_offset = offset + len(selected)
     has_more = next_offset < len(filtered_rows)
@@ -692,9 +780,17 @@ def candidate_page(pool, query=None, context=None):
             "filtered": len(filtered_rows),
             "returned": len(selected),
             "excluded_companies": len(excluded_ids),
+            "out_of_scope": sum(
+                row.get("qualification_status") == "ineligible"
+                for row in all_rows
+                if row.get("id", "") not in excluded_ids
+            ) if pool == "company" else 0,
             "ignored_sources": len(ignored_ids),
         },
-        "facets": _facet_values(canonical_rows, context),
+        "facets": {
+            **_facet_values(canonical_rows, context),
+            "statuses": _facet_values(status_facet_rows, context)["statuses"],
+        },
         "page": {
             "limit": limit,
             "offset": offset,
