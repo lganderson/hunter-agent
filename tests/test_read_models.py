@@ -108,6 +108,36 @@ def basic_context(revision=17):
 
 
 class CandidateReadModelTest(unittest.TestCase):
+    def test_discovery_filters_facets_and_sort_cover_rows_beyond_first_page(self):
+        first = company("CO0001")
+        last = {**company("CO0002"), "industry": "Health, Wellness", "company_size": "1,001-5,000"}
+        rows = [discovery_candidate(f"DC{index:04d}", f"CO{index + 10:04d}", fit_score=90) for index in range(59)]
+        other_companies = [company(f"CO{index + 10:04d}") for index in range(59)]
+        target = discovery_candidate("DC0059", "CO0002", fit_score=1)
+        target.update(title="AAA global sort target", source_platform="adzuna")
+        rows.append(target)
+        context = read_models.CandidateReadContext.from_rows(
+            companies=[first, last, *other_companies], applications=[], searches=searches(),
+            company_candidates=[], discovery_candidates=rows, revision=1,
+        )
+        page = read_models.discovery_candidate_page(context=context)
+        self.assertEqual(len(page["items"]), 50)
+        self.assertNotIn(target["id"], [row["id"] for row in page["items"]])
+        self.assertIn("CO0002", [facet["value"] for facet in page["facets"]["companies"]])
+        self.assertIn("1,001-5,000", [facet["value"] for facet in page["facets"]["sizes"]])
+        for query in [
+            {"company_id": ["CO0002"]}, {"industry": ["Health, Wellness"]},
+            {"size": ["1,001-5,000"]}, {"source": ["Jobs by Adzuna"]},
+            {"search": ["AAA global sort target"]},
+        ]:
+            with self.subTest(query=query):
+                filtered = read_models.discovery_candidate_page(query, context=context)
+                self.assertEqual([row["id"] for row in filtered["items"]], [target["id"]])
+                self.assertEqual(filtered["counts"]["filtered"], 1)
+                self.assertFalse(filtered["page"]["has_more"])
+        sorted_page = read_models.discovery_candidate_page({"sort": ["candidate"], "direction": ["asc"]}, context=context)
+        self.assertEqual(sorted_page["items"][0]["id"], target["id"])
+
     def test_compact_detail_routes_return_full_rows_with_stable_revision(self):
         cases = [
             (
@@ -603,9 +633,13 @@ class CandidateReadModelTest(unittest.TestCase):
                 "company_id": "",
                 "company_ids": [],
                 "interest_statuses": [],
+                "industries": [],
+                "sizes": [],
+                "sources": [],
                 "fit_band": "all",
                 "latest_only": False,
                 "lane_match_only": False,
+                "reviewable_only": False,
                 "sort": "fit",
                 "direction": "desc",
                 "include_excluded_companies": False,

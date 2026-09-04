@@ -193,7 +193,7 @@ class AppHandler(SimpleHTTPRequestHandler):
             try:
                 self.send_json(read_model_route(query))
             except read_models.ReadModelError as exc:
-                self.send_json({"error": exc.message}, status=exc.status)
+                self.send_json({"error": exc.message, **({"code": exc.code} if exc.code else {})}, status=exc.status)
             return
         if path == "/api/app-state":
             include_excluded_companies = (

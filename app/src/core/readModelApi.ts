@@ -12,24 +12,28 @@ import type {
 
 export class ReadModelApiError extends Error {
   readonly status: number;
+  readonly code: string;
 
-  constructor(status: number, message: string) {
+  constructor(status: number, message: string, code = "") {
     super(message);
     this.name = "ReadModelApiError";
     this.status = status;
+    this.code = code;
   }
 }
 
 async function readJson<T>(response: Response): Promise<T> {
   if (!response.ok) {
     let message = `HTTP ${response.status}`;
+    let code = "";
     try {
-      const result = (await response.json()) as { error?: string };
+      const result = (await response.json()) as { error?: string; code?: string };
       message = result.error || message;
+      code = result.code || "";
     } catch {
       // Preserve the status fallback for non-JSON server errors.
     }
-    throw new ReadModelApiError(response.status, message);
+    throw new ReadModelApiError(response.status, message, code);
   }
   return response.json() as Promise<T>;
 }
@@ -50,10 +54,14 @@ export function candidateListSearchParams(
   if (normalized.companyId) query.set("company_id", normalized.companyId);
   normalized.companyIds.forEach(companyId => query.append("company_id", companyId));
   normalized.interestStatuses.forEach(status => query.append("interest_status", status));
+  normalized.industries.forEach(value => query.append("industry", value));
+  normalized.sizes.forEach(value => query.append("size", value));
+  normalized.sources.forEach(value => query.append("source", value));
   if (normalized.trackingStatus) query.set("tracking_status", normalized.trackingStatus);
   if (normalized.fitBand !== "all") query.set("fit_band", normalized.fitBand);
   if (normalized.latestOnly) query.set("latest_only", "true");
   if (normalized.laneMatchOnly) query.set("lane_match_only", "true");
+  if (normalized.reviewableOnly) query.set("reviewable_only", "true");
   if (normalized.sort !== "fit") query.set("sort", normalized.sort);
   if (normalized.direction !== "desc") query.set("direction", normalized.direction);
   if (normalized.includeExcludedCompanies) query.set("include_excluded_companies", "true");

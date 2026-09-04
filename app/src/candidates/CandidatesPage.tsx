@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { discoveryFiltersFromParams } from "./discoveryFilters";
 import { useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import { BriefcaseIcon, ExternalIcon, FilterIcon, SearchIcon, XIcon } from "../components/Icons";
@@ -61,11 +62,6 @@ const MAX_BULK_INGEST = 25;
 type CandidateSortKey = "title" | "company" | "fit" | "status" | "last_seen";
 const CANDIDATE_SORT_KEYS: CandidateSortKey[] = ["title", "company", "fit", "status", "last_seen"];
 
-function legacyDiscoveryFilterForQuery(value: string | null) {
-  if (value === "recommended" || value === "new") return "needs-decision";
-  return value || "needs-decision";
-}
-
 export function CandidatesPage({ data: shellData, refresh, applyCompanyCandidateUpdates, applyDiscoveryCandidateUpdate, enrichmentJob = null, startDiscoveryJob, startEnrichmentJob }: CandidateReviewPageProps) {
   const { params: viewParams, updateParams: updateViewParams } = usePersistentViewParams("candidates");
   const mode = viewParams.get("mode") === "discovery" ? "discovery" : "companies";
@@ -98,11 +94,7 @@ export function CandidatesPage({ data: shellData, refresh, applyCompanyCandidate
     sort: sort.key,
     direction: sort.direction
   }, mode === "companies");
-  const discoveryResultFilter = legacyDiscoveryFilterForQuery(viewParams.get("discovery_status"));
-  const discoveryCandidatesQuery = useDiscoveryCandidateList({
-    search: viewParams.get("discovery_q") || "",
-    status: discoveryResultFilter === "needs-decision" ? "new" : discoveryResultFilter
-  }, {
+  const discoveryCandidatesQuery = useDiscoveryCandidateList(discoveryFiltersFromParams(viewParams), {
     searchId: viewParams.get("search_id") || ""
   }, mode === "discovery");
   const data = useMemo<AppState>(() => ({
@@ -503,6 +495,7 @@ export function CandidatesPage({ data: shellData, refresh, applyCompanyCandidate
                 .map(facet => [facet.value, facet.count])
             )}
             filteredTotal={discoveryCandidatesQuery.data?.pages[0]?.counts.filtered}
+            facets={discoveryCandidatesQuery.data?.pages[0]?.facets}
           />
         </article>
       </section>

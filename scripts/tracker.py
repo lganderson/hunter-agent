@@ -286,12 +286,12 @@ def cmd_add(args):
         }
     )
 
-    if args.make_note:
-        path, created = make_posting_note(row)
-        print(("Created" if created else "Reused") + f" posting note: {path}")
-
     rows.append(row)
     write_rows(APPLICATIONS, APPLICATION_FIELDS, rows)
+    if args.make_note:
+        path, created = make_posting_note(row)
+        write_rows(APPLICATIONS, APPLICATION_FIELDS, rows)
+        print(("Created" if created else "Reused") + f" posting note: {path}")
     print(f"Added {row['id']}: {row['company']} - {row['role']}")
 
 

@@ -5,7 +5,6 @@ import html
 import json
 import os
 import re
-import shutil
 import string
 import sys
 import zlib
@@ -275,8 +274,13 @@ def save_resume_upload(filename, content_base64):
 def delete_resume():
     settings = load_settings()
     settings.pop("resume", None)
-    if resume_dir_path().exists():
-        shutil.rmtree(resume_dir_path())
+    # Application-specific versions live below resume/versions and must survive
+    # removal of the current source resume, just as they survive replacement.
+    for current in resume_dir_path().glob("current*"):
+        if current.is_file():
+            current.unlink()
+    if resume_dir_path().exists() and not any(resume_dir_path().iterdir()):
+        resume_dir_path().rmdir()
     write_settings(settings)
     return settings_status()
 

@@ -41,6 +41,7 @@ class CandidateSourcesTest(unittest.TestCase):
         }
 
         with (
+            patch("hunter.candidate_sources.agent._settings", return_value={"api_base": "https://example.invalid", "token": "synthetic"}),
             patch("hunter.candidate_sources.ats_inventory_results", return_value=[ats_result]),
             patch("hunter.candidate_sources.settings.adzuna_credentials", return_value={"app_id": "", "app_key": ""}),
         ):

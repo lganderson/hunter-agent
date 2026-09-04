@@ -6,6 +6,7 @@ export stay lossless while the app gets local transactional persistence.
 
 import hashlib
 import json
+import re
 import sqlite3
 import threading
 from contextlib import contextmanager
@@ -1075,6 +1076,20 @@ def count_rows(table):
         return connection.execute(f"SELECT COUNT(*) AS total FROM {quote_identifier(table)}").fetchone()["total"]
 
 
+class TableSnapshot(list):
+    """Editable rows plus their read baseline for conflict-aware runtime saves.
+
+    Plain lists still denote an explicit replacement (fixtures and imports).
+    A runtime read/save pair only writes changed fields and never replaces rows
+    added by another request while the caller was working or fetching a URL.
+    """
+
+    def __init__(self, table, rows):
+        super().__init__(rows)
+        self.table = table
+        self.original = {row["id"]: dict(row) for row in rows}
+
+
 def read_table(table):
     ensure_initialized()
     _, fields = TABLES[table]
@@ -1083,11 +1098,123 @@ def read_table(table):
         rows = connection.execute(
             f"SELECT {quoted_fields} FROM {quote_identifier(table)} ORDER BY \"id\""
         ).fetchall()
-    return [{field: storage.clean(row[field]) for field in fields} for row in rows]
+    return TableSnapshot(table, [{field: storage.clean(row[field]) for field in fields} for row in rows])
+
+
+def _sync_next_action(connection, application_id):
+    from .actions import select_next_action
+
+    row = connection.execute("SELECT * FROM applications WHERE id = ?", (application_id,)).fetchone()
+    if row is None:
+        return None
+    application = dict(row)
+    related = [dict(row) for row in connection.execute(
+        "SELECT * FROM actions WHERE application_id = ?", (application_id,)
+    )]
+    selected = select_next_action(application, related) if application.get("stage") != "closed" else None
+    values = {
+        "next_action_id": (selected or {}).get("id", ""),
+        "next_action": (selected or {}).get("title", ""),
+        "next_action_date": (selected or {}).get("due_date", ""),
+    }
+    connection.execute(
+        "UPDATE applications SET next_action_id = ?, next_action = ?, next_action_date = ? WHERE id = ?",
+        (*values.values(), application_id),
+    )
+    return {**application, **values}
+
+
+def sync_next_action(application_id):
+    with write_transaction() as connection:
+        return _sync_next_action(connection, storage.clean(application_id).upper())
+
+
+def _save_table_snapshot(table, rows):
+    if rows.table != table:
+        raise ValueError("Cannot save a snapshot into a different table.")
+    fields = TABLES[table][1]
+    submitted = {row["id"]: row for row in rows}
+    if len(submitted) != len(rows):
+        raise ValueError("Duplicate row ids in the submitted changes.")
+    prefix = {"applications": "A", "actions": "T", "contacts": "C", "interviews": "I"}[table]
+    refreshed = []
+    with write_transaction() as connection:
+        current = {row["id"]: dict(row) for row in connection.execute(f"SELECT * FROM {quote_identifier(table)}")}
+        affected_applications = set()
+        for row_id, original in rows.original.items():
+            row = submitted.get(row_id)
+            changes = {
+                field: storage.clean(row.get(field, ""))
+                for field in fields if field != "id" and row is not None
+                and storage.clean(row.get(field, "")) != original[field]
+            }
+            if row is not None and not changes:
+                continue
+            latest = current.get(row_id)
+            compared_fields = changes if row is not None else original
+            if latest is None or any(
+                latest[field] != original[field]
+                and (row is None or latest[field] != changes[field])
+                for field in compared_fields
+            ):
+                raise ValueError(f"{row_id} changed while you were editing. Reload it and try again.")
+            if row is None:
+                connection.execute(f"DELETE FROM {quote_identifier(table)} WHERE id = ?", (row_id,))
+            else:
+                assignments = ", ".join(f'{quote_field(field, fields)} = ?' for field in changes)
+                connection.execute(
+                    f"UPDATE {quote_identifier(table)} SET {assignments} WHERE id = ?", (*changes.values(), row_id)
+                )
+            if table == "actions":
+                affected_applications.add(latest["application_id"])
+                if row is not None:
+                    affected_applications.add(row.get("application_id", ""))
+            elif table == "applications" and row is not None:
+                identity = ({field: changes.get(field, latest[field]) for field in ("company", "role")}
+                            if {"company_id", "company", "role"} & changes.keys() else {})
+                if identity:
+                    assignments = ", ".join(f'"{field}" = ?' for field in identity)
+                    connection.execute(f"UPDATE actions SET {assignments} WHERE application_id = ?", (*identity.values(), row_id))
+                if {"stage", "next_action_id"} & changes.keys():
+                    affected_applications.add(row_id)
+        # Allocate IDs under the write lock. Keep provisional IDs when available
+        # for legacy callers, and update caller-owned rows only after commit.
+        reserved = set(current) | set(submitted)
+        highest = max((int(match.group(1)) for value in reserved
+                       if (match := re.fullmatch(rf"{prefix}(\d+)", value))), default=0)
+        assigned = {}
+        for row_id, row in submitted.items():
+            if row_id in rows.original:
+                assigned[row_id] = row_id
+                continue
+            assigned_id = row_id
+            if assigned_id in current:
+                highest += 1
+                assigned_id = f"{prefix}{highest:04d}"
+            assigned[row_id] = assigned_id
+            values = {field: storage.clean(row.get(field, "")) for field in fields}
+            values["id"] = assigned_id
+            quoted = ", ".join(quote_field(field, fields) for field in fields)
+            placeholders = ", ".join("?" for _ in fields)
+            connection.execute(f"INSERT INTO {quote_identifier(table)} ({quoted}) VALUES ({placeholders})", tuple(values.values()))
+            if table == "actions":
+                affected_applications.add(values["application_id"])
+        for application_id in affected_applications:
+            _sync_next_action(connection, application_id)
+        for row_id, row in submitted.items():
+            saved = connection.execute(f"SELECT * FROM {quote_identifier(table)} WHERE id = ?", (assigned[row_id],)).fetchone()
+            if saved is not None:
+                refreshed.append((row, {field: storage.clean(saved[field]) for field in fields}))
+    for row, saved in refreshed:
+        row.update(saved)
+    rows.original = {row["id"]: dict(row) for row in rows}
 
 
 def write_table(table, rows):
     ensure_initialized()
+    if isinstance(rows, TableSnapshot):
+        _save_table_snapshot(table, rows)
+        return
     _, fields = TABLES[table]
     placeholders = ", ".join("?" for _ in fields)
     quoted_fields = ", ".join(quote_field(field, fields) for field in fields)
@@ -2182,6 +2309,7 @@ def update_action_status(action_id, status):
             (status, completed_date, wanted),
         )
         after = {**before, "status": status, "completed_date": completed_date}
+        _sync_next_action(connection, after["application_id"])
         connection.execute(
             "INSERT INTO events(entity_type, entity_id, event_type, created_at, data_json) "
             "VALUES (?, ?, ?, ?, ?)",

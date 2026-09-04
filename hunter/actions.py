@@ -214,6 +214,8 @@ def sync_next_action(application_id):
     wanted = storage.clean(application_id).upper()
     if not wanted:
         return None
+    if repository.using_sqlite():
+        return sqlite_store.sync_next_action(wanted)
 
     applications = repository.read_applications()
     target = None

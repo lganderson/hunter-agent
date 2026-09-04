@@ -1,5 +1,6 @@
 import {
   infiniteQueryOptions,
+  keepPreviousData,
   queryOptions,
   useInfiniteQuery,
   useQuery
@@ -40,6 +41,7 @@ export function companyCandidateListQueryOptions(filters: CandidateListFilters =
   const normalized = normalizeCandidateListFilters(filters);
   return infiniteQueryOptions({
     queryKey: readModelQueryKeys.candidateList("company", filters),
+    placeholderData: keepPreviousData,
     enabled,
     initialPageParam: normalized.cursor || undefined,
     queryFn: ({ pageParam, signal }) =>
@@ -57,6 +59,7 @@ export function discoveryCandidateListQueryOptions(
   return infiniteQueryOptions({
     // Saved-search context is intentionally absent: it configures acquisition, not the global review queue.
     queryKey: readModelQueryKeys.candidateList("discovery", filters),
+    placeholderData: keepPreviousData,
     enabled,
     initialPageParam: normalized.cursor || undefined,
     queryFn: ({ pageParam, signal }) =>

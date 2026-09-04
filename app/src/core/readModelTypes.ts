@@ -15,6 +15,7 @@ import type {
 } from "./types";
 
 export type CandidatePool = "company" | "discovery";
+export type CandidateSort = "title" | "company" | "fit" | "status" | "last_seen" | "candidate" | "match" | "industry" | "size" | "source" | "freshness";
 
 export type CandidateListFilters = {
   limit?: number;
@@ -25,11 +26,15 @@ export type CandidateListFilters = {
   companyId?: string;
   companyIds?: readonly string[];
   interestStatuses?: readonly string[];
+  industries?: readonly string[];
+  sizes?: readonly string[];
+  sources?: readonly string[];
   trackingStatus?: string;
   fitBand?: "all" | "strong" | "recommended" | "low";
   latestOnly?: boolean;
   laneMatchOnly?: boolean;
-  sort?: "title" | "company" | "fit" | "status" | "last_seen";
+  reviewableOnly?: boolean;
+  sort?: CandidateSort;
   direction?: "asc" | "desc";
   includeExcludedCompanies?: boolean;
   includeOutOfScope?: boolean;
@@ -52,11 +57,15 @@ export type NormalizedCandidateListFilters = {
   companyId: string;
   companyIds: readonly string[];
   interestStatuses: readonly string[];
+  industries: readonly string[];
+  sizes: readonly string[];
+  sources: readonly string[];
   trackingStatus: string;
   fitBand: "all" | "strong" | "recommended" | "low";
   latestOnly: boolean;
   laneMatchOnly: boolean;
-  sort: "title" | "company" | "fit" | "status" | "last_seen";
+  reviewableOnly: boolean;
+  sort: CandidateSort;
   direction: "asc" | "desc";
   includeExcludedCompanies: boolean;
   includeOutOfScope: boolean;
@@ -136,6 +145,9 @@ export type CandidatePageCounts = {
 };
 
 export type CandidatePageFacets = {
+  industries?: Array<{ value: string; count: number }>;
+  sizes?: Array<{ value: string; count: number }>;
+  sources?: Array<{ value: string; count: number }>;
   statuses: Array<{ value: string; count: number }>;
   tracking: Array<{ value: string; count: number }>;
   companies: Array<{ value: string; label: string; count: number }>;

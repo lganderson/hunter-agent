@@ -10,6 +10,16 @@ from hunter import agent, mcp_server, paths, settings
 
 
 class ResumeSettingsTest(unittest.TestCase):
+    def test_removing_current_resume_preserves_tailored_versions(self):
+        settings.save_resume_upload("resume.txt", base64.b64encode(b"Synthetic resume").decode())
+        version = paths.DATA_DIR / "resume" / "versions" / "A0001" / "RV0001" / "tailored.docx"
+        version.parent.mkdir(parents=True)
+        version.write_bytes(b"Synthetic saved artifact")
+        status = settings.delete_resume()
+        self.assertFalse(status["resume"]["configured"])
+        self.assertFalse((paths.DATA_DIR / "resume" / "current.txt").exists())
+        self.assertEqual(version.read_bytes(), b"Synthetic saved artifact")
+
     def setUp(self):
         self.tempdir = tempfile.TemporaryDirectory()
         self.root = Path(self.tempdir.name)

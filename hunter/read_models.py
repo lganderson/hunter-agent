@@ -55,10 +55,11 @@ DISCOVERY_RUN_SUMMARY_FIELDS = (
 
 
 class ReadModelError(ValueError):
-    def __init__(self, status, message):
+    def __init__(self, status, message, code=""):
         super().__init__(message)
         self.status = status
         self.message = message
+        self.code = code
 
 
 def _copy_fields(row, fields):
@@ -183,7 +184,7 @@ def _decode_cursor(value, pool, revision, fingerprint):
     if payload.get("v") != 1 or payload.get("pool") != pool or payload.get("fingerprint") != fingerprint:
         raise ReadModelError(400, "cursor does not match these filters.")
     if payload.get("revision") != revision:
-        raise ReadModelError(409, "Candidate data changed; reload the first page.")
+        raise ReadModelError(409, "Candidate data changed; reload the first page.", "cursor_expired")
     if offset < 0:
         raise ReadModelError(400, "cursor is invalid.")
     return offset
@@ -507,9 +508,13 @@ def _query_filters(query, pool):
         "company_id": _first(query, "company_id").upper(),
         "company_ids": _query_values(query, "company_id", transform=str.upper),
         "interest_statuses": _query_values(query, "interest_status", transform=str.lower),
+        "industries": [storage.clean(value) for value in (query or {}).get("industry", [])],
+        "sizes": [storage.clean(value) for value in (query or {}).get("size", [])],
+        "sources": [storage.clean(value) for value in (query or {}).get("source", [])],
         "fit_band": _first(query, "fit_band", "all").lower(),
         "latest_only": _truthy_query(query, "latest_only"),
         "lane_match_only": _truthy_query(query, "lane_match_only"),
+        "reviewable_only": _truthy_query(query, "reviewable_only"),
         "sort": _first(query, "sort", "fit").lower(),
         "direction": _first(query, "direction", "desc").lower(),
         "include_excluded_companies": _truthy_query(query, "include_excluded_companies"),
@@ -519,6 +524,13 @@ def _query_filters(query, pool):
 
 
 def _candidate_matches_filters(row, company, filters, include_status=True):
+    for key, value in (
+        ("industries", (company or {}).get("industry", "")),
+        ("sizes", (company or {}).get("company_size", "")),
+        ("sources", _discovery_source_label(row)),
+    ):
+        if filters[key] and value not in filters[key]:
+            return False
     if (
         include_status
         and filters["status"]
@@ -571,6 +583,12 @@ def _candidate_matches_filters(row, company, filters, include_status=True):
                 row.get("work_mode", ""),
                 row.get("source_platform", ""),
                 (company or {}).get("name", ""),
+                (company or {}).get("industry", ""),
+                (company or {}).get("company_size", ""),
+                row.get("fit_summary", ""),
+                row.get("description_excerpt", ""),
+                row.get("description_text", ""),
+                row.get("notes", ""),
             ]
         ).lower()
         if filters["search"] not in text:
@@ -579,7 +597,7 @@ def _candidate_matches_filters(row, company, filters, include_status=True):
 
 
 def _candidate_sort_key(row, company, sort):
-    if sort == "title":
+    if sort in {"title", "candidate"}:
         primary = storage.clean(row.get("title", "")).lower()
     elif sort == "company":
         primary = storage.clean((company or {}).get("name", "")).lower()
@@ -587,9 +605,24 @@ def _candidate_sort_key(row, company, sort):
         primary = storage.clean(row.get("canonical_status") or row.get("status", "")).lower()
     elif sort == "last_seen":
         primary = row.get("last_seen_at") or row.get("first_seen_at") or row.get("captured_at", "")
+    elif sort == "industry":
+        primary = storage.clean((company or {}).get("industry", "")).lower()
+    elif sort == "size":
+        primary = storage.clean((company or {}).get("company_size", "")).lower()
+    elif sort == "source":
+        primary = discovery_store.candidate_source_trust(row, company)["label"].lower()
+    elif sort == "freshness":
+        primary = (row.get("freshness_status", ""), row.get("freshness_checked_at", ""))
     else:
         primary = _fit_score(row)
     return primary, storage.clean(row.get("id", ""))
+
+
+def _discovery_source_label(row):
+    platform = row.get("source_platform") or "manual"
+    if platform == "adzuna":
+        return "Jobs by Adzuna"
+    return re.sub(r"\b\w", lambda match: match[0].upper(), re.sub(r"[-_]+", " ", platform))
 
 
 def _facet_values(rows, context):
@@ -609,7 +642,20 @@ def _facet_values(rows, context):
                 {"value": company_id, "label": (company or {}).get("name", company_id), "count": 0},
             )
             item["count"] += 1
+    additional = {}
+    for key, getter in (
+        ("industries", lambda row, company: (company or {}).get("industry", "")),
+        ("sizes", lambda row, company: (company or {}).get("company_size", "")),
+        ("sources", lambda row, company: _discovery_source_label(row)),
+    ):
+        counts = {}
+        for row in rows:
+            value = getter(row, context.company_by_id.get(storage.clean(row.get("company_id", "")).upper()))
+            if value:
+                counts[value] = counts.get(value, 0) + 1
+        additional[key] = [{"value": value, "count": counts[value]} for value in sorted(counts)]
     return {
+        **additional,
         "statuses": [{"value": key, "count": statuses[key]} for key in sorted(statuses)],
         "tracking": [{"value": key, "count": tracking[key]} for key in sorted(tracking)],
         "companies": sorted(companies.values(), key=lambda item: (-item["count"], item["label"].lower())),
@@ -706,7 +752,7 @@ def candidate_page(pool, query=None, context=None):
     filters = _query_filters(query, pool)
     if filters["fit_band"] not in {"all", "strong", "recommended", "low"}:
         raise ReadModelError(400, "fit_band must be all, strong, recommended, or low.")
-    if filters["sort"] not in {"title", "company", "fit", "status", "last_seen"}:
+    if filters["sort"] not in {"title", "company", "fit", "status", "last_seen", "candidate", "match", "industry", "size", "source", "freshness"}:
         raise ReadModelError(400, "sort is not supported.")
     if filters["direction"] not in {"asc", "desc"}:
         raise ReadModelError(400, "direction must be asc or desc.")
@@ -732,6 +778,10 @@ def candidate_page(pool, query=None, context=None):
         for row in all_rows
         if row.get("id", "") not in ignored_ids
         if filters["include_excluded_companies"] or row.get("id", "") not in excluded_ids
+        if pool != "discovery" or not filters["reviewable_only"]
+        or row.get("status") != "new"
+        or row.get("qualification_status") == "needs-verification"
+        or discovery_store.candidate_lane_match(row, context.searches)
         if pool != "company"
         or filters["include_out_of_scope"]
         or row.get("qualification_status") != "ineligible"

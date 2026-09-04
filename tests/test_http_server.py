@@ -20,6 +20,25 @@ class QuietAppHandler(serve_app.AppHandler):
 
 
 class HunterHttpServerTest(unittest.TestCase):
+    def test_invalid_contact_date_returns_json_validation_error(self):
+        with patch.object(serve_app.repository, "read_contacts", return_value=[]), patch.object(serve_app.repository, "write_contacts") as save:
+            status, _, payload = self.json_request(
+                "POST", "/api/contacts/upsert",
+                json.dumps({"updates": {"name": "Synthetic Contact", "next_follow_up": "bad-date"}}).encode(),
+                {"Content-Type": "application/json"},
+            )
+        self.assertEqual(status, 400)
+        self.assertIn("Invalid date", payload["error"])
+        save.assert_not_called()
+
+    def test_expired_cursor_has_a_distinct_recovery_code(self):
+        def expired(_query):
+            raise serve_app.read_models.ReadModelError(409, "Reload the first page.", "cursor_expired")
+        with patch.dict(serve_app.read_models.READ_MODEL_GET_ROUTES, {"/api/candidates/company": expired}):
+            status, _, payload = self.json_request("GET", "/api/candidates/company?cursor=stale")
+        self.assertEqual(status, 409)
+        self.assertEqual(payload["code"], "cursor_expired")
+
     @classmethod
     def setUpClass(cls):
         cls.server = ThreadingHTTPServer(("127.0.0.1", 0), QuietAppHandler)

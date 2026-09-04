@@ -87,7 +87,7 @@ function candidatePage(pool: "company" | "discovery", items: unknown[], searchId
       out_of_scope: 0,
       ignored_sources: 0
     },
-    facets: { statuses: [], tracking: [], companies: [] },
+    facets: { statuses: [], tracking: [], companies: [] as Array<{ value: string; label: string; count: number }> },
     page: { limit: 50, offset: 0, has_more: false, next_cursor: "" },
     audit: {
       stable_revision: true,
@@ -147,6 +147,71 @@ test("switching the acquisition search preserves the shared Discovery review que
   await expect(page).toHaveURL(/search_id=DS1002/);
   await expect(search).toHaveValue("DS1002");
   await expect(candidateTitles).toHaveText(before);
+});
+
+test("Discovery filters can select a company outside the loaded page and sort through the API", async ({ page }) => {
+  const requests: URLSearchParams[] = [];
+  const base = syntheticAppState.discovery_candidates[0];
+  const target = syntheticAppState.discovery_candidates[1];
+  await page.route("**/api/candidates/discovery?**", route => {
+    const query = new URL(route.request().url()).searchParams;
+    requests.push(query);
+    const selected = query.get("company_id") === target.company_id || query.get("sort") === "candidate" ? target : base;
+    const response = candidatePage("discovery", [{
+      ...selected,
+      company: syntheticAppState.companies.find(company => company.id === selected.company_id),
+      description_truncated: false
+    }]);
+    response.facets.companies = syntheticAppState.companies.map(company => ({
+      value: company.id, label: company.name, count: 1
+    }));
+    return route.fulfill({ json: response });
+  });
+  await page.goto("/candidates?mode=discovery");
+  await expect(page.getByText(base.title, { exact: true })).toBeVisible();
+  const companyFilter = page.locator("details").filter({ has: page.locator("summary", { hasText: /^Company/ }) });
+  await companyFilter.locator("summary").click();
+  await companyFilter.getByRole("checkbox", { name: "All", exact: true }).click();
+  await expect(companyFilter.getByRole("checkbox", { name: "All", exact: true })).not.toBeChecked();
+  const companyName = syntheticAppState.companies.find(company => company.id === target.company_id)!.name;
+  await companyFilter.getByRole("checkbox", { name: companyName, exact: true }).click();
+  await expect(companyFilter.getByRole("checkbox", { name: companyName, exact: true })).toBeChecked();
+  await expect(page.getByText(target.title, { exact: true })).toBeVisible();
+  expect(requests.at(-1)?.getAll("company_id")).toEqual([target.company_id]);
+  await companyFilter.locator("summary").click();
+  await page.getByRole("button", { name: /^Sort by Candidate/ }).click();
+  await expect.poll(() => requests.at(-1)?.get("sort")).toBe("candidate");
+  expect(requests.at(-1)?.get("direction")).toBe("asc");
+});
+
+test("an expired cursor reloads Discovery and allows loading the next page", async ({ page }) => {
+  const cursors: Array<string | null> = [];
+  let expired = false;
+  let recoveredFirstPages = 0;
+  await page.route("**/api/candidates/discovery?**", route => {
+    const cursor = new URL(route.request().url()).searchParams.get("cursor");
+    cursors.push(cursor);
+    if (cursor === "expired") {
+      expired = true;
+      return route.fulfill({ status: 409, json: { error: "Reload the first page", code: "cursor_expired" } });
+    }
+    if (!cursor && expired) recoveredFirstPages += 1;
+    const candidate = syntheticAppState.discovery_candidates[cursor ? 1 : 0];
+    const response = candidatePage("discovery", [{
+      ...candidate,
+      company: syntheticAppState.companies.find(company => company.id === candidate.company_id),
+      description_truncated: false
+    }]);
+    response.revision = expired ? 2 : 1;
+    response.page = { limit: 50, offset: cursor ? 50 : 0, has_more: !cursor, next_cursor: expired ? "fresh" : "expired" };
+    return route.fulfill({ json: response });
+  });
+  await page.goto("/candidates?mode=discovery");
+  await page.getByRole("button", { name: /Load more/ }).click();
+  await expect.poll(() => recoveredFirstPages).toBeGreaterThan(0);
+  await page.getByRole("button", { name: /Load more/ }).click();
+  await expect(page.getByText(syntheticAppState.discovery_candidates[1].title, { exact: true })).toBeVisible();
+  expect(cursors.filter(Boolean)).toEqual(["expired", "fresh"]);
 });
 
 test("uncertain location candidates stay visible with a verification action", async ({ page }) => {

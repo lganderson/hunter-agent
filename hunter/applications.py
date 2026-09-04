@@ -144,9 +144,9 @@ def update_application(application_id, updates):
                 row[field] = storage.clean(value)
         row["outcome"] = next_outcome
         repository.write_applications(rows)
-        if any(field in (updates or {}) for field in ["company_id", "company", "role"]):
+        if not repository.using_sqlite() and any(field in (updates or {}) for field in ["company_id", "company", "role"]):
             sync_related_action_identity(row)
-        if row.get("stage", "") == "closed":
+        if not repository.using_sqlite() and row.get("stage", "") == "closed":
             actions.sync_next_action(row.get("id", ""))
         return row
     raise ValueError(f"No application found with id {application_id}.")

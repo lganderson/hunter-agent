@@ -1,4 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
+import type { CandidatePageFacets } from "../core/readModelTypes";
+import { DISCOVERY_SORT_KEYS, type DiscoverySortKey, discoverySelectedOptions, discoverySelectionParam } from "./discoveryFilters";
 import type { FormEvent } from "react";
 import { Link } from "react-router-dom";
 import {
@@ -17,8 +19,8 @@ import {
 } from "../core/api";
 import { dateOnlyLabel, titleCase } from "../core/format";
 import { routes } from "../core/routes";
-import { compareNumber, compareText, nextSortState, type SortDirection, type SortState } from "../core/tableSort";
-import { selectionFromParam, selectionParamValue, sortFromParams, usePersistentViewParams } from "../core/viewState";
+import { compareNumber, compareText, nextSortState, type SortDirection } from "../core/tableSort";
+import { sortFromParams, usePersistentViewParams } from "../core/viewState";
 import type {
   AppState,
   Application,
@@ -50,11 +52,10 @@ type DiscoveryModeProps = {
   loadMore?: () => void;
   statusCounts?: Record<string, number>;
   filteredTotal?: number;
+  facets?: CandidatePageFacets;
 };
 
 type DiscoveryFilter = "needs-decision" | "pursued" | "ignored" | "duplicate" | "unavailable";
-type DiscoverySortKey = "candidate" | "company" | "industry" | "size" | "match" | "source" | "freshness";
-const DISCOVERY_SORT_KEYS: DiscoverySortKey[] = ["candidate", "company", "industry", "size", "match", "source", "freshness"];
 
 const DISCOVERY_FILTERS: Array<{ id: DiscoveryFilter; label: string }> = [
   { id: "needs-decision", label: "Needs decision" },
@@ -91,7 +92,7 @@ const EMPTY_DETAILS: DiscoveryCandidateDetails = {
 const MAX_BULK_INGEST = 25;
 const DISMISSED_DISCOVERY_RUN_KEY = "hunter-dismissed-discovery-run-v1";
 
-export function DiscoveryMode({ data, refresh, applyDiscoveryCandidateUpdate, enrichmentJob = null, startDiscoveryJob, startEnrichmentJob, hasNextPage = false, isFetchingNextPage = false, loadMore, statusCounts = {}, filteredTotal }: DiscoveryModeProps) {
+export function DiscoveryMode({ data, refresh, applyDiscoveryCandidateUpdate, enrichmentJob = null, startDiscoveryJob, startEnrichmentJob, hasNextPage = false, isFetchingNextPage = false, loadMore, statusCounts = {}, filteredTotal, facets }: DiscoveryModeProps) {
   const { params: viewParams, updateParams: updateViewParams } = usePersistentViewParams("candidates");
   const requestedSearchId = viewParams.get("search_id") || "";
   const selectedSearch = data.discovery_searches.find(search => search.id === requestedSearchId)
@@ -189,13 +190,15 @@ export function DiscoveryMode({ data, refresh, applyDiscoveryCandidateUpdate, en
     ),
     [data.discovery_candidates, discoveryExcludedCompanyIds]
   );
-  const companyOptions = useMemo(() => [...new Map(selectedCandidates
-    .map(candidate => companyById.get(candidate.company_id))
-    .filter((company): company is Company => Boolean(company))
-    .map(company => [company.id, company])).values()].sort((left, right) => left.name.localeCompare(right.name)), [companyById, selectedCandidates]);
-  const industryOptions = useMemo(() => uniqueValues(companyOptions.map(company => company.industry)), [companyOptions]);
-  const sizeOptions = useMemo(() => uniqueValues(companyOptions.map(company => company.company_size)), [companyOptions]);
-  const sourceOptions = useMemo(() => uniqueValues(selectedCandidates.map(discoverySourceLabel)), [selectedCandidates]);
+  const companyOptions = useMemo(() => {
+    const ids = facets?.companies.map(facet => facet.value) || selectedCandidates.map(candidate => candidate.company_id);
+    return [...new Set(ids)].map(id => companyById.get(id))
+      .filter((company): company is Company => Boolean(company))
+      .sort((left, right) => left.name.localeCompare(right.name));
+  }, [facets?.companies, companyById, selectedCandidates]);
+  const industryOptions = facets?.industries?.map(facet => facet.value) || uniqueValues(companyOptions.map(company => company.industry));
+  const sizeOptions = facets?.sizes?.map(facet => facet.value) || uniqueValues(companyOptions.map(company => company.company_size));
+  const sourceOptions = facets?.sources?.map(facet => facet.value) || uniqueValues(selectedCandidates.map(discoverySourceLabel));
   const refreshableCandidates = useMemo(
     () => selectedCandidates.filter(candidate => (
       candidate.status === "new"
@@ -204,10 +207,10 @@ export function DiscoveryMode({ data, refresh, applyDiscoveryCandidateUpdate, en
     [selectedCandidates]
   );
   const companyOptionIds = companyOptions.map(company => company.id);
-  const selectedCompanyIds = selectionFromParam(viewParams.get("discovery_companies"), companyOptionIds, companyOptionIds);
-  const selectedIndustries = selectionFromParam(viewParams.get("discovery_industries"), industryOptions, industryOptions);
-  const selectedSizes = selectionFromParam(viewParams.get("discovery_sizes"), sizeOptions, sizeOptions);
-  const selectedSources = selectionFromParam(viewParams.get("discovery_sources"), sourceOptions, sourceOptions);
+  const selectedCompanyIds = discoverySelectedOptions(viewParams.get("discovery_companies"), companyOptionIds);
+  const selectedIndustries = discoverySelectedOptions(viewParams.get("discovery_industries"), industryOptions);
+  const selectedSizes = discoverySelectedOptions(viewParams.get("discovery_sizes"), sizeOptions);
+  const selectedSources = discoverySelectedOptions(viewParams.get("discovery_sources"), sourceOptions);
   const preferenceSuggestions = useMemo(
     () => (data.discovery_preference_suggestions || []).filter(
       suggestion => suggestion.search_id === selectedSearch?.id
@@ -218,28 +221,12 @@ export function DiscoveryMode({ data, refresh, applyDiscoveryCandidateUpdate, en
     ),
     [data.discovery_preference_suggestions, data.dismissed_suggestion_ids, selectedSearch]
   );
-  const candidatesBeforeStatus = useMemo(
-    () => selectedCandidates
-      .filter(candidate => discoveryCandidateIncludes(candidate, companyById.get(candidate.company_id), resultSearch))
-      .filter(candidate => matchesDiscoverySelections(
-        candidate,
-        companyById.get(candidate.company_id),
-        selectedCompanyIds,
-        companyOptionIds,
-        selectedIndustries,
-        industryOptions,
-        selectedSizes,
-        sizeOptions,
-        selectedSources,
-        sourceOptions
-      )),
-    [companyById, companyOptionIds, industryOptions, resultSearch, selectedCandidates, selectedCompanyIds, selectedIndustries, selectedSizes, selectedSources, sizeOptions, sourceOptions]
-  );
+  // The API filters and orders the complete queue before pagination. Keep
+  // only optimistic status changes local while their refresh is in flight.
+  const candidatesBeforeStatus = selectedCandidates;
   const visibleCandidates = useMemo(
-    () => candidatesBeforeStatus
-      .filter(candidate => discoveryCandidateMatches(candidate, resultFilter))
-      .sort((left, right) => compareDiscoveryCandidateRows(left, right, sort, companyById)),
-    [candidatesBeforeStatus, companyById, resultFilter, sort]
+    () => selectedCandidates.filter(candidate => discoveryCandidateMatches(candidate, resultFilter)),
+    [selectedCandidates, resultFilter]
   );
 
   function changeSort(key: DiscoverySortKey, initialDirection: SortDirection) {
@@ -1060,11 +1047,11 @@ export function DiscoveryMode({ data, refresh, applyDiscoveryCandidateUpdate, en
           label="Company"
           options={companyOptions.map(company => ({ id: company.id, label: company.name }))}
           selected={selectedCompanyIds}
-          onChange={values => updateViewParams({ discovery_companies: selectionParamValue(values, companyOptionIds, companyOptionIds) })}
+          onChange={values => updateViewParams({ discovery_companies: discoverySelectionParam(values, companyOptionIds, companyOptionIds) })}
         />
-        <DiscoveryMultiFilter label="Industry" options={industryOptions.map(value => ({ id: value, label: value }))} selected={selectedIndustries} onChange={values => updateViewParams({ discovery_industries: selectionParamValue(values, industryOptions, industryOptions) })} />
-        <DiscoveryMultiFilter label="Size" options={sizeOptions.map(value => ({ id: value, label: value }))} selected={selectedSizes} onChange={values => updateViewParams({ discovery_sizes: selectionParamValue(values, sizeOptions, sizeOptions) })} />
-        <DiscoveryMultiFilter label="Source" options={sourceOptions.map(value => ({ id: value, label: value }))} selected={selectedSources} onChange={values => updateViewParams({ discovery_sources: selectionParamValue(values, sourceOptions, sourceOptions) })} />
+        <DiscoveryMultiFilter label="Industry" options={industryOptions.map(value => ({ id: value, label: value }))} selected={selectedIndustries} onChange={values => updateViewParams({ discovery_industries: discoverySelectionParam(values, industryOptions, industryOptions) })} />
+        <DiscoveryMultiFilter label="Size" options={sizeOptions.map(value => ({ id: value, label: value }))} selected={selectedSizes} onChange={values => updateViewParams({ discovery_sizes: discoverySelectionParam(values, sizeOptions, sizeOptions) })} />
+        <DiscoveryMultiFilter label="Source" options={sourceOptions.map(value => ({ id: value, label: value }))} selected={selectedSources} onChange={values => updateViewParams({ discovery_sources: discoverySelectionParam(values, sourceOptions, sourceOptions) })} />
         {reviewQueue.length ? (
           <button
             className="button primary discovery-review-next"
@@ -2001,83 +1988,12 @@ function legacyDiscoveryFilter(value: string | null) {
   return value;
 }
 
-function matchesDiscoverySelections(
-  candidate: DiscoveryCandidate,
-  company: Company | undefined,
-  selectedCompanyIds: string[],
-  companyIds: string[],
-  selectedIndustries: string[],
-  industries: string[],
-  selectedSizes: string[],
-  sizes: string[],
-  selectedSources: string[],
-  sources: string[]
-) {
-  return matchesSelectionValue(candidate.company_id, selectedCompanyIds, companyIds)
-    && matchesSelectionValue(company?.industry || "", selectedIndustries, industries)
-    && matchesSelectionValue(company?.company_size || "", selectedSizes, sizes)
-    && matchesSelectionValue(discoverySourceLabel(candidate), selectedSources, sources);
-}
-
-function matchesSelectionValue(value: string, selected: string[], all: string[]) {
-  if (selected.length === all.length) return true;
-  return selected.includes(value);
-}
-
 function uniqueValues(values: string[]) {
   return [...new Set(values.map(value => value.trim()).filter(Boolean))].sort((left, right) => left.localeCompare(right));
 }
 
 function uniqueValuesInOrder(values: string[]) {
   return [...new Set(values.map(value => value.trim()).filter(Boolean))];
-}
-
-function discoveryCandidateComparator(left: DiscoveryCandidate, right: DiscoveryCandidate) {
-  const freshnessRank: Record<string, number> = {
-    "confirmed-open": 3,
-    "": 1,
-    "needs-review": 0,
-    closed: -1
-  };
-  const sourceRank: Record<string, number> = {
-    employer: 3,
-    network: 2,
-    unverified: 1,
-    aggregator: 0,
-    closed: -1
-  };
-  return Number(right.recommendation_eligible) - Number(left.recommendation_eligible)
-    || (freshnessRank[right.freshness_status] ?? 0) - (freshnessRank[left.freshness_status] ?? 0)
-    || (sourceRank[right.source_trust] ?? 0) - (sourceRank[left.source_trust] ?? 0)
-    || Number(right.processing_status === "ready") - Number(left.processing_status === "ready")
-    || Number(right.fit_score || 0) - Number(left.fit_score || 0)
-    || (right.last_seen_at || "").localeCompare(left.last_seen_at || "");
-}
-
-function compareDiscoveryCandidateRows(
-  left: DiscoveryCandidate,
-  right: DiscoveryCandidate,
-  sort: SortState<DiscoverySortKey>,
-  companyById: Map<string, Company>
-) {
-  const leftCompany = companyById.get(left.company_id);
-  const rightCompany = companyById.get(right.company_id);
-  let result = 0;
-  if (sort.key === "candidate") result = compareText(left.title, right.title, sort.direction);
-  if (sort.key === "company") result = compareText(leftCompany?.name, rightCompany?.name, sort.direction);
-  if (sort.key === "industry") result = compareText(leftCompany?.industry, rightCompany?.industry, sort.direction);
-  if (sort.key === "size") result = compareText(leftCompany?.company_size, rightCompany?.company_size, sort.direction);
-  if (sort.key === "match") result = compareNumber(left.fit_score, right.fit_score, sort.direction);
-  if (sort.key === "source") result = compareText(left.source_trust_label, right.source_trust_label, sort.direction);
-  if (sort.key === "freshness") {
-    result = compareText(left.freshness_status, right.freshness_status, sort.direction)
-      || compareText(left.freshness_checked_at, right.freshness_checked_at, sort.direction);
-  }
-  return result
-    || (sort.key === "match"
-      ? discoveryCandidateComparator(left, right)
-      : compareNumber(left.fit_score, right.fit_score, "desc"))
-    || compareText(left.id, right.id, "asc");
 }
 
 function candidateMatchesExclusionTerms(candidate: DiscoveryCandidate, terms: string[]) {
@@ -2092,27 +2008,6 @@ function processingLabel(candidate: DiscoveryCandidate) {
   if (candidate.freshness_status === "needs-review") return "Freshness could not be verified";
   if (candidate.review_state === "needs-freshness") return "Needs freshness";
   return "Failed extraction";
-}
-
-function discoveryCandidateIncludes(candidate: DiscoveryCandidate, company: Company | undefined, search: string) {
-  const query = search.trim().toLowerCase();
-  if (!query) return true;
-  return [
-    company?.name,
-    candidate.title,
-    candidate.location,
-    candidate.work_mode,
-    company?.industry,
-    company?.company_size,
-    candidate.source_platform,
-    candidate.fit_summary,
-    candidate.role_family,
-    ...(candidate.responsibility_signals || []),
-    candidate.description_excerpt,
-    candidate.detail_state,
-    candidate.detail_next_action,
-    candidate.notes
-  ].join(" ").toLowerCase().includes(query);
 }
 
 function candidateLocationLabel(candidate: DiscoveryCandidate) {

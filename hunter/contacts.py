@@ -49,7 +49,10 @@ def upsert_contact(contact_id="", updates=None):
         if field not in EDITABLE_FIELDS:
             continue
         if field in {"last_contacted", "next_follow_up"}:
-            row[field] = storage.normalize_date(value)
+            try:
+                row[field] = storage.normalize_date(value)
+            except SystemExit as exc:
+                raise ValueError(str(exc)) from exc
         else:
             row[field] = storage.clean(value)
 
