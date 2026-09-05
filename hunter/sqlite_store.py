@@ -1725,6 +1725,17 @@ def read_company_posting_candidates():
     return [{field: storage.clean(row[field]) for field in fields} for row in rows]
 
 
+def read_company_posting_candidates_for_company(company_id):
+    """Read the identity peers needed for one candidate's detail projection."""
+    ensure_initialized()
+    with connect() as connection:
+        rows = connection.execute(
+            "SELECT * FROM company_posting_candidates WHERE company_id = ? ORDER BY status, title, url",
+            (storage.clean(company_id).upper(),),
+        ).fetchall()
+    return [_resource_row("company_posting_candidates", row) for row in rows]
+
+
 def read_company_posting_candidate(candidate_id):
     ensure_initialized()
     fields = schema.COMPANY_POSTING_CANDIDATE_FIELDS

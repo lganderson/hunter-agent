@@ -1,10 +1,10 @@
 import { useCallback, useMemo } from "react";
-import { useQueryClient, type InfiniteData } from "@tanstack/react-query";
+import { useQueryClient } from "@tanstack/react-query";
 import { appShellToViewState } from "./readModelAdapters";
 import { appShellQueryOptions, useAppShell } from "./readModelQueries";
 import { readModelQueryKeys } from "./queryKeys";
-import type { AppShell, CandidateDetail, CandidatePage, EntityDetail } from "./readModelTypes";
-import type { Action, AppState, Application, CompanyPostingCandidate, DiscoveryCandidate } from "./types";
+import type { AppShell, EntityDetail } from "./readModelTypes";
+import type { Action, AppState, Application } from "./types";
 
 export type ActionUpdateResult = {
   action: Action;
@@ -65,83 +65,11 @@ export function useHunterData() {
     } : current);
   }, [queryClient]);
 
-  const applyCompanyCandidateUpdates = useCallback((candidates: CompanyPostingCandidate[]) => {
-    const updates = new Map(candidates.map(candidate => [candidate.id, candidate]));
-    if (!updates.size) return;
-    queryClient.setQueriesData<InfiniteData<CandidatePage<"company">>>(
-      { queryKey: readModelQueryKeys.candidateLists("company") },
-      current => current ? {
-        ...current,
-        pages: current.pages.map(page => ({
-          ...page,
-          items: page.items.map(candidate => updates.has(candidate.id)
-            ? { ...candidate, ...updates.get(candidate.id) }
-            : candidate)
-        }))
-      } : current
-    );
-    candidates.forEach(candidate => {
-      queryClient.setQueriesData<CandidateDetail<"company">>(
-        { queryKey: readModelQueryKeys.candidateDetails("company") },
-        current => current?.item.id === candidate.id
-          ? { ...current, item: { ...current.item, ...candidate } }
-          : current
-      );
-    });
-  }, [queryClient]);
-
-  const applyDiscoveryCandidateUpdate = useCallback((
-    candidate: DiscoveryCandidate,
-    posting: Application | null = null,
-    removePostingId = ""
-  ) => {
-    const { company: _legacyCompanyName, ...fields } = candidate;
-    // Mutation responses lack the read model's canonical status. Keep it in sync
-    // so canonicalization cannot restore the previous decision while refetching.
-    const candidateUpdate = { ...fields, canonical_status: candidate.status };
-    queryClient.setQueriesData<InfiniteData<CandidatePage<"discovery">>>(
-      { queryKey: readModelQueryKeys.candidateLists("discovery") },
-      current => current ? {
-        ...current,
-        pages: current.pages.map(page => ({
-          ...page,
-          items: page.items.map(currentCandidate => currentCandidate.id === candidate.id
-            ? { ...currentCandidate, ...candidateUpdate }
-            : currentCandidate)
-        }))
-      } : current
-    );
-    queryClient.setQueriesData<CandidateDetail<"discovery">>(
-      { queryKey: readModelQueryKeys.candidateDetails("discovery") },
-      current => current?.item.id === candidate.id
-        ? { ...current, item: { ...current.item, ...candidateUpdate } }
-        : current
-    );
-    queryClient.setQueryData<AppShell>(readModelQueryKeys.appShell(), current => {
-      if (!current) return current;
-      const existingPosting = posting
-        ? current.applications.some(application => application.id === posting.id)
-        : false;
-      return {
-        ...current,
-        generated_at: new Date().toISOString(),
-        applications: current.applications
-          .filter(application => !removePostingId || application.id !== removePostingId)
-          .map(application => application.id === posting?.id ? { ...application, ...posting } : application)
-          .concat(posting && !existingPosting ? [posting] : [])
-      };
-    });
-    // Reconcile totals, facets, pagination, and linked candidates across both pools.
-    void queryClient.invalidateQueries({ queryKey: readModelQueryKeys.candidates() });
-  }, [queryClient]);
-
   return {
     data,
     error: shellQuery.error instanceof Error ? shellQuery.error.message : shellQuery.error ? String(shellQuery.error) : "",
     refresh,
     applyActionUpdate,
-    applyApplicationUpdate,
-    applyCompanyCandidateUpdates,
-    applyDiscoveryCandidateUpdate
+    applyApplicationUpdate
   };
 }

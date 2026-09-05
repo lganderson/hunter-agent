@@ -1,3 +1,4 @@
+import { useCompanyCandidateDecisions, useDiscoveryCandidateDecisions } from "../candidates/useCandidateDecisions";
 import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { Link, Navigate, useNavigate, useParams } from "react-router-dom";
@@ -7,8 +8,6 @@ import {
   archiveCompany,
   checkCompanyPostings,
   dismissSuggestion,
-  pursueDiscoveryCandidate,
-  pursueCompanyCandidate,
   linkCompanyContact,
   mergeCompanies,
   researchCompany,
@@ -17,8 +16,6 @@ import {
   trackCompany,
   untrackCompany,
   unlinkCompanyContact,
-  updateDiscoveryCandidate,
-  updateCompanyCandidate,
   upsertCompany,
   type CompanyMetadataSuggestion
 } from "../core/api";
@@ -52,7 +49,6 @@ type CompaniesPageProps = {
 };
 
 type CompanyDetailPageProps = CompaniesPageProps & {
-  applyCompanyCandidateUpdates: (candidates: CompanyPostingCandidate[]) => void;
   createNew?: boolean;
 };
 
@@ -927,7 +923,9 @@ function MultiFilter({
   );
 }
 
-export function CompanyDetailPage({ data: shellData, refresh, applyCompanyCandidateUpdates, createNew = false }: CompanyDetailPageProps) {
+export function CompanyDetailPage({ data: shellData, refresh, createNew = false }: CompanyDetailPageProps) {
+  const companyDecisions = useCompanyCandidateDecisions();
+  const discoveryDecisions = useDiscoveryCandidateDecisions();
   const { id = "" } = useParams();
   const navigate = useNavigate();
   const isNewCompany = createNew || id === "new";
@@ -1279,8 +1277,7 @@ export function CompanyDetailPage({ data: shellData, refresh, applyCompanyCandid
     setActiveCandidateActionId(candidateId);
     setOperationStatus("Ignoring candidate...");
     try {
-      const result = await updateCompanyCandidate(candidateId, "ignored");
-      applyCompanyCandidateUpdates([result.candidate]);
+      await companyDecisions.setStatus(candidateId, "ignored");
       setOperationStatus("Candidate ignored.");
     } catch (error) {
       setOperationStatus(`Could not ignore candidate. ${error instanceof Error ? error.message : String(error)}`);
@@ -1294,8 +1291,7 @@ export function CompanyDetailPage({ data: shellData, refresh, applyCompanyCandid
     setActiveCandidateActionId(candidateId);
     setOperationStatus("Adding role to Considering...");
     try {
-      await pursueCompanyCandidate(candidateId);
-      await refreshCandidatePool("company");
+      await companyDecisions.pursue(candidateId);
       setOperationStatus("Role added to Considering.");
     } catch (error) {
       setOperationStatus(`Could not add role to Considering. ${error instanceof Error ? error.message : String(error)}`);
@@ -1309,9 +1305,8 @@ export function CompanyDetailPage({ data: shellData, refresh, applyCompanyCandid
     setActiveCandidateActionId(candidateId);
     setOperationStatus(`${action === "ignored" ? "Ignoring" : "Pursuing"} Discovery role...`);
     try {
-      if (action === "ignored") await updateDiscoveryCandidate(candidateId, "ignored");
-      else await pursueDiscoveryCandidate(candidateId);
-      await refreshCandidatePool("discovery");
+      if (action === "ignored") await discoveryDecisions.setStatus(candidateId, "ignored");
+      else await discoveryDecisions.pursue(candidateId);
       setOperationStatus(action === "ignored" ? "Discovery role ignored." : "Discovery role added to Considering.");
     } catch (error) {
       setOperationStatus(`Could not update Discovery role. ${error instanceof Error ? error.message : String(error)}`);

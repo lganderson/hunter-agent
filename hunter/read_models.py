@@ -948,7 +948,6 @@ def _read_candidate_detail(pool, query=None):
         searches = discovery_store.list_searches()
         if pool == "company":
             candidate = repository.read_company_posting_candidate(candidate_id)
-            company_candidates = [candidate] if candidate else []
             # The smaller opposite pool supplies cross-pool provenance for this one role.
             candidate_company_id = storage.clean((candidate or {}).get("company_id", "")).upper()
             discovery_candidates = [
@@ -959,10 +958,18 @@ def _read_candidate_detail(pool, query=None):
             ] if candidate else []
         else:
             candidate = repository.read_discovery_candidate(candidate_id)
-            company_candidates = []
             discovery_candidates = [candidate] if candidate else []
         if candidate is None:
             raise ReadModelError(404, f"No {pool} candidate found with id {candidate_id}.")
+        # Detail and list projections must use the same canonical peer selection.
+        # Scope the company pool to this employer instead of loading every role.
+        candidate_company_id = storage.clean(candidate.get("company_id", "")).upper()
+        company_candidates = (
+            repository.read_company_posting_candidates_for_company(candidate_company_id)
+            if candidate_company_id else []
+        )
+        if pool == "company" and not candidate_company_id:
+            company_candidates = [candidate]
         context = CandidateReadContext.from_rows(
             companies=companies,
             applications=applications,

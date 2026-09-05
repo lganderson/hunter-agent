@@ -1,19 +1,15 @@
+import { useCompanyCandidateDecisions } from "./useCandidateDecisions";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { discoveryFiltersFromParams } from "./discoveryFilters";
 import { useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import { BriefcaseIcon, ExternalIcon, FilterIcon, SearchIcon, XIcon } from "../components/Icons";
 import { SortableHeader } from "../components/Primitives";
-import {
-  checkCompanyPostings,
-  pursueCompanyCandidate,
-  updateCompanyCandidate,
-  updateCompanyCandidates
-} from "../core/api";
+import { checkCompanyPostings } from "../core/api";
 import { dateOnlyLabel, titleCase } from "../core/format";
 import { routes } from "../core/routes";
 import { compareNumber, compareText, nextSortState, type SortDirection, type SortState } from "../core/tableSort";
-import type { AppState, Application, CandidateEnrichmentJob, Company, CompanyPostingCandidate, DiscoveryCandidate } from "../core/types";
+import type { AppState, CandidateEnrichmentJob, Company, CompanyPostingCandidate } from "../core/types";
 import { selectionFromParam, selectionParamValue, sortFromParams, usePersistentViewParams } from "../core/viewState";
 import {
   CANDIDATE_FILTERS,
@@ -42,8 +38,6 @@ import { readModelQueryKeys } from "../core/queryKeys";
 type CandidateReviewPageProps = {
   data: AppState;
   refresh: () => Promise<AppState>;
-  applyCompanyCandidateUpdates: (candidates: CompanyPostingCandidate[]) => void;
-  applyDiscoveryCandidateUpdate: (candidate: DiscoveryCandidate, posting?: Application | null, removePostingId?: string) => void;
   enrichmentJob?: CandidateEnrichmentJob | null;
   startDiscoveryJob?: (payload: CandidateEnrichmentJob["request"]) => Promise<CandidateEnrichmentJob>;
   startEnrichmentJob?: (payload: CandidateEnrichmentJob["request"]) => Promise<CandidateEnrichmentJob>;
@@ -62,7 +56,7 @@ const MAX_BULK_INGEST = 25;
 type CandidateSortKey = "title" | "company" | "fit" | "status" | "last_seen";
 const CANDIDATE_SORT_KEYS: CandidateSortKey[] = ["title", "company", "fit", "status", "last_seen"];
 
-export function CandidatesPage({ data: shellData, refresh, applyCompanyCandidateUpdates, applyDiscoveryCandidateUpdate, enrichmentJob = null, startDiscoveryJob, startEnrichmentJob }: CandidateReviewPageProps) {
+export function CandidatesPage({ data: shellData, refresh, enrichmentJob = null, startDiscoveryJob, startEnrichmentJob }: CandidateReviewPageProps) {
   const { params: viewParams, updateParams: updateViewParams } = usePersistentViewParams("candidates");
   const mode = viewParams.get("mode") === "discovery" ? "discovery" : "companies";
   const search = viewParams.get("q") || "";
@@ -82,6 +76,7 @@ export function CandidatesPage({ data: shellData, refresh, applyCompanyCandidate
     : candidateFilter === "needs-decision";
   const sort = sortFromParams(viewParams, "sort", "direction", CANDIDATE_SORT_KEYS, { key: "fit", direction: "desc" });
   const queryClient = useQueryClient();
+  const decisions = useCompanyCandidateDecisions();
   const companyCandidatesQuery = useCompanyCandidateList({
     search,
     status: candidateFilter === "needs-decision" ? "new" : candidateFilter,
@@ -256,8 +251,7 @@ export function CandidatesPage({ data: shellData, refresh, applyCompanyCandidate
     setOperationPending(true);
     setOperationStatus(status === "ignored" ? "Ignoring candidate..." : "Updating candidate...");
     try {
-      await updateCompanyCandidate(candidateId, status);
-      await refreshCompanyCandidates();
+      await decisions.setStatus(candidateId, status);
       setOperationStatus(status === "ignored" ? "Candidate ignored." : "Candidate returned to Needs decision.");
     } catch (error) {
       setOperationStatus(`Could not update candidate. ${error instanceof Error ? error.message : String(error)}`);
@@ -272,8 +266,7 @@ export function CandidatesPage({ data: shellData, refresh, applyCompanyCandidate
     setOperationPending(true);
     setOperationStatus("Adding role to Considering...");
     try {
-      const result = await pursueCompanyCandidate(candidateId);
-      await refreshCompanyCandidates();
+      const result = await decisions.pursue(candidateId);
       setIngestedPostingId(result.posting?.id || "");
       setOperationStatus("Role added to Considering.");
     } catch (error) {
@@ -297,20 +290,13 @@ export function CandidatesPage({ data: shellData, refresh, applyCompanyCandidate
     setOperationPending(true);
     try {
       if (action === "pursue") {
-        let successCount = 0;
-        let failureCount = 0;
-        let postingId = "";
-        for (const [index, row] of eligibleRows.entries()) {
-          setOperationStatus(`Adding ${index + 1} of ${eligibleRows.length} selected candidates to Considering...`);
-          try {
-            const result = await pursueCompanyCandidate(row.candidate.id);
-            successCount += 1;
-            postingId = result.posting?.id || postingId;
-          } catch {
-            failureCount += 1;
-          }
-        }
-        await refreshCompanyCandidates();
+        const { results, failedIds } = await decisions.pursueMany(
+          eligibleRows.map(row => row.candidate.id),
+          (index, total) => setOperationStatus(`Adding ${index + 1} of ${total} selected candidates to Considering...`)
+        );
+        const successCount = results.length;
+        const failureCount = failedIds.length;
+        const postingId = results.at(-1)?.posting?.id || "";
         setIngestedPostingId(successCount === 1 ? postingId : "");
         setOperationStatus(
           `${successCount} candidate${successCount === 1 ? "" : "s"} added to Considering.`
@@ -323,11 +309,10 @@ export function CandidatesPage({ data: shellData, refresh, applyCompanyCandidate
             ? `Ignoring ${eligibleRows.length} selected candidates...`
             : `Returning ${eligibleRows.length} selected candidates to Needs decision...`
         );
-        await updateCompanyCandidates(
+        await decisions.setStatuses(
           eligibleRows.map(row => row.candidate.id),
           status
         );
-        await refreshCompanyCandidates();
         setOperationStatus(
           action === "ignored"
             ? `${eligibleRows.length} candidates ignored.`
@@ -483,7 +468,6 @@ export function CandidatesPage({ data: shellData, refresh, applyCompanyCandidate
           <DiscoveryMode
             data={data}
             refresh={refreshDiscoveryCandidates}
-            applyDiscoveryCandidateUpdate={applyDiscoveryCandidateUpdate}
             enrichmentJob={enrichmentJob}
             startDiscoveryJob={startDiscoveryJob}
             startEnrichmentJob={startEnrichmentJob}

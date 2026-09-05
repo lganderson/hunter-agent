@@ -146,6 +146,10 @@ def replace_company_posting_candidates_for_import(rows):
     sqlite_store.replace_company_posting_candidates_for_import(rows)
 
 
+def read_company_posting_candidates_for_company(company_id):
+    return sqlite_store.read_company_posting_candidates_for_company(company_id)
+
+
 def read_company_posting_candidate(candidate_id):
     return sqlite_store.read_company_posting_candidate(candidate_id)
 

@@ -11,7 +11,7 @@ export default defineConfig({
     trace: "retain-on-failure"
   },
   webServer: {
-    command: "python3 ../scripts/demo_preview.py --port 4175",
+    command: "python3 ../scripts/demo_preview.py --port 4175 --workflow-fixtures",
     url: "http://127.0.0.1:4175/api/health",
     reuseExistingServer: false
   }

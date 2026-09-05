@@ -70,9 +70,35 @@ def seed_review_queue():
     repository.replace_discovery_candidates_for_import(candidates)
 
 
+def seed_linked_candidate():
+    """Add a cross-pool identity fixture only for workflow integration tests."""
+    from hunter import repository, schema
+
+    timestamp = datetime.now().isoformat(timespec="seconds")
+    company = {field: "" for field in schema.COMPANY_FIELDS}
+    company.update(id="CO9901", name="Linked Example", tracking_status="tracked", interest_status="interested")
+    repository.insert_companies([company])
+    candidate = {field: "" for field in schema.COMPANY_POSTING_CANDIDATE_FIELDS}
+    candidate.update(id="CP9901", company_id="CO9901", title="Platform Systems Lead",
+                     url="https://linked.example.invalid/jobs/platform", location="United States",
+                     work_mode="remote", status="new", scan_state="current", fit_score="90",
+                     description_excerpt="Lead platform strategy and product systems. " * 25,
+                     first_seen_at=timestamp, last_seen_at=timestamp)
+    repository.replace_company_posting_candidates_for_import(
+        [*repository.read_company_posting_candidates(), candidate]
+    )
+    discovery = dict(repository.read_discovery_candidates()[0])
+    discovery.update(id="DC9901", company_id="CO9901", company="Linked Example",
+                     title=candidate["title"], url=candidate["url"], canonical_url=candidate["url"])
+    repository.replace_discovery_candidates_for_import(
+        [*repository.read_discovery_candidates(), discovery]
+    )
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--port", type=int, default=4175)
+    parser.add_argument("--workflow-fixtures", action="store_true")
     args = parser.parse_args()
     with TemporaryDirectory(prefix="hunter-demo-preview-") as workspace:
         os.environ["HUNTER_ROOT"] = workspace
@@ -82,6 +108,8 @@ def main():
         demo_data.load_demo_data()
         refresh_demo_dates()
         seed_review_queue()
+        if args.workflow_fixtures:
+            seed_linked_candidate()
         from http.server import ThreadingHTTPServer
         from scripts.serve_app import AppHandler
         server = ThreadingHTTPServer(("127.0.0.1", args.port), AppHandler)

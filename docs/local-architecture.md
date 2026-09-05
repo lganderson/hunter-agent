@@ -236,3 +236,29 @@ New local functionality should go into `hunter/` first, then be exposed through 
 - Browser integration tests run the built frontend, real Python HTTP handlers, and SQLite in a disposable demo workspace. They never use the active personal database.
 
 The broader codebase is being separated incrementally. Legacy company adapters and search orchestration still share their existing entry points while extracted modules establish narrower boundaries.
+
+## Candidate decision ownership
+
+Candidate status changes, Consider, duplicate linking, and Undo go through
+`app/src/candidates/useCandidateDecisions.ts` from both candidate modes and
+company detail pages. The hooks await a refresh of both candidate pools, the
+app shell, and affected company/posting/action details before completing.
+Inactive cached views are marked stale for their next visit. Raw write responses
+are not merged into list projections: the server owns canonical identity,
+status counts, pagination, and linked-record state.
+
+Writes are never automatically retried. A failed response also refreshes the
+read models because the server may have committed the decision before the
+connection failed. Bulk Consider executes each requested candidate once,
+reports individual failures, and reconciles the views once after the batch.
+
+Candidate detail reads include tracked-company peers scoped to the same
+company. This keeps canonical identity consistent with lists without loading
+the entire tracked-company pool. Cross-pool decisions remain governed by the
+existing server identity and eligibility rules.
+
+Workflow browser tests use a disposable SQLite workspace with additional
+linked candidate fixtures. They cover paginated Ignore/Undo, Consider/Undo,
+sidebar counts, company-detail decisions, and bulk Ignore/restore. Unit tests
+also cover cache refresh across all decision entry points, interrupted writes,
+and partially successful batches.

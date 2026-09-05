@@ -11,7 +11,7 @@ declare global {
 }
 
 function Root() {
-  const { data, error, refresh, applyActionUpdate, applyApplicationUpdate, applyCompanyCandidateUpdates, applyDiscoveryCandidateUpdate } = useHunterData();
+  const { data, error, refresh, applyActionUpdate, applyApplicationUpdate } = useHunterData();
 
   if (error) {
     return (
@@ -35,7 +35,7 @@ function Root() {
     );
   }
 
-  return <App data={data} refresh={refresh} applyActionUpdate={applyActionUpdate} applyApplicationUpdate={applyApplicationUpdate} applyCompanyCandidateUpdates={applyCompanyCandidateUpdates} applyDiscoveryCandidateUpdate={applyDiscoveryCandidateUpdate} />;
+  return <App data={data} refresh={refresh} applyActionUpdate={applyActionUpdate} applyApplicationUpdate={applyApplicationUpdate} />;
 }
 
 globalThis.hunterRoot ??= createRoot(document.getElementById("root") as HTMLElement);

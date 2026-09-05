@@ -1,3 +1,4 @@
+import { useDiscoveryCandidateDecisions } from "./useCandidateDecisions";
 import type { FormEvent } from "react";
 import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
@@ -7,13 +8,8 @@ import {
   applyDiscoverySearchExclusions,
   captureDiscoveryCandidates,
   dismissSuggestion,
-  markDiscoveryCandidateDuplicate,
-  pursueDiscoveryCandidate,
-  undoDiscoveryCandidateDecision,
   undoDiscoverySearchExclusions,
-  updateDiscoveryCandidate,
   updateDiscoveryCandidateDetails,
-  updateDiscoveryCandidates,
   upsertCompany,
   upsertDiscoverySearch
 } from "../core/api";
@@ -25,7 +21,6 @@ import { routes } from "../core/routes";
 import { compareNumber, compareText, nextSortState, type SortDirection } from "../core/tableSort";
 import type {
   AppState,
-  Application,
   CandidateEnrichmentJob,
   Company,
   DiscoveryCandidate,
@@ -42,7 +37,6 @@ import { DISCOVERY_SORT_KEYS, discoverySelectedOptions, discoverySelectionParam,
 type DiscoveryModeProps = {
   data: AppState;
   refresh: () => Promise<AppState>;
-  applyDiscoveryCandidateUpdate: (candidate: DiscoveryCandidate, posting?: Application | null, removePostingId?: string) => void;
   enrichmentJob?: CandidateEnrichmentJob | null;
   startDiscoveryJob?: (payload: CandidateEnrichmentJob["request"]) => Promise<CandidateEnrichmentJob>;
   startEnrichmentJob?: (payload: CandidateEnrichmentJob["request"]) => Promise<CandidateEnrichmentJob>;
@@ -54,7 +48,8 @@ type DiscoveryModeProps = {
   facets?: CandidatePageFacets;
 };
 
-export function DiscoveryMode({ data, refresh, applyDiscoveryCandidateUpdate, enrichmentJob = null, startDiscoveryJob, startEnrichmentJob, hasNextPage = false, isFetchingNextPage = false, loadMore, statusCounts = {}, filteredTotal, facets }: DiscoveryModeProps) {
+export function DiscoveryMode({ data, refresh, enrichmentJob = null, startDiscoveryJob, startEnrichmentJob, hasNextPage = false, isFetchingNextPage = false, loadMore, statusCounts = {}, filteredTotal, facets }: DiscoveryModeProps) {
+  const decisions = useDiscoveryCandidateDecisions();
   const { params: viewParams, updateParams: updateViewParams } = usePersistentViewParams("candidates");
   const requestedSearchId = viewParams.get("search_id") || "";
   const selectedSearch = data.discovery_searches.find(search => search.id === requestedSearchId)
@@ -474,8 +469,7 @@ export function DiscoveryMode({ data, refresh, applyDiscoveryCandidateUpdate, en
     setDecisionUndo(null);
     setOperationStatus(status === "ignored" ? "Ignoring role..." : "Returning role to Needs decision...");
     try {
-      const result = await updateDiscoveryCandidate(candidate.id, status);
-      applyDiscoveryCandidateUpdate(result.candidate);
+      await decisions.setStatus(candidate.id, status);
       if (status === "ignored") {
         setDecisionUndo({ candidateId: candidate.id, decision: "ignored", applicationId: "", removePosting: false });
       }
@@ -495,8 +489,7 @@ export function DiscoveryMode({ data, refresh, applyDiscoveryCandidateUpdate, en
     setDecisionUndo(null);
     setOperationStatus("Adding role to Considering...");
     try {
-      const result = await pursueDiscoveryCandidate(candidate.id);
-      applyDiscoveryCandidateUpdate(result.candidate, result.posting);
+      const result = await decisions.pursue(candidate.id);
       setIngestedPostingId(result.posting.id);
       setDecisionUndo({
         candidateId: candidate.id,
@@ -527,20 +520,13 @@ export function DiscoveryMode({ data, refresh, applyDiscoveryCandidateUpdate, en
     setIngestedPostingId("");
     try {
       if (action === "pursue") {
-        let successCount = 0;
-        let failureCount = 0;
-        let postingId = "";
-        for (const [index, candidate] of candidates.entries()) {
-          setOperationStatus(`Adding ${index + 1} of ${candidates.length} selected roles to Considering...`);
-          try {
-            const result = await pursueDiscoveryCandidate(candidate.id);
-            applyDiscoveryCandidateUpdate(result.candidate, result.posting);
-            successCount += 1;
-            postingId = result.posting.id || postingId;
-          } catch {
-            failureCount += 1;
-          }
-        }
+        const { results, failedIds } = await decisions.pursueMany(
+          candidates.map(candidate => candidate.id),
+          (index, total) => setOperationStatus(`Adding ${index + 1} of ${total} selected roles to Considering...`)
+        );
+        const successCount = results.length;
+        const failureCount = failedIds.length;
+        const postingId = results.at(-1)?.posting.id || "";
         setIngestedPostingId(successCount === 1 ? postingId : "");
         setOperationStatus(
           `${successCount} role${successCount === 1 ? "" : "s"} added to Considering.`
@@ -553,11 +539,10 @@ export function DiscoveryMode({ data, refresh, applyDiscoveryCandidateUpdate, en
             ? `Ignoring ${candidates.length} selected Discovery results...`
             : `Returning ${candidates.length} selected roles to Needs decision...`
         );
-        const result = await updateDiscoveryCandidates(
+        await decisions.setStatuses(
           candidates.map(candidate => candidate.id),
           status
         );
-        result.candidates.forEach(candidate => applyDiscoveryCandidateUpdate(candidate));
         setOperationStatus(
           action === "ignored"
             ? `${candidates.length} Discovery results ignored.`
@@ -590,8 +575,7 @@ export function DiscoveryMode({ data, refresh, applyDiscoveryCandidateUpdate, en
     setIngestedPostingId("");
     setOperationStatus("Associating duplicate with the existing posting...");
     try {
-      const result = await markDiscoveryCandidateDuplicate(candidate.id, applicationId);
-      applyDiscoveryCandidateUpdate(result.candidate);
+      const result = await decisions.markDuplicate(candidate.id, applicationId);
       setIngestedPostingId(result.posting.id);
       setOperationStatus(`Marked as a duplicate of ${result.posting.company} · ${result.posting.role}.`);
       return true;
@@ -633,16 +617,11 @@ export function DiscoveryMode({ data, refresh, applyDiscoveryCandidateUpdate, en
     setPendingCandidateId(decisionUndo.candidateId);
     setOperationStatus("Undoing decision...");
     try {
-      const result = await undoDiscoveryCandidateDecision(
+      await decisions.undo(
         decisionUndo.candidateId,
         decisionUndo.decision,
         decisionUndo.applicationId,
         decisionUndo.removePosting
-      );
-      applyDiscoveryCandidateUpdate(
-        result.candidate,
-        null,
-        result.posting_removed ? decisionUndo.applicationId : ""
       );
       setIngestedPostingId("");
       setDecisionUndo(null);

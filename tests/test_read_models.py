@@ -802,6 +802,7 @@ class CandidateReadModelTest(unittest.TestCase):
             patch.object(read_models.repository, "read_discovery_candidate", return_value=selected) as read_one,
             patch.object(read_models.repository, "read_discovery_candidates") as read_all,
             patch.object(read_models.repository, "read_company_posting_candidates") as read_company_pool,
+            patch.object(read_models.repository, "read_company_posting_candidates_for_company", return_value=[]) as read_peers,
         ):
             result = read_models.build_discovery_candidate_detail({"id": ["DC0001"]})
 
@@ -809,6 +810,31 @@ class CandidateReadModelTest(unittest.TestCase):
         read_one.assert_called_once_with("DC0001")
         read_all.assert_not_called()
         read_company_pool.assert_not_called()
+        read_peers.assert_called_once_with("CO0001")
+
+    def test_discovery_detail_uses_the_same_cross_pool_identity_as_the_list(self):
+        selected = discovery_candidate("DC0001", "CO0001")
+        peer = company_candidate("CP0001", "CO0001", status="ignored")
+        peer["url"] = selected["url"]
+        context = read_models.CandidateReadContext.from_rows(
+            companies=[company("CO0001")], applications=[], searches=searches(),
+            company_candidates=[peer], discovery_candidates=[selected], revision=23,
+        )
+        expected = read_models.discovery_candidate_detail({"id": ["DC0001"]}, context)["item"]
+        with (
+            patch.object(read_models.repository, "data_revision", return_value=23),
+            patch.object(read_models.repository, "read_companies", return_value=[company("CO0001")]),
+            patch.object(read_models.repository, "read_applications", return_value=[]),
+            patch.object(read_models.discovery_store, "list_searches", return_value=searches()),
+            patch.object(read_models.repository, "read_discovery_candidate", return_value=selected),
+            patch.object(read_models.repository, "read_company_posting_candidates_for_company", return_value=[peer]),
+        ):
+            actual = read_models.build_discovery_candidate_detail({"id": ["DC0001"]})["item"]
+        for field in ["is_canonical", "canonical_source", "canonical_status", "company_candidate_id"]:
+            self.assertEqual(actual[field], expected[field], field)
+        self.assertFalse(actual["is_canonical"])
+        self.assertEqual(actual["canonical_status"], "ignored")
+
 
 
 class ReadModelBudgetTest(unittest.TestCase):
