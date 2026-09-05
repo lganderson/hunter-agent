@@ -30,8 +30,8 @@ import { DiscoveryMode } from "./DiscoveryMode";
 import { CandidateBulkActions, CandidateSelectionCheckbox } from "./CandidateBulkActions";
 import { canonicalCandidateRows } from "./candidateCanonicalization";
 import {
-  companyListItemToLegacyCandidate,
-  discoveryListItemToLegacyCandidate
+  companyListItemToSummary,
+  discoveryListItemToSummary
 } from "../core/readModelAdapters";
 import {
   useCompanyCandidateList,
@@ -100,9 +100,9 @@ export function CandidatesPage({ data: shellData, refresh, applyCompanyCandidate
   const data = useMemo<AppState>(() => ({
     ...shellData,
     company_posting_candidates: (companyCandidatesQuery.data?.pages || [])
-      .flatMap(page => page.items.map(companyListItemToLegacyCandidate)),
+      .flatMap(page => page.items.map(companyListItemToSummary)),
     discovery_candidates: (discoveryCandidatesQuery.data?.pages || [])
-      .flatMap(page => page.items.map(discoveryListItemToLegacyCandidate))
+      .flatMap(page => page.items.map(discoveryListItemToSummary))
   }), [companyCandidatesQuery.data?.pages, discoveryCandidatesQuery.data?.pages, shellData]);
   const refreshCompanyCandidates = async () => {
     const [next] = await Promise.all([
@@ -667,7 +667,7 @@ export function CandidatesPage({ data: shellData, refresh, applyCompanyCandidate
                   <td>
                     <div className="table-actions">
                       <a className="button compact" href={candidate.url} target="_blank" rel="noreferrer"><ExternalIcon size={15} /> Open</a>
-                      <button className="button compact" type="button" disabled={candidate.status === "pursued" || candidate.review_state !== "ready" || operationPending} title={candidate.review_state === "ready" ? "Add to Considering" : candidateReviewStateLabel(candidate.review_state)} onClick={() => pursueCandidate(candidate.id)}>Consider</button>
+                      <button className="button compact primary" type="button" disabled={candidate.status === "pursued" || candidate.review_state !== "ready" || operationPending} title={candidate.review_state === "ready" ? "Add to Considering" : candidateReviewStateLabel(candidate.review_state)} onClick={() => pursueCandidate(candidate.id)}>Consider</button>
                       {candidate.status === "ignored"
                         ? <button className="button compact" type="button" disabled={operationPending} onClick={() => setCandidateStatus(candidate.id, "new")}>Needs decision</button>
                         : <button className="button compact" type="button" disabled={candidate.status === "pursued" || operationPending} onClick={() => setCandidateStatus(candidate.id, "ignored")}>Ignore</button>}

@@ -62,12 +62,12 @@ def _clear_related_tables():
     repository.write_company_career_sources([])
     repository.replace_company_posting_candidates_for_import([])
     repository.replace_discovery_candidates_for_import([])
-    repository.write_discovery_searches([])
+    repository.replace_discovery_searches_for_import([])
     repository.replace_companies_for_import([])
-    repository.write_applications([])
-    repository.write_actions([])
-    repository.write_contacts([])
-    sqlite_store.write_table("interviews", [])
+    repository.replace_applications_for_import([])
+    repository.replace_actions_for_import([])
+    repository.replace_contacts_for_import([])
+    sqlite_store.replace_table_for_import("interviews", [])
 
 
 def _replace_company_contacts(rows):
@@ -119,10 +119,10 @@ def load_demo_data(overwrite=False, path=DEMO_DATA_FILE):
     repository.replace_companies_for_import(
         _clean_rows(payload.get("companies", []), schema.COMPANY_FIELDS)
     )
-    repository.write_contacts(_clean_rows(payload.get("contacts", []), schema.CONTACT_FIELDS))
-    repository.write_applications(_clean_rows(payload.get("applications", []), schema.APPLICATION_FIELDS))
-    repository.write_actions(_clean_rows(payload.get("actions", []), schema.ACTION_FIELDS))
-    sqlite_store.write_table("interviews", _clean_rows(payload.get("interviews", []), schema.INTERVIEW_FIELDS))
+    repository.replace_contacts_for_import(_clean_rows(payload.get("contacts", []), schema.CONTACT_FIELDS))
+    repository.replace_applications_for_import(_clean_rows(payload.get("applications", []), schema.APPLICATION_FIELDS))
+    repository.replace_actions_for_import(_clean_rows(payload.get("actions", []), schema.ACTION_FIELDS))
+    sqlite_store.replace_table_for_import("interviews", _clean_rows(payload.get("interviews", []), schema.INTERVIEW_FIELDS))
     repository.write_company_career_sources(
         _clean_rows(payload.get("company_career_sources", []), schema.COMPANY_CAREER_SOURCE_FIELDS)
     )

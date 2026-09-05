@@ -1,6 +1,6 @@
 import { useCallback, useMemo } from "react";
 import { useQueryClient, type InfiniteData } from "@tanstack/react-query";
-import { appShellToLegacyState } from "./readModelAdapters";
+import { appShellToViewState } from "./readModelAdapters";
 import { appShellQueryOptions, useAppShell } from "./readModelQueries";
 import { readModelQueryKeys } from "./queryKeys";
 import type { AppShell, CandidateDetail, CandidatePage, EntityDetail } from "./readModelTypes";
@@ -15,7 +15,7 @@ export function useHunterData() {
   const queryClient = useQueryClient();
   const shellQuery = useAppShell();
   const data = useMemo(
-    () => shellQuery.data ? appShellToLegacyState(shellQuery.data) : null,
+    () => shellQuery.data ? appShellToViewState(shellQuery.data) : null,
     [shellQuery.data]
   );
 
@@ -25,7 +25,7 @@ export function useHunterData() {
       refetchType: "none"
     });
     const shell = await queryClient.fetchQuery(appShellQueryOptions());
-    return appShellToLegacyState(shell);
+    return appShellToViewState(shell);
   }, [queryClient]);
 
   const applyActionUpdate = useCallback((result: ActionUpdateResult) => {
@@ -95,7 +95,10 @@ export function useHunterData() {
     posting: Application | null = null,
     removePostingId = ""
   ) => {
-    const { company: _legacyCompanyName, ...candidateUpdate } = candidate;
+    const { company: _legacyCompanyName, ...fields } = candidate;
+    // Mutation responses lack the read model's canonical status. Keep it in sync
+    // so canonicalization cannot restore the previous decision while refetching.
+    const candidateUpdate = { ...fields, canonical_status: candidate.status };
     queryClient.setQueriesData<InfiniteData<CandidatePage<"discovery">>>(
       { queryKey: readModelQueryKeys.candidateLists("discovery") },
       current => current ? {
@@ -128,6 +131,8 @@ export function useHunterData() {
           .concat(posting && !existingPosting ? [posting] : [])
       };
     });
+    // Reconcile totals, facets, pagination, and linked candidates across both pools.
+    void queryClient.invalidateQueries({ queryKey: readModelQueryKeys.candidates() });
   }, [queryClient]);
 
   return {

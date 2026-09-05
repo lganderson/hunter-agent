@@ -12,26 +12,34 @@ make serve-app
 
 Open `http://127.0.0.1:8010/`.
 
-## Before Committing
+## Validation
 
-Run:
+Run the complete local check from the repository root:
 
 ```bash
-python3 hunter.py repo-check
-python3 hunter.py clean-caches
-python3 -m py_compile hunter.py hunter/*.py scripts/*.py
-cd app && npm run typecheck
-cd app && npm run build
+make check
 ```
 
-Do not commit local app data:
+This runs Python tests with an isolated data root, frontend unit tests, TypeScript checks, a production build, mocked browser tests, real SQLite/browser integration tests, and repository hygiene checks. Install the Chromium test browser once if it is missing:
 
-- `data/hunter.sqlite`
-- `data/settings.local.json`
-- files under `exports/`
-- `app/node_modules/`
-- `app/dist/`
-- Python caches
+```bash
+cd app
+npx playwright install chromium
+```
+
+The integration server creates and removes a temporary fictional workspace. It does not use `data/hunter.sqlite` or configured provider credentials. Test failures retain browser traces under ignored `app/test-results/`.
+
+## Screenshots and demo
+
+```bash
+make screenshots
+```
+
+This builds the frontend and captures `docs/screenshots/` from a disposable demo on port 4176. It permits browser requests only to that demo. Never capture your personal workspace for public documentation.
+
+To explore the demo interactively, build the frontend and run `python3 scripts/demo_preview.py`, then open `http://127.0.0.1:4175/`.
+
+See [the usage guide](docs/usage.md) for CLI commands, worktrees, imports, exports, and server management.
 
 ## Contribution Guidelines
 

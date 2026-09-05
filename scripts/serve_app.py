@@ -2,6 +2,7 @@
 """Serve Hunter's frontend with local API endpoints for settings and actions."""
 
 import json
+import logging
 import mimetypes
 import sys
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -15,6 +16,7 @@ if str(ROOT_FOR_IMPORTS) not in sys.path:
 from hunter import paths as hunter_paths
 from hunter import posting_snapshots as posting_snapshot_store
 from hunter import repository
+from hunter import http_contracts
 from hunter import read_models
 from hunter import resumes as resume_store
 from hunter import agent as hunter_agent
@@ -91,7 +93,7 @@ class AppHandler(SimpleHTTPRequestHandler):
             raise RequestRejected(400, "JSON request body is malformed.") from exc
         if not isinstance(payload, dict):
             raise RequestRejected(400, "JSON request body must be an object.")
-        return payload
+        return http_contracts.validate_request(path, payload)
 
     def expected_host(self):
         return f"127.0.0.1:{self.server.server_port}"
@@ -180,6 +182,9 @@ class AppHandler(SimpleHTTPRequestHandler):
         self.send_file(FRONTEND_DIST / "index.html")
 
     def do_GET(self):  # noqa: N802 - stdlib API name.
+        self.handle_api_request(self.dispatch_GET)
+
+    def dispatch_GET(self):
         parsed = urlparse(self.path)
         path = parsed.path
         if not self.validate_request_boundary():
@@ -249,11 +254,7 @@ class AppHandler(SimpleHTTPRequestHandler):
             self.send_json({"api_version": chat_history.API_VERSION, "messages": chat_history.list_messages()})
             return
         if path == "/api/companies/export":
-            try:
-                result = company_store.write_company_export((query.get("id") or [""])[0])
-            except ValueError as exc:
-                self.send_json({"error": str(exc)}, status=400)
-                return
+            result = company_store.write_company_export((query.get("id") or [""])[0])
             self.send_download_file(result["path"])
             return
         if path == "/api/companies/discovery-jobs/current":
@@ -286,10 +287,21 @@ class AppHandler(SimpleHTTPRequestHandler):
         path = urlparse(self.path).path
         if not self.validate_request_boundary():
             return
+        self.handle_api_request(lambda: self.dispatch_POST(path))
+
+    def handle_api_request(self, operation):
+        """Translate domain failures consistently for both HTTP methods."""
         try:
-            self.dispatch_POST(path)
+            operation()
         except RequestRejected as exc:
             self.send_json({"error": exc.message}, status=exc.status)
+        except ValueError as exc:
+            self.send_json({"error": str(exc)}, status=400)
+        except RuntimeError as exc:
+            self.send_json({"error": str(exc)}, status=502)
+        except Exception:
+            logging.exception("Local API request failed: %s", urlparse(self.path).path)
+            self.send_json({"error": "Hunter could not complete the request. See the local server log."}, status=500)
 
     def dispatch_POST(self, path):
         if path == "/api/settings":
@@ -309,14 +321,10 @@ class AppHandler(SimpleHTTPRequestHandler):
 
         if path == "/api/settings/resume":
             payload = self.read_json()
-            try:
-                status = settings_store.save_resume_upload(
-                    filename=payload.get("filename", ""),
-                    content_base64=payload.get("content_base64", ""),
-                )
-            except ValueError as exc:
-                self.send_json({"error": str(exc)}, status=400)
-                return
+            status = settings_store.save_resume_upload(
+                filename=payload.get("filename", ""),
+                content_base64=payload.get("content_base64", ""),
+            )
             self.send_json(status)
             return
 
@@ -331,9 +339,8 @@ class AppHandler(SimpleHTTPRequestHandler):
                     application_id=payload.get("application_id", ""),
                     guidance=payload.get("guidance", ""),
                 )
-            except ValueError as exc:
-                self.send_json({"error": str(exc)}, status=400)
-                return
+            except ValueError:
+                raise
             except Exception as exc:  # noqa: BLE001 - provider failures should be actionable in the local UI.
                 self.send_json({"error": f"Resume tailoring failed: {exc}"}, status=502)
                 return
@@ -342,16 +349,12 @@ class AppHandler(SimpleHTTPRequestHandler):
 
         if path == "/api/resumes/create":
             payload = self.read_json()
-            try:
-                version = resume_store.create_version(
-                    application_id=payload.get("application_id", ""),
-                    guidance=payload.get("guidance", ""),
-                    source_hash=payload.get("source_hash", ""),
-                    changes=payload.get("changes", []),
-                )
-            except ValueError as exc:
-                self.send_json({"error": str(exc)}, status=400)
-                return
+            version = resume_store.create_version(
+                application_id=payload.get("application_id", ""),
+                guidance=payload.get("guidance", ""),
+                source_hash=payload.get("source_hash", ""),
+                changes=payload.get("changes", []),
+            )
             self.send_json({"version": version})
             return
 
@@ -363,24 +366,16 @@ class AppHandler(SimpleHTTPRequestHandler):
 
         if path == "/api/postings/archive":
             payload = self.read_json()
-            try:
-                result = ingest_postings.archive_application_posting(payload.get("id", ""))
-            except ValueError as exc:
-                self.send_json({"error": str(exc)}, status=400)
-                return
+            result = ingest_postings.archive_application_posting(payload.get("id", ""))
             self.send_json(result)
             return
 
         if path == "/api/postings/archive/manual":
             payload = self.read_json()
-            try:
-                result = ingest_postings.save_manual_posting_snapshot(
-                    payload.get("id", ""),
-                    payload.get("content", ""),
-                )
-            except ValueError as exc:
-                self.send_json({"error": str(exc)}, status=400)
-                return
+            result = ingest_postings.save_manual_posting_snapshot(
+                payload.get("id", ""),
+                payload.get("content", ""),
+            )
             self.send_json(result)
             return
 
@@ -414,9 +409,8 @@ class AppHandler(SimpleHTTPRequestHandler):
                     tool_calls=result.get("tool_calls", []),
                     context=context,
                 )
-            except ValueError as exc:
-                self.send_json({"error": str(exc)}, status=400)
-                return
+            except ValueError:
+                raise
             except Exception as exc:  # noqa: BLE001 - local API should surface provider failures.
                 self.send_json({"error": f"Hunter chat failed: {exc}"}, status=502)
                 return
@@ -429,219 +423,147 @@ class AppHandler(SimpleHTTPRequestHandler):
 
         if path == "/api/suggestions/dismiss":
             payload = self.read_json()
-            try:
-                dismissal = suggestion_store.dismiss(payload.get("id", ""))
-            except ValueError as exc:
-                self.send_json({"error": str(exc)}, status=400)
-                return
+            dismissal = suggestion_store.dismiss(payload.get("id", ""))
             self.send_json({"dismissal": dismissal})
             return
 
         if path == "/api/suggestions/restore":
             payload = self.read_json()
-            try:
-                restoration = suggestion_store.restore(payload.get("id", ""))
-            except ValueError as exc:
-                self.send_json({"error": str(exc)}, status=400)
-                return
+            restoration = suggestion_store.restore(payload.get("id", ""))
             self.send_json({"restoration": restoration})
             return
 
         if path == "/api/actions/update":
             payload = self.read_json()
-            try:
-                action = action_engine.update_action_status(
-                    action_id=payload.get("id", ""),
-                    status=payload.get("status", ""),
-                )
-                application_id = action.get("application_id", "").upper()
-                posting = next(
-                    (row for row in repository.read_applications() if row.get("id", "").upper() == application_id),
-                    None,
-                )
-                action = app_state.enrich_actions([action])[0]
-                if posting is not None:
-                    posting = app_state.enrich_rows([posting])[0]
-            except ValueError as exc:
-                self.send_json({"error": str(exc)}, status=400)
-                return
+            action = action_engine.update_action_status(
+                action_id=payload.get("id", ""),
+                status=payload.get("status", ""),
+            )
+            application_id = action.get("application_id", "").upper()
+            posting = next(
+                (row for row in repository.read_applications() if row.get("id", "").upper() == application_id),
+                None,
+            )
+            action = app_state.enrich_actions([action])[0]
+            if posting is not None:
+                posting = app_state.enrich_rows([posting])[0]
             self.send_json({"action": action, "posting": posting})
             return
 
         if path == "/api/actions/create":
             payload = self.read_json()
-            try:
-                action = action_store.create_action(
-                    application_id=payload.get("application_id", ""),
-                    values=payload.get("values", {}),
-                )
-                posting = action_store.sync_next_action(action.get("application_id", ""))
-            except ValueError as exc:
-                self.send_json({"error": str(exc)}, status=400)
-                return
+            action = action_store.create_action(
+                application_id=payload.get("application_id", ""),
+                values=payload.get("values", {}),
+            )
+            posting = action_store.sync_next_action(action.get("application_id", ""))
             self.send_json({"action": action, "posting": posting})
             return
 
         if path == "/api/actions/update-fields":
             payload = self.read_json()
-            try:
-                action = action_store.update_action_fields(
-                    action_id=payload.get("id", ""),
-                    updates=payload.get("updates", {}),
-                )
-                posting = action_store.sync_next_action(action.get("application_id", ""))
-            except ValueError as exc:
-                self.send_json({"error": str(exc)}, status=400)
-                return
+            action = action_store.update_action_fields(
+                action_id=payload.get("id", ""),
+                updates=payload.get("updates", {}),
+            )
+            posting = action_store.sync_next_action(action.get("application_id", ""))
             self.send_json({"action": action, "posting": posting})
             return
 
         if path == "/api/actions/make-next":
             payload = self.read_json()
-            try:
-                posting = action_store.make_next_action(payload.get("id", ""))
-            except ValueError as exc:
-                self.send_json({"error": str(exc)}, status=400)
-                return
+            posting = action_store.make_next_action(payload.get("id", ""))
             self.send_json({"posting": posting})
             return
 
         if path == "/api/applications/update":
             payload = self.read_json()
-            try:
-                application = application_store.update_application(
-                    application_id=payload.get("id", ""),
-                    updates=payload.get("updates", {}),
-                )
-            except ValueError as exc:
-                self.send_json({"error": str(exc)}, status=400)
-                return
+            application = application_store.update_application(
+                application_id=payload.get("id", ""),
+                updates=payload.get("updates", {}),
+            )
             self.send_json({"application": application})
             return
 
 
         if path == "/api/applications/create":
             payload = self.read_json()
-            try:
-                application = application_store.create_application(payload.get("values", {}))
-            except ValueError as exc:
-                self.send_json({"error": str(exc)}, status=400)
-                return
+            application = application_store.create_application(payload.get("values", {}))
             self.send_json({"application": application})
             return
 
         if path == "/api/workflow/stages/upsert":
             payload = self.read_json()
-            try:
-                stage = workflow_store.upsert_stage(payload)
-            except ValueError as exc:
-                self.send_json({"error": str(exc)}, status=400)
-                return
+            stage = workflow_store.upsert_stage(payload)
             self.send_json({"stage": stage, "workflow": workflow_store.read_workflow()})
             return
 
         if path == "/api/workflow/stages/archive":
             payload = self.read_json()
-            try:
-                stage = workflow_store.archive_stage(payload.get("id", ""))
-            except ValueError as exc:
-                self.send_json({"error": str(exc)}, status=400)
-                return
+            stage = workflow_store.archive_stage(payload.get("id", ""))
             self.send_json({"stage": stage, "workflow": workflow_store.read_workflow()})
             return
 
         if path == "/api/workflow/action-types/upsert":
             payload = self.read_json()
-            try:
-                action_type = workflow_store.upsert_action_type(payload)
-            except ValueError as exc:
-                self.send_json({"error": str(exc)}, status=400)
-                return
+            action_type = workflow_store.upsert_action_type(payload)
             self.send_json({"action_type": action_type, "workflow": workflow_store.read_workflow()})
             return
 
         if path == "/api/workflow/action-types/archive":
             payload = self.read_json()
-            try:
-                action_type = workflow_store.archive_action_type(payload.get("id", ""))
-            except ValueError as exc:
-                self.send_json({"error": str(exc)}, status=400)
-                return
+            action_type = workflow_store.archive_action_type(payload.get("id", ""))
             self.send_json({"action_type": action_type, "workflow": workflow_store.read_workflow()})
             return
 
         if path == "/api/contacts/upsert":
             payload = self.read_json()
-            try:
-                contact = contact_store.upsert_contact(
-                    contact_id=payload.get("id", ""),
-                    updates=payload.get("updates", {}),
-                )
-            except ValueError as exc:
-                self.send_json({"error": str(exc)}, status=400)
-                return
+            contact = contact_store.upsert_contact(
+                contact_id=payload.get("id", ""),
+                updates=payload.get("updates", {}),
+            )
             self.send_json({"contact": contact})
             return
 
         if path == "/api/contacts/link":
             payload = self.read_json()
-            try:
-                link = contact_store.link_contact(
-                    application_id=payload.get("application_id", ""),
-                    contact_id=payload.get("contact_id", ""),
-                )
-            except ValueError as exc:
-                self.send_json({"error": str(exc)}, status=400)
-                return
+            link = contact_store.link_contact(
+                application_id=payload.get("application_id", ""),
+                contact_id=payload.get("contact_id", ""),
+            )
             self.send_json({"link": link})
             return
 
         if path == "/api/contacts/unlink":
             payload = self.read_json()
-            try:
-                link = contact_store.unlink_contact(
-                    application_id=payload.get("application_id", ""),
-                    contact_id=payload.get("contact_id", ""),
-                )
-            except ValueError as exc:
-                self.send_json({"error": str(exc)}, status=400)
-                return
+            link = contact_store.unlink_contact(
+                application_id=payload.get("application_id", ""),
+                contact_id=payload.get("contact_id", ""),
+            )
             self.send_json({"link": link})
             return
 
         if path == "/api/companies/upsert":
             payload = self.read_json()
-            try:
-                company = company_store.upsert_company(
-                    company_id=payload.get("id", ""),
-                    updates=payload.get("updates", {}),
-                )
-            except ValueError as exc:
-                self.send_json({"error": str(exc)}, status=400)
-                return
+            company = company_store.upsert_company(
+                company_id=payload.get("id", ""),
+                updates=payload.get("updates", {}),
+            )
             self.send_json({"company": company})
             return
 
         if path == "/api/companies/archive":
             payload = self.read_json()
-            try:
-                company = company_store.archive_company(payload.get("id", ""))
-            except ValueError as exc:
-                self.send_json({"error": str(exc)}, status=400)
-                return
+            company = company_store.archive_company(payload.get("id", ""))
             self.send_json({"company": company})
             return
 
         if path == "/api/companies/restore":
             payload = self.read_json()
-            try:
-                company = company_store.restore_company(
-                    company_id=payload.get("id", ""),
-                    interest_status=payload.get("interest_status", "neutral"),
-                )
-            except ValueError as exc:
-                self.send_json({"error": str(exc)}, status=400)
-                return
+            company = company_store.restore_company(
+                company_id=payload.get("id", ""),
+                interest_status=payload.get("interest_status", "neutral"),
+            )
             self.send_json({"company": company})
             return
 
@@ -649,9 +571,6 @@ class AppHandler(SimpleHTTPRequestHandler):
             payload = self.read_json()
             try:
                 result = company_store.research_company(payload.get("id", ""))
-            except ValueError as exc:
-                self.send_json({"error": str(exc)}, status=400)
-                return
             except RuntimeError as exc:
                 self.send_json({"error": str(exc)}, status=502)
                 return
@@ -660,35 +579,23 @@ class AppHandler(SimpleHTTPRequestHandler):
 
         if path == "/api/companies/track":
             payload = self.read_json()
-            try:
-                company = company_store.track_company(payload.get("id", ""))
-            except ValueError as exc:
-                self.send_json({"error": str(exc)}, status=400)
-                return
+            company = company_store.track_company(payload.get("id", ""))
             self.send_json({"company": company})
             return
 
         if path == "/api/companies/untrack":
             payload = self.read_json()
-            try:
-                company = company_store.untrack_company(payload.get("id", ""))
-            except ValueError as exc:
-                self.send_json({"error": str(exc)}, status=400)
-                return
+            company = company_store.untrack_company(payload.get("id", ""))
             self.send_json({"company": company})
             return
 
         if path == "/api/companies/metadata-suggestions/resolve":
             payload = self.read_json()
-            try:
-                company = company_store.resolve_company_metadata_suggestion(
-                    payload.get("id", ""),
-                    payload.get("suggestion_id", ""),
-                    payload.get("action", ""),
-                )
-            except ValueError as exc:
-                self.send_json({"error": str(exc)}, status=400)
-                return
+            company = company_store.resolve_company_metadata_suggestion(
+                payload.get("id", ""),
+                payload.get("suggestion_id", ""),
+                payload.get("action", ""),
+            )
             self.send_json({"company": company})
             return
 
@@ -703,9 +610,6 @@ class AppHandler(SimpleHTTPRequestHandler):
                     remote_region=payload.get("remote_region", company_discovery_store.DEFAULT_REMOTE_REGION),
                     metro_area=payload.get("metro_area", company_discovery_store.DEFAULT_METRO_AREA),
                 )
-            except ValueError as exc:
-                self.send_json({"error": str(exc)}, status=400)
-                return
             except RuntimeError as exc:
                 self.send_json({"error": str(exc)}, status=502)
                 return
@@ -734,11 +638,7 @@ class AppHandler(SimpleHTTPRequestHandler):
 
         if path == "/api/companies/check":
             payload = self.read_json()
-            try:
-                result = company_store.check_company_postings(payload.get("id", ""))
-            except ValueError as exc:
-                self.send_json({"error": str(exc)}, status=400)
-                return
+            result = company_store.check_company_postings(payload.get("id", ""))
             self.send_json(result)
             return
 
@@ -748,103 +648,71 @@ class AppHandler(SimpleHTTPRequestHandler):
 
         if path == "/api/companies/link-contact":
             payload = self.read_json()
-            try:
-                link = company_store.link_contact(
-                    company_id=payload.get("company_id", ""),
-                    contact_id=payload.get("contact_id", ""),
-                )
-            except ValueError as exc:
-                self.send_json({"error": str(exc)}, status=400)
-                return
+            link = company_store.link_contact(
+                company_id=payload.get("company_id", ""),
+                contact_id=payload.get("contact_id", ""),
+            )
             self.send_json({"link": link})
             return
 
         if path == "/api/companies/unlink-contact":
             payload = self.read_json()
-            try:
-                link = company_store.unlink_contact(
-                    company_id=payload.get("company_id", ""),
-                    contact_id=payload.get("contact_id", ""),
-                )
-            except ValueError as exc:
-                self.send_json({"error": str(exc)}, status=400)
-                return
+            link = company_store.unlink_contact(
+                company_id=payload.get("company_id", ""),
+                contact_id=payload.get("contact_id", ""),
+            )
             self.send_json({"link": link})
             return
 
         if path == "/api/companies/merge":
             payload = self.read_json()
-            try:
-                company = company_store.merge_companies(
-                    keep_company_id=payload.get("keep_company_id", ""),
-                    merge_company_id=payload.get("merge_company_id", ""),
-                )
-                discovery_store.canonicalize_candidates()
-            except ValueError as exc:
-                self.send_json({"error": str(exc)}, status=400)
-                return
+            company = company_store.merge_companies(
+                keep_company_id=payload.get("keep_company_id", ""),
+                merge_company_id=payload.get("merge_company_id", ""),
+            )
+            discovery_store.canonicalize_candidates()
             self.send_json({"company": company})
             return
 
         if path == "/api/companies/candidates/update":
             payload = self.read_json()
-            try:
-                candidate = company_store.update_candidate_status(
-                    candidate_id=payload.get("id", ""),
-                    status=payload.get("status", ""),
-                )
-            except ValueError as exc:
-                self.send_json({"error": str(exc)}, status=400)
-                return
+            candidate = company_store.update_candidate_status(
+                candidate_id=payload.get("id", ""),
+                status=payload.get("status", ""),
+            )
             self.send_json({"candidate": candidate})
             return
 
         if path == "/api/companies/candidates/bulk-update":
             payload = self.read_json()
-            try:
-                result = company_store.update_candidate_statuses(
-                    candidate_ids=payload.get("ids", []),
-                    status=payload.get("status", ""),
-                )
-            except ValueError as exc:
-                self.send_json({"error": str(exc)}, status=400)
-                return
+            result = company_store.update_candidate_statuses(
+                candidate_ids=payload.get("ids", []),
+                status=payload.get("status", ""),
+            )
             self.send_json(result)
             return
 
         if path in {"/api/companies/candidates/pursue", "/api/companies/candidates/ingest"}:
             payload = self.read_json()
-            try:
-                result = company_store.pursue_candidate(payload.get("id", ""))
-            except ValueError as exc:
-                self.send_json({"error": str(exc)}, status=400)
-                return
+            result = company_store.pursue_candidate(payload.get("id", ""))
             self.send_json(result)
             return
 
         if path == "/api/discovery/searches/upsert":
             payload = self.read_json()
-            try:
-                search = discovery_store.upsert_search(
-                    search_id=payload.get("id", ""),
-                    updates=payload.get("updates", {}),
-                )
-            except ValueError as exc:
-                self.send_json({"error": str(exc)}, status=400)
-                return
+            search = discovery_store.upsert_search(
+                search_id=payload.get("id", ""),
+                updates=payload.get("updates", {}),
+            )
             self.send_json({"search": search})
             return
 
         if path == "/api/discovery/searches/apply-exclusions":
             payload = self.read_json()
-            try:
-                result = discovery_store.apply_search_exclusions(
-                    search_id=payload.get("id", ""),
-                    excluded_terms=payload.get("excluded_terms"),
-                )
-            except ValueError as exc:
-                self.send_json({"error": str(exc)}, status=400)
-                return
+            result = discovery_store.apply_search_exclusions(
+                search_id=payload.get("id", ""),
+                excluded_terms=payload.get("excluded_terms"),
+            )
             self.send_json(result)
             return
 
@@ -858,11 +726,7 @@ class AppHandler(SimpleHTTPRequestHandler):
 
         if path == "/api/discovery/searches/open-linkedin":
             payload = self.read_json()
-            try:
-                result = discovery_store.open_linkedin_search(payload.get("id", ""))
-            except ValueError as exc:
-                self.send_json({"error": str(exc)}, status=400)
-                return
+            result = discovery_store.open_linkedin_search(payload.get("id", ""))
             self.send_json(result)
             return
 
@@ -870,9 +734,6 @@ class AppHandler(SimpleHTTPRequestHandler):
             payload = self.read_json()
             try:
                 result = discovery_store.run_search(payload.get("id", ""))
-            except ValueError as exc:
-                self.send_json({"error": str(exc)}, status=400)
-                return
             except RuntimeError as exc:
                 self.send_json({"error": str(exc)}, status=502)
                 return
@@ -888,9 +749,6 @@ class AppHandler(SimpleHTTPRequestHandler):
                     payload.get("id", ""),
                     enrichment_limit=payload.get("enrichment_limit", 10),
                 )
-            except ValueError as exc:
-                self.send_json({"error": str(exc)}, status=400)
-                return
             except RuntimeError as exc:
                 self.send_json({"error": str(exc)}, status=502)
                 return
@@ -926,15 +784,11 @@ class AppHandler(SimpleHTTPRequestHandler):
 
         if path == "/api/discovery/candidates/capture":
             payload = self.read_json()
-            try:
-                result = discovery_store.capture_candidates(
-                    search_id=payload.get("search_id", ""),
-                    capture_text=payload.get("capture_text", ""),
-                    details=payload.get("details", {}),
-                )
-            except ValueError as exc:
-                self.send_json({"error": str(exc)}, status=400)
-                return
+            result = discovery_store.capture_candidates(
+                search_id=payload.get("search_id", ""),
+                capture_text=payload.get("capture_text", ""),
+                details=payload.get("details", {}),
+            )
             company_discovery_jobs.enqueue_pending_evaluation()
             discovery_jobs.start_job({"search_id": payload.get("search_id", "")})
             self.send_json(result)
@@ -942,82 +796,58 @@ class AppHandler(SimpleHTTPRequestHandler):
 
         if path == "/api/discovery/candidates/details":
             payload = self.read_json()
-            try:
-                candidate = discovery_store.update_candidate_details(
-                    candidate_id=payload.get("id", ""),
-                    updates=payload.get("updates", {}),
-                )
-            except ValueError as exc:
-                self.send_json({"error": str(exc)}, status=400)
-                return
+            candidate = discovery_store.update_candidate_details(
+                candidate_id=payload.get("id", ""),
+                updates=payload.get("updates", {}),
+            )
             self.send_json({"candidate": candidate})
             return
 
         if path == "/api/discovery/candidates/update":
             payload = self.read_json()
-            try:
-                candidate = discovery_store.update_candidate_status(
-                    candidate_id=payload.get("id", ""),
-                    status=payload.get("status", ""),
-                    ignore_reason=payload.get("ignore_reason", ""),
-                    ignore_reason_detail=payload.get("ignore_reason_detail", ""),
-                )
-            except ValueError as exc:
-                self.send_json({"error": str(exc)}, status=400)
-                return
+            candidate = discovery_store.update_candidate_status(
+                candidate_id=payload.get("id", ""),
+                status=payload.get("status", ""),
+                ignore_reason=payload.get("ignore_reason", ""),
+                ignore_reason_detail=payload.get("ignore_reason_detail", ""),
+            )
             self.send_json({"candidate": candidate})
             return
 
         if path == "/api/discovery/candidates/bulk-update":
             payload = self.read_json()
-            try:
-                result = discovery_store.update_candidate_statuses(
-                    candidate_ids=payload.get("ids", []),
-                    status=payload.get("status", ""),
-                    ignore_reason=payload.get("ignore_reason", ""),
-                    ignore_reason_detail=payload.get("ignore_reason_detail", ""),
-                )
-            except ValueError as exc:
-                self.send_json({"error": str(exc)}, status=400)
-                return
+            result = discovery_store.update_candidate_statuses(
+                candidate_ids=payload.get("ids", []),
+                status=payload.get("status", ""),
+                ignore_reason=payload.get("ignore_reason", ""),
+                ignore_reason_detail=payload.get("ignore_reason_detail", ""),
+            )
             self.send_json(result)
             return
 
         if path == "/api/discovery/candidates/duplicate":
             payload = self.read_json()
-            try:
-                result = discovery_store.mark_candidate_duplicate(
-                    candidate_id=payload.get("id", ""),
-                    application_id=payload.get("application_id", ""),
-                )
-            except ValueError as exc:
-                self.send_json({"error": str(exc)}, status=400)
-                return
+            result = discovery_store.mark_candidate_duplicate(
+                candidate_id=payload.get("id", ""),
+                application_id=payload.get("application_id", ""),
+            )
             self.send_json(result)
             return
 
         if path in {"/api/discovery/candidates/pursue", "/api/discovery/candidates/ingest"}:
             payload = self.read_json()
-            try:
-                result = discovery_store.pursue_candidate(payload.get("id", ""))
-            except ValueError as exc:
-                self.send_json({"error": str(exc)}, status=400)
-                return
+            result = discovery_store.pursue_candidate(payload.get("id", ""))
             self.send_json(result)
             return
 
         if path == "/api/discovery/candidates/undo-decision":
             payload = self.read_json()
-            try:
-                result = discovery_store.undo_candidate_decision(
-                    candidate_id=payload.get("id", ""),
-                    decision=payload.get("decision", ""),
-                    application_id=payload.get("application_id", ""),
-                    remove_posting=bool(payload.get("remove_posting", False)),
-                )
-            except ValueError as exc:
-                self.send_json({"error": str(exc)}, status=400)
-                return
+            result = discovery_store.undo_candidate_decision(
+                candidate_id=payload.get("id", ""),
+                decision=payload.get("decision", ""),
+                application_id=payload.get("application_id", ""),
+                remove_posting=bool(payload.get("remove_posting", False)),
+            )
             self.send_json(result)
             return
 

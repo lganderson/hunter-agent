@@ -22,6 +22,9 @@ TABLES = {
     "actions": (paths.ACTIONS, schema.ACTION_FIELDS),
 }
 
+EDITABLE_TABLE_FIELDS = {**{name: fields for name, (_, fields) in TABLES.items()},
+                         "discovery_searches": schema.DISCOVERY_SEARCH_FIELDS}
+
 RESOURCE_FIELDS = {
     "companies": schema.COMPANY_FIELDS,
     "company_posting_candidates": schema.COMPANY_POSTING_CANDIDATE_FIELDS,
@@ -137,7 +140,7 @@ def write_transaction():
 
 
 def quote_identifier(value):
-    if value not in TABLES:
+    if value not in EDITABLE_TABLE_FIELDS:
         raise ValueError(f"Unknown table: {value}")
     return f'"{value}"'
 
@@ -1079,7 +1082,7 @@ def count_rows(table):
 class TableSnapshot(list):
     """Editable rows plus their read baseline for conflict-aware runtime saves.
 
-    Plain lists still denote an explicit replacement (fixtures and imports).
+    Saves require this baseline; replacement is a separate import operation.
     A runtime read/save pair only writes changed fields and never replaces rows
     added by another request while the caller was working or fetching a URL.
     """
@@ -1092,7 +1095,7 @@ class TableSnapshot(list):
 
 def read_table(table):
     ensure_initialized()
-    _, fields = TABLES[table]
+    fields = EDITABLE_TABLE_FIELDS[table]
     quoted_fields = ", ".join(quote_field(field, fields) for field in fields)
     with connect() as connection:
         rows = connection.execute(
@@ -1132,11 +1135,11 @@ def sync_next_action(application_id):
 def _save_table_snapshot(table, rows):
     if rows.table != table:
         raise ValueError("Cannot save a snapshot into a different table.")
-    fields = TABLES[table][1]
+    fields = EDITABLE_TABLE_FIELDS[table]
     submitted = {row["id"]: row for row in rows}
     if len(submitted) != len(rows):
         raise ValueError("Duplicate row ids in the submitted changes.")
-    prefix = {"applications": "A", "actions": "T", "contacts": "C", "interviews": "I"}[table]
+    prefix = {"applications": "A", "actions": "T", "contacts": "C", "interviews": "I", "discovery_searches": "DS"}[table]
     refreshed = []
     with write_transaction() as connection:
         current = {row["id"]: dict(row) for row in connection.execute(f"SELECT * FROM {quote_identifier(table)}")}
@@ -1210,12 +1213,18 @@ def _save_table_snapshot(table, rows):
     rows.original = {row["id"]: dict(row) for row in rows}
 
 
-def write_table(table, rows):
+def save_table_changes(table, rows):
+    """Commit only changes relative to a read baseline; never replace a table."""
+    if not isinstance(rows, TableSnapshot):
+        raise ValueError("Saving changes requires the original read snapshot. Use replace_table_for_import only for imports.")
     ensure_initialized()
-    if isinstance(rows, TableSnapshot):
-        _save_table_snapshot(table, rows)
-        return
-    _, fields = TABLES[table]
+    _save_table_snapshot(table, rows)
+
+
+def replace_table_for_import(table, rows):
+    """Explicit, destructive replacement for imports and synthetic fixtures."""
+    ensure_initialized()
+    fields = EDITABLE_TABLE_FIELDS[table]
     placeholders = ", ".join("?" for _ in fields)
     quoted_fields = ", ".join(quote_field(field, fields) for field in fields)
     values = [[storage.clean(row.get(field, "")) for field in fields] for row in rows]
@@ -1255,7 +1264,7 @@ def import_from_csv(overwrite=False):
     for table, (path, fields) in TABLES.items():
         rows = storage.read_rows(path, fields)
         if overwrite:
-            write_table(table, rows)
+            replace_table_for_import(table, rows)
         else:
             if count_rows(table):
                 raise ValueError(
@@ -1280,8 +1289,12 @@ def read_applications():
     return read_table("applications")
 
 
-def write_applications(rows):
-    write_table("applications", rows)
+def save_applications_changes(rows):
+    save_table_changes("applications", rows)
+
+
+def replace_applications_for_import(rows):
+    replace_table_for_import("applications", rows)
 
 
 def delete_unmodified_discovery_application(application_id):
@@ -1323,16 +1336,24 @@ def read_actions():
     return read_table("actions")
 
 
-def write_actions(rows):
-    write_table("actions", rows)
+def save_actions_changes(rows):
+    save_table_changes("actions", rows)
+
+
+def replace_actions_for_import(rows):
+    replace_table_for_import("actions", rows)
 
 
 def read_contacts():
     return read_table("contacts")
 
 
-def write_contacts(rows):
-    write_table("contacts", rows)
+def save_contacts_changes(rows):
+    save_table_changes("contacts", rows)
+
+
+def replace_contacts_for_import(rows):
+    replace_table_for_import("contacts", rows)
 
 
 def read_companies():
@@ -1857,29 +1878,17 @@ def clear_company_career_scans():
 
 
 def read_discovery_searches():
-    ensure_initialized()
-    fields = schema.DISCOVERY_SEARCH_FIELDS
-    quoted_fields = ", ".join(f'"{field}"' for field in fields)
-    with connect() as connection:
-        rows = connection.execute(
-            f"SELECT {quoted_fields} FROM discovery_searches ORDER BY lower(name), id"
-        ).fetchall()
-    return [{field: storage.clean(row[field]) for field in fields} for row in rows]
+    rows = read_table("discovery_searches")
+    rows.sort(key=lambda row: (row["name"].lower(), row["id"]))
+    return rows
 
 
-def write_discovery_searches(rows):
-    ensure_initialized()
-    fields = schema.DISCOVERY_SEARCH_FIELDS
-    placeholders = ", ".join("?" for _ in fields)
-    quoted_fields = ", ".join(f'"{field}"' for field in fields)
-    values = [[storage.clean(row.get(field, "")) for field in fields] for row in rows]
-    with write_transaction() as connection:
-        connection.execute("DELETE FROM discovery_searches")
-        if values:
-            connection.executemany(
-                f"INSERT INTO discovery_searches ({quoted_fields}) VALUES ({placeholders})",
-                values,
-            )
+def save_discovery_searches_changes(rows):
+    save_table_changes("discovery_searches", rows)
+
+
+def replace_discovery_searches_for_import(rows):
+    replace_table_for_import("discovery_searches", rows)
 
 
 def read_discovery_candidates():

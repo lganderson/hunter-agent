@@ -1,14 +1,19 @@
 import type {
   Action,
+  ActionDetail,
   Application,
   ApplicationContact,
+  ApplicationDetail,
   Company,
   CompanyCareerSource,
   CompanyContact,
+  CompanyDetail,
   CompanyMergeSuggestion,
-  CompanyPostingCandidate,
+  CompanyPostingCandidateDetail,
   Contact,
+  ContactDetail,
   DiscoveryCandidate,
+  DiscoveryCandidateDetail,
   DiscoveryPreferenceSuggestion,
   DiscoverySearch,
   Workflow
@@ -197,11 +202,11 @@ export type CandidateDetail<TPool extends CandidatePool> = {
   pool: TPool;
   revision: number;
   item: TPool extends "company"
-    ? CompanyPostingCandidate & {
+    ? CompanyPostingCandidateDetail & {
         company: CandidateCompanySummary | null;
         source_urls: string[];
       }
-    : Omit<DiscoveryCandidate, "company"> & { company: CandidateCompanySummary | null };
+    : Omit<DiscoveryCandidateDetail, "company"> & { company: CandidateCompanySummary | null };
   audit: {
     stable_revision: boolean;
     excluded_company: boolean;
@@ -230,8 +235,7 @@ export type AppShellAction = Pick<
   | "sort_due"
 >;
 export type AppShellContact = Omit<Contact, "notes">;
-export type AppShellCompany = Partial<Company> &
-  Pick<Company, "id" | "name" | "interest_status" | "tracking_status"> & {
+export type AppShellCompany = Company & {
     company_metadata_suggestion_count: number;
   };
 export type AppShellCompanyTable = {
@@ -272,10 +276,10 @@ export type AppShell = {
 export type EntityResource = "application" | "action" | "contact" | "company";
 
 export type EntityDetailItemMap = {
-  application: Application;
-  action: Action;
-  contact: Contact;
-  company: Company & { company_career_source: CompanyCareerSource | null };
+  application: ApplicationDetail;
+  action: ActionDetail;
+  contact: ContactDetail;
+  company: CompanyDetail & { company_career_source: CompanyCareerSource | null };
 };
 
 export type EntityDetail<TResource extends EntityResource> = {

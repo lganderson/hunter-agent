@@ -80,7 +80,7 @@ def create_application(values):
         else:
             row[field] = storage.clean(value)
     rows.append(row)
-    repository.write_applications(rows)
+    repository.save_applications_changes(rows)
     return row
 
 
@@ -100,7 +100,7 @@ def sync_related_action_identity(application):
                 action[field] = next_value
                 changed = True
     if changed:
-        repository.write_actions(actions)
+        repository.save_actions_changes(actions)
 
 
 def update_application(application_id, updates):
@@ -143,7 +143,7 @@ def update_application(application_id, updates):
             else:
                 row[field] = storage.clean(value)
         row["outcome"] = next_outcome
-        repository.write_applications(rows)
+        repository.save_applications_changes(rows)
         if not repository.using_sqlite() and any(field in (updates or {}) for field in ["company_id", "company", "role"]):
             sync_related_action_identity(row)
         if not repository.using_sqlite() and row.get("stage", "") == "closed":

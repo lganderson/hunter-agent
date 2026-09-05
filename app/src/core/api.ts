@@ -15,6 +15,7 @@ import type {
   CandidateEnrichmentJob,
   CompanyUpdates,
   Contact,
+  ContactDetail,
   ContactUpdates,
   DiscoveryCandidate,
   DiscoveryCandidateDetails,
@@ -63,7 +64,7 @@ function reloadForAgentUpdate(apiVersion?: number): never {
 }
 
 async function postJson<T>(url: string, payload: unknown, init: RequestInit = {}): Promise<T> {
-  const response = await fetchWithLocalRetry(url, {
+  const response = await fetchLocal(url, {
     ...init,
     method: "POST",
     headers: { "Content-Type": "application/json", ...init.headers },
@@ -72,18 +73,12 @@ async function postJson<T>(url: string, payload: unknown, init: RequestInit = {}
   return readJson<T>(response);
 }
 
-async function fetchWithLocalRetry(url: string, init: RequestInit): Promise<Response> {
+async function fetchLocal(url: string, init: RequestInit): Promise<Response> {
   try {
     return await fetch(url, init);
   } catch (error) {
     if (init.signal?.aborted) throw error;
-    await new Promise(resolve => window.setTimeout(resolve, 500));
-    try {
-      return await fetch(url, init);
-    } catch {
-      const message = error instanceof Error ? error.message : String(error);
-      throw new Error(`Could not reach Hunter local API. Restart the matching Hunter API server and reload the page. ${message}`);
-    }
+    throw new Error("Connection to Hunter was interrupted. The action may have completed. Reload and check before trying again.");
   }
 }
 
@@ -202,8 +197,8 @@ export function createApplication(values: ApplicationUpdates): Promise<{ applica
   return postJson<{ application: Application }>("/api/applications/create", { values });
 }
 
-export function upsertContact(id: string, updates: ContactUpdates): Promise<{ contact: Contact }> {
-  return postJson<{ contact: Contact }>("/api/contacts/upsert", { id, updates });
+export function upsertContact(id: string, updates: ContactUpdates): Promise<{ contact: ContactDetail }> {
+  return postJson<{ contact: ContactDetail }>("/api/contacts/upsert", { id, updates });
 }
 
 export function linkContact(contactId: string, applicationId: string): Promise<{ link: { application_id: string; contact_id: string } }> {

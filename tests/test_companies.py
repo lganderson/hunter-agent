@@ -94,10 +94,10 @@ class HunterCompaniesTest(unittest.TestCase):
 
     def test_upsert_company_auto_associates_exact_posting_and_syncs_action_company(self):
         sqlite_store.initialize()
-        repository.write_applications([
+        repository.replace_applications_for_import([
             application_row({"id": "A0001", "company": "Apple", "company_id": ""}),
         ])
-        repository.write_actions([
+        repository.replace_actions_for_import([
             action_row({"id": "T0001", "application_id": "A0001", "company": ""}),
         ])
 
@@ -456,7 +456,7 @@ class HunterCompaniesTest(unittest.TestCase):
 
     def test_link_and_unlink_company_contact(self):
         sqlite_store.initialize()
-        repository.write_contacts([contact_row({"id": "C0001", "name": "Ada"})])
+        repository.replace_contacts_for_import([contact_row({"id": "C0001", "name": "Ada"})])
         company = companies.upsert_company("", {"name": "Apple"})
 
         companies.link_contact(company["id"], "C0001")
@@ -467,10 +467,10 @@ class HunterCompaniesTest(unittest.TestCase):
 
     def test_archive_and_restore_company_preserves_associations(self):
         sqlite_store.initialize()
-        repository.write_applications([
+        repository.replace_applications_for_import([
             application_row({"id": "A0001", "company": "Apple", "company_id": ""}),
         ])
-        repository.write_contacts([contact_row({"id": "C0001", "name": "Ada"})])
+        repository.replace_contacts_for_import([contact_row({"id": "C0001", "name": "Ada"})])
         company = companies.upsert_company("", {"name": "Apple", "interest_status": "interested"})
         companies.link_contact(company["id"], "C0001")
 
@@ -484,10 +484,10 @@ class HunterCompaniesTest(unittest.TestCase):
 
     def test_untrack_company_returns_to_discovery_without_losing_associations(self):
         sqlite_store.initialize()
-        repository.write_applications([
+        repository.replace_applications_for_import([
             application_row({"id": "A0001", "company": "Apple", "company_id": ""}),
         ])
-        repository.write_contacts([contact_row({"id": "C0001", "name": "Ada"})])
+        repository.replace_contacts_for_import([contact_row({"id": "C0001", "name": "Ada"})])
         company = companies.upsert_company(
             "",
             {
@@ -526,7 +526,7 @@ class HunterCompaniesTest(unittest.TestCase):
 
     def test_check_company_postings_records_new_candidates_and_skips_tracked_urls(self):
         sqlite_store.initialize()
-        repository.write_applications([
+        repository.replace_applications_for_import([
             application_row({"id": "A0001", "source_url": "https://example.com/jobs/old-role"}),
         ])
         company = companies.upsert_company("", {"name": "Example", "careers_url": "https://example.com/careers"})
@@ -733,7 +733,7 @@ class HunterCompaniesTest(unittest.TestCase):
     def test_check_company_postings_marks_existing_candidate_ingested_by_job_board_identity(self):
         sqlite_store.initialize()
         company = companies.upsert_company("", {"name": "Figma", "careers_url": "https://www.figma.com/careers"})
-        repository.write_applications([
+        repository.replace_applications_for_import([
             application_row({
                 "id": "A0001",
                 "company": "Figma",
@@ -957,7 +957,7 @@ class HunterCompaniesTest(unittest.TestCase):
     def test_smartrecruiters_candidate_matches_branded_careers_url_by_job_id(self):
         sqlite_store.initialize()
         company = companies.upsert_company("", {"name": "Ubisoft"})
-        repository.write_applications([
+        repository.replace_applications_for_import([
             application_row({
                 "id": "A0001",
                 "company": "Ubisoft",
@@ -978,7 +978,7 @@ class HunterCompaniesTest(unittest.TestCase):
         sqlite_store.initialize()
         waymo = companies.upsert_company("", {"name": "Waymo"})
         best_buy = companies.upsert_company("", {"name": "Best Buy"})
-        repository.write_applications([
+        repository.replace_applications_for_import([
             application_row({
                 "id": "A0064",
                 "company": "Waymo",
@@ -1037,7 +1037,7 @@ class HunterCompaniesTest(unittest.TestCase):
     def test_check_company_postings_skips_existing_company_title_when_url_shape_changes(self):
         sqlite_store.initialize()
         company = companies.upsert_company("", {"name": "Example", "careers_url": "https://example.com/careers"})
-        repository.write_applications([
+        repository.replace_applications_for_import([
             application_row({
                 "id": "A0001",
                 "company": "Example",
@@ -1272,7 +1272,7 @@ class HunterCompaniesTest(unittest.TestCase):
                 "careers_url": "https://www.amazon.jobs/en",
             },
         )
-        repository.write_applications([
+        repository.replace_applications_for_import([
             application_row({
                 "id": "A0001",
                 "company": "Amazon",
@@ -1354,7 +1354,7 @@ class HunterCompaniesTest(unittest.TestCase):
                 "careers_url": "https://apply.careers.microsoft.com/careers",
             },
         )
-        repository.write_applications([
+        repository.replace_applications_for_import([
             application_row({
                 "id": "A0001",
                 "company": "Microsoft",
@@ -1496,7 +1496,7 @@ class HunterCompaniesTest(unittest.TestCase):
                 "careers_url": "https://explore.jobs.netflix.net/careers",
             },
         )
-        repository.write_applications([
+        repository.replace_applications_for_import([
             application_row({
                 "id": "A0001",
                 "company": "Netflix",
@@ -2502,7 +2502,7 @@ class HunterCompaniesTest(unittest.TestCase):
                 "careers_url": "https://openai.com/careers/search/",
             },
         )
-        repository.write_applications([
+        repository.replace_applications_for_import([
             application_row({
                 "id": "A0001",
                 "company": "OpenAI",
@@ -3980,7 +3980,7 @@ class HunterCompaniesTest(unittest.TestCase):
             discovery_candidates.append(discovery_candidate)
         repository.write_company_posting_candidates(company_candidates)
         repository.write_discovery_candidates(discovery_candidates)
-        repository.write_applications(
+        repository.replace_applications_for_import(
             [
                 application_row(
                     {
@@ -4073,7 +4073,7 @@ class HunterCompaniesTest(unittest.TestCase):
         sqlite_store.initialize()
         keep = companies.upsert_company("", {"name": "Reddit", "industry": "Social Networking Platforms"})
         duplicate = companies.upsert_company("", {"name": "Reddit, Inc.", "company_size": "1,001-5,000 employees"})
-        repository.write_applications([
+        repository.replace_applications_for_import([
             application_row({"id": "A0001", "company": duplicate["name"], "company_id": duplicate["id"]}),
         ])
         discovery_candidate = {field: "" for field in schema.DISCOVERY_CANDIDATE_FIELDS}
@@ -4087,7 +4087,7 @@ class HunterCompaniesTest(unittest.TestCase):
             }
         )
         repository.write_discovery_candidates([discovery_candidate])
-        repository.write_contacts([contact_row({"id": "C0001", "name": "Ada"})])
+        repository.replace_contacts_for_import([contact_row({"id": "C0001", "name": "Ada"})])
         companies.link_contact(duplicate["id"], "C0001")
 
         suggestions = companies.company_merge_suggestions()
@@ -4106,13 +4106,13 @@ class HunterCompaniesTest(unittest.TestCase):
         sqlite_store.initialize()
         company = companies.upsert_company("", {"name": "Example", "careers_url": "https://example.com/careers"})
         companies.upsert_company("", {"name": "Other"})
-        repository.write_contacts([contact_row({"id": "C0001", "name": "Ada"})])
+        repository.replace_contacts_for_import([contact_row({"id": "C0001", "name": "Ada"})])
         companies.link_contact(company["id"], "C0001")
-        repository.write_applications([
+        repository.replace_applications_for_import([
             application_row({"id": "A0001", "company": "Example", "company_id": company["id"], "role": "Engineer"}),
             application_row({"id": "A0002", "company": "Other", "company_id": "CO0002", "role": "Designer"}),
         ])
-        repository.write_actions([
+        repository.replace_actions_for_import([
             action_row({"id": "T0001", "application_id": "A0001", "title": "Research company"}),
             action_row({"id": "T0002", "application_id": "A0002", "title": "Unrelated action"}),
         ])

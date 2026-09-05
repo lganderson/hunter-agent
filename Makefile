@@ -70,3 +70,10 @@ serve-ready:
 	$(HUNTER) serve-ready $(PORT)
 
 run: serve-app
+
+.PHONY: check screenshots
+check:
+	$(PYTHON) scripts/check.py
+
+screenshots: frontend-build
+	node app/scripts/capture-screenshots.mjs

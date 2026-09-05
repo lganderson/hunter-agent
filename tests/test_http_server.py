@@ -20,8 +20,30 @@ class QuietAppHandler(serve_app.AppHandler):
 
 
 class HunterHttpServerTest(unittest.TestCase):
+    def test_get_and_provider_validation_share_json_client_errors(self):
+        cases = [
+            ("GET", "/api/companies/export", serve_app.company_store, "write_company_export", {}),
+            ("POST", "/api/resumes/plan", serve_app.resume_store, "propose_changes", {"application_id": "missing"}),
+        ]
+        for method, path, module, name, body in cases:
+            with self.subTest(path=path), patch.object(module, name, side_effect=ValueError("Invalid selection")):
+                status, _, payload = self.json_request(method, path, json.dumps(body).encode(), {"Content-Type": "application/json"})
+                self.assertEqual(status, 400)
+                self.assertEqual(payload["error"], "Invalid selection")
+
+    def test_invalid_nested_updates_return_json_and_do_not_mutate(self):
+        for updates in [["bad"], {"notes": []}, {"lanes": ["bad"]}]:
+            with self.subTest(updates=updates), patch.object(serve_app.contact_store, "upsert_contact") as save:
+                status, _, payload = self.json_request(
+                    "POST", "/api/contacts/upsert", json.dumps({"updates": updates}).encode(),
+                    {"Content-Type": "application/json"},
+                )
+                self.assertEqual(status, 400)
+                self.assertIn("request.updates", payload["error"])
+                save.assert_not_called()
+
     def test_invalid_contact_date_returns_json_validation_error(self):
-        with patch.object(serve_app.repository, "read_contacts", return_value=[]), patch.object(serve_app.repository, "write_contacts") as save:
+        with patch.object(serve_app.repository, "read_contacts", return_value=[]), patch.object(serve_app.repository, "save_contacts_changes") as save:
             status, _, payload = self.json_request(
                 "POST", "/api/contacts/upsert",
                 json.dumps({"updates": {"name": "Synthetic Contact", "next_follow_up": "bad-date"}}).encode(),

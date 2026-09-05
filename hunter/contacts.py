@@ -56,7 +56,7 @@ def upsert_contact(contact_id="", updates=None):
         else:
             row[field] = storage.clean(value)
 
-    repository.write_contacts(rows)
+    repository.save_contacts_changes(rows)
     return row
 
 

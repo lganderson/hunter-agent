@@ -6,7 +6,7 @@ Hunter's local app is intentionally small and dependency-light.
 
 - Python 3.10+.
 - No required Python packages.
-- Node.js and npm for frontend development and builds.
+- Node.js matching `^20.19.0 || >=22.12.0`, and npm for frontend development and builds.
 - No external database or hosted service required.
 - SQLite is available through Python's standard library.
 
@@ -31,7 +31,7 @@ The older files in `scripts/` are still supported as thin wrappers and implement
 - `hunter/schema.py`: table field lists and shared state constants.
 - `hunter/storage.py`: zero-dependency CSV read/write, date, and tag helpers.
 - `hunter/sqlite_store.py`: stdlib SQLite backend for local app persistence.
-- `hunter/repository.py`: active storage facade. Uses SQLite for runtime data and CSV only when no database has been initialized.
+- `hunter/repository.py`: active storage facade. Uses SQLite for all runtime data; CSV is an explicit import/export format.
 - `hunter/settings.py`: local provider settings in `data/settings.local.json`.
 - `hunter/workflow.py`: SQLite-backed workflow stage and action-type definitions.
 - `hunter/actions.py`: action storage operations shared by the app server and scripts.
@@ -225,3 +225,14 @@ The MCP server exposes tools for listing postings, reading one posting with its 
 ## Design Rule
 
 New local functionality should go into `hunter/` first, then be exposed through scripts, the local app server, or future MCP/web surfaces. Avoid adding framework dependencies until a feature clearly needs them.
+
+## Code boundaries
+
+- `hunter/adapters/` parses provider payloads without persistence or personal fit decisions. Company services apply those decisions after parsing.
+- `hunter/validation.py` validates HTTP and MCP request shapes; `hunter/http_contracts.py` declares local HTTP field contracts.
+- Runtime `save_*_changes` operations require the original read baseline and preserve independent changes. Plain lists are rejected. `replace_*_for_import` operations are explicitly destructive and limited to imports/demo fixtures.
+- Frontend summary types leave omitted detail fields undefined. Detail queries supply complete records before editing. `readModelAdapters.ts` normalizes transport shapes without inventing blank details.
+- `useBackgroundJob` shares worker state through TanStack Query, polling active work more frequently than idle workers.
+- Browser integration tests run the built frontend, real Python HTTP handlers, and SQLite in a disposable demo workspace. They never use the active personal database.
+
+The broader codebase is being separated incrementally. Legacy company adapters and search orchestration still share their existing entry points while extracted modules establish narrower boundaries.

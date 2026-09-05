@@ -2419,7 +2419,7 @@ class HunterDiscoveryTest(unittest.TestCase):
                 "excluded_terms_json": '["infrastructure"]',
             }
         )
-        repository.write_discovery_searches([search])
+        repository.replace_discovery_searches_for_import([search])
         rows = []
         for candidate_id, title, status in [
             ("DC0001", "Technical Program Manager, Infrastructure", "new"),
@@ -2464,7 +2464,7 @@ class HunterDiscoveryTest(unittest.TestCase):
                 "lanes_json": '[{"id":"lane-1","label":"US","location":"United States","work_modes":["remote"]}]',
             }
         )
-        repository.write_discovery_searches([search])
+        repository.replace_discovery_searches_for_import([search])
         rows = []
         for index in range(2):
             row = {field: "" for field in schema.DISCOVERY_CANDIDATE_FIELDS}
@@ -2757,7 +2757,7 @@ class HunterDiscoveryTest(unittest.TestCase):
         self.assertEqual(result["company_research_remaining_count"], 2)
 
     def test_legacy_location_fields_migrate_into_search_lanes(self):
-        repository.write_discovery_searches(
+        repository.replace_discovery_searches_for_import(
             [
                 {
                     "id": "DS0001",
@@ -2916,7 +2916,7 @@ class HunterDiscoveryTest(unittest.TestCase):
                 "source_url": "https://careers.withwaymo.com/jobs?gh_jid=8026543",
                 "stage": "considering",
         })
-        repository.write_applications([posting])
+        repository.replace_applications_for_import([posting])
         rows = []
         for candidate_id, requisition, title in [
             ("DC0001", "8109626", "Senior Product Manager, Autonomous Vehicle Reliability"),

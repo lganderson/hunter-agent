@@ -1,24 +1,24 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import type { CSSProperties } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import { Link, NavLink, Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { ActionsPage } from "./actions/ActionsPage";
 import { buildAgentContext } from "./agent/agentContext";
 import { HunterChat } from "./agent/HunterChat";
 import { CandidatesPage } from "./candidates/CandidatesPage";
-import { BriefcaseIcon, CalendarIcon, ChevronLeftIcon, ChevronRightIcon, GearIcon, HomeIcon, ListIcon, PeopleIcon, SearchIcon } from "./components/Icons";
 import { CompaniesPage, CompanyDetailPage } from "./companies/CompaniesPage";
+import { BriefcaseIcon, CalendarIcon, ChevronLeftIcon, ChevronRightIcon, GearIcon, HomeIcon, ListIcon, PeopleIcon, SearchIcon } from "./components/Icons";
 import { ContactsPage } from "./contacts/ContactsPage";
-import type { AppState, Application, CompanyPostingCandidate, DiscoveryCandidate } from "./core/types";
+import { getCandidateEnrichmentJob, getCompanyDiscoveryJob, startCandidateDiscovery, startCandidateEnrichment, startCompanyDiscovery, startCompanyEvaluation } from "./core/api";
+import { readModelQueryKeys } from "./core/queryKeys";
 import { routes } from "./core/routes";
+import type { AppState, Application, CandidateEnrichmentJob, CompanyDiscoveryJob, CompanyPostingCandidate, DiscoveryCandidate } from "./core/types";
+import { useBackgroundJob } from "./core/useBackgroundJob";
+import type { ActionUpdateResult } from "./core/useHunterData";
 import { DashboardPage } from "./dashboard/DashboardPage";
 import { PostingDetailPage } from "./postings/PostingDetailPage";
 import { PostingsPage } from "./postings/PostingsPage";
 import { SettingsPage } from "./settings/SettingsPage";
-import { getCandidateEnrichmentJob, getCompanyDiscoveryJob, startCandidateDiscovery, startCandidateEnrichment, startCompanyDiscovery, startCompanyEvaluation } from "./core/api";
-import type { CandidateEnrichmentJob, CompanyDiscoveryJob } from "./core/types";
-import type { ActionUpdateResult } from "./core/useHunterData";
-import { readModelQueryKeys } from "./core/queryKeys";
 
 type AppProps = {
   data: AppState;
@@ -102,10 +102,17 @@ export function App({ data, refresh, applyActionUpdate, applyApplicationUpdate, 
   const [agentPanelWidth, setAgentPanelWidth] = useState(storedAgentPanelWidth);
   const [navCollapsed, setNavCollapsed] = useState(() => storedBoolean(NAV_COLLAPSED_KEY));
   const shellRef = useRef<HTMLDivElement | null>(null);
-  const [companyDiscoveryJob, setCompanyDiscoveryJob] = useState<CompanyDiscoveryJob | null>(null);
-  const [candidateEnrichmentJob, setCandidateEnrichmentJob] = useState<CandidateEnrichmentJob | null>(null);
-  const lastRefreshedDiscoveryJob = useRef("");
-  const lastRefreshedEnrichmentJob = useRef("");
+  const refreshEnrichedCandidates = useCallback(async () => {
+    await Promise.all([
+      refresh(),
+      queryClient.invalidateQueries({ queryKey: readModelQueryKeys.candidateLists("discovery") })
+    ]);
+    await queryClient.invalidateQueries({
+      queryKey: readModelQueryKeys.candidateDetails("discovery"), refetchType: "none"
+    });
+  }, [queryClient, refresh]);
+  const [companyDiscoveryJob, setCompanyDiscoveryJob] = useBackgroundJob("companies", getCompanyDiscoveryJob, refresh);
+  const [candidateEnrichmentJob, setCandidateEnrichmentJob] = useBackgroundJob("candidates", getCandidateEnrichmentJob, refreshEnrichedCandidates);
   const agentContext = useMemo(
     () => buildAgentContext(location.pathname, location.search, data),
     [data, location.pathname, location.search]
@@ -121,65 +128,6 @@ export function App({ data, refresh, applyActionUpdate, applyApplicationUpdate, 
       // The panel still resizes for this session when local storage is unavailable.
     }
   }, []);
-
-  useEffect(() => {
-    let active = true;
-    async function pollDiscoveryJob() {
-      try {
-        const response = await getCompanyDiscoveryJob();
-        if (!active) return;
-        setCompanyDiscoveryJob(response.job);
-        if (
-          response.job?.status === "completed"
-          && lastRefreshedDiscoveryJob.current !== response.job.id
-        ) {
-          lastRefreshedDiscoveryJob.current = response.job.id;
-          await refresh();
-        }
-      } catch {
-        // The rest of Hunter remains usable while the local job endpoint reconnects.
-      }
-    }
-    void pollDiscoveryJob();
-    const interval = window.setInterval(() => void pollDiscoveryJob(), 1_000);
-    return () => {
-      active = false;
-      window.clearInterval(interval);
-    };
-  }, [refresh]);
-
-  useEffect(() => {
-    let active = true;
-    async function pollEnrichmentJob() {
-      try {
-        const response = await getCandidateEnrichmentJob();
-        if (!active) return;
-        setCandidateEnrichmentJob(response.job);
-        if (
-          response.job?.status === "completed"
-          && lastRefreshedEnrichmentJob.current !== response.job.id
-        ) {
-          lastRefreshedEnrichmentJob.current = response.job.id;
-          await Promise.all([
-            refresh(),
-            queryClient.invalidateQueries({ queryKey: readModelQueryKeys.candidateLists("discovery") })
-          ]);
-          await queryClient.invalidateQueries({
-            queryKey: readModelQueryKeys.candidateDetails("discovery"),
-            refetchType: "none"
-          });
-        }
-      } catch {
-        // The rest of Hunter remains usable while the local job endpoint reconnects.
-      }
-    }
-    void pollEnrichmentJob();
-    const interval = window.setInterval(() => void pollEnrichmentJob(), 1_000);
-    return () => {
-      active = false;
-      window.clearInterval(interval);
-    };
-  }, [queryClient, refresh]);
 
   const beginCompanyDiscovery = useCallback(async (payload: CompanyDiscoveryJob["request"]) => {
     const response = await startCompanyDiscovery({

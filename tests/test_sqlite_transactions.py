@@ -52,6 +52,36 @@ class SQLiteTransactionFoundationTest(unittest.TestCase):
             setattr(paths, name, value)
         self.tempdir.cleanup()
 
+    def test_plain_list_cannot_accidentally_replace_runtime_data(self):
+        contacts.upsert_contact(updates={"name": "First synthetic contact"})
+        stale = repository.read_contacts()
+        contacts.upsert_contact(updates={"name": "Second synthetic contact"})
+        revision = repository.data_revision()
+        with self.assertRaisesRegex(ValueError, "original read snapshot"):
+            repository.save_contacts_changes(list(stale))
+        self.assertEqual(len(repository.read_contacts()), 2)
+        self.assertEqual(repository.data_revision(), revision)
+
+    def test_saved_search_edits_preserve_independent_changes(self):
+        repository.replace_discovery_searches_for_import([
+            {"id": "DS0001", "name": "First"}, {"id": "DS0002", "name": "Second"},
+        ])
+        first = repository.read_discovery_searches()
+        second = repository.read_discovery_searches()
+        first[0]["keywords"] = "product"
+        second[1]["keywords"] = "platform"
+        repository.save_discovery_searches_changes(first)
+        repository.save_discovery_searches_changes(second)
+        saved = {row["id"]: row for row in repository.read_discovery_searches()}
+        self.assertEqual(saved["DS0001"]["keywords"], "product")
+        self.assertEqual(saved["DS0002"]["keywords"], "platform")
+        first[0]["keywords"] = "stale"
+        latest = repository.read_discovery_searches()
+        latest[0]["keywords"] = "newer"
+        repository.save_discovery_searches_changes(latest)
+        with self.assertRaisesRegex(ValueError, "changed while you were editing"):
+            repository.save_discovery_searches_changes(first)
+
     def test_overlapping_application_edits_preserve_both_rows_and_fields(self):
         first = applications.create_application({"company": "Synthetic One", "role": "Lead"})
         second = applications.create_application({"company": "Synthetic Two", "role": "Lead"})
@@ -85,7 +115,7 @@ class SQLiteTransactionFoundationTest(unittest.TestCase):
         stale[1]["notes"] = "Must roll back"
         revision = repository.data_revision()
         with self.assertRaisesRegex(ValueError, "changed while you were editing"):
-            repository.write_applications(stale)
+            repository.save_applications_changes(stale)
         self.assertEqual(repository.data_revision(), revision)
         self.assertEqual(repository.read_applications()[0]["notes"], "Saved elsewhere")
         self.assertEqual(repository.read_applications()[1]["notes"], "")
@@ -114,7 +144,7 @@ class SQLiteTransactionFoundationTest(unittest.TestCase):
         actions.update_action_status(first["id"], "done")
         third = actions.create_action(app["id"], {"title": "Third action", "type": action_type})
         next(row for row in stale if row["id"] == second["id"])["title"] = "Edited action"
-        repository.write_actions(stale)
+        repository.save_actions_changes(stale)
         saved = {row["id"]: row for row in repository.read_actions()}
         self.assertEqual(saved[first["id"]]["status"], "done")
         self.assertIn(third["id"], saved)

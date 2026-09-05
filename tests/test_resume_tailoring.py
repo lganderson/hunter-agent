@@ -44,7 +44,7 @@ class ResumeTailoringTest(unittest.TestCase):
             "stage": "resume-tailoring",
             "priority": "high",
         })
-        repository.write_applications([application])
+        repository.replace_applications_for_import([application])
         repository.write_posting_note(
             "A0001",
             "postings/A0001.md",

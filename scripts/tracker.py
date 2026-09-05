@@ -132,10 +132,10 @@ def read_rows(path, fields):
 
 def write_rows(path, fields, rows):
     if path == APPLICATIONS and fields == APPLICATION_FIELDS and repository.using_sqlite():
-        repository.write_applications(rows)
+        repository.save_applications_changes(rows)
         return
     if path == ACTIONS and fields == ACTION_FIELDS and repository.using_sqlite():
-        repository.write_actions(rows)
+        repository.save_actions_changes(rows)
         return
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="", encoding="utf-8") as handle:

@@ -4,7 +4,7 @@ import { discoveryFiltersFromParams, discoverySelectionParam } from "../candidat
 import { createHunterQueryClient } from "./queryClient";
 import { readModelQueryKeys } from "./queryKeys";
 import { candidateListSearchParams, ReadModelApiError } from "./readModelApi";
-import { appShellToLegacyState, companyListItemToLegacyCandidate } from "./readModelAdapters";
+import { appShellToViewState, companyListItemToSummary } from "./readModelAdapters";
 import {
   discoveryCandidateListQueryOptions,
   nextCandidatePageParam
@@ -70,7 +70,7 @@ describe("read model candidate query foundation", () => {
     }
   });
 
-  it("expands compact companies and defaults action detail-only fields", () => {
+  it("expands compact companies without inventing unloaded action details", () => {
     const shell = {
       api_version: 1,
       generated_at: "2026-09-01T12:00:00",
@@ -120,24 +120,22 @@ describe("read model candidate query foundation", () => {
       audit: { stable_revision: true, omitted_large_fields: [] }
     } as AppShell;
 
-    const state = appShellToLegacyState(shell);
+    const state = appShellToViewState(shell);
     expect(state.companies[0]).toMatchObject({
       id: "CO0001",
       company_fit_summary: "Strong fit",
       company_metadata_suggestion_count: 3,
       tracking_recommendation: "Worth reviewing"
     });
-    expect(state.actions[0]).toMatchObject({
-      id: "AC0001",
-      description: "",
-      source: "",
-      related_url: "",
-      notes: ""
-    });
+    expect(state.actions[0].id).toBe("AC0001");
+    expect(state.actions[0].description).toBeUndefined();
+    expect(state.actions[0].notes).toBeUndefined();
+    expect(state.actions[0].related_url).toBeUndefined();
+    expect(state.actions[0].source).toBeUndefined();
   });
 
   it("preserves company lane matches needed by the default review scope", () => {
-    const candidate = companyListItemToLegacyCandidate({
+    const candidate = companyListItemToSummary({
       id: "CP0001",
       company_id: "CO0001",
       company: null,

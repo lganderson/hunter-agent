@@ -298,7 +298,7 @@ class IngestPostingsTest(unittest.TestCase):
 
     def test_archive_existing_posting_captures_snapshot_without_generating_note(self):
         sqlite_store.initialize()
-        repository.write_applications([{
+        repository.replace_applications_for_import([{
             "id": "A0042",
             "company": "Example",
             "role": "Platform Product Manager",
@@ -327,7 +327,7 @@ class IngestPostingsTest(unittest.TestCase):
 
     def test_archive_existing_posting_rejects_unreachable_demo_url(self):
         sqlite_store.initialize()
-        repository.write_applications([{
+        repository.replace_applications_for_import([{
             "id": "A0043",
             "company": "Example",
             "role": "Demo Product Manager",
@@ -350,7 +350,7 @@ class IngestPostingsTest(unittest.TestCase):
 
     def test_archive_existing_posting_recovers_with_openai_web_search(self):
         sqlite_store.initialize()
-        repository.write_applications([{
+        repository.replace_applications_for_import([{
             "id": "A0046",
             "company": "Example",
             "role": "Platform Product Manager",
@@ -391,7 +391,7 @@ class IngestPostingsTest(unittest.TestCase):
 
     def test_manual_posting_archive_preserves_pasted_content_and_deduplicates(self):
         sqlite_store.initialize()
-        repository.write_applications([{
+        repository.replace_applications_for_import([{
             "id": "A0044",
             "company": "Example",
             "role": "Platform Product Manager",
@@ -420,7 +420,7 @@ class IngestPostingsTest(unittest.TestCase):
 
     def test_manual_posting_archive_rejects_blank_content(self):
         sqlite_store.initialize()
-        repository.write_applications([{"id": "A0045", "company": "Example", "role": "Manager"}])
+        repository.replace_applications_for_import([{"id": "A0045", "company": "Example", "role": "Manager"}])
 
         with self.assertRaisesRegex(ValueError, "Paste the posting content"):
             ingest_postings.save_manual_posting_snapshot("A0045", "  \n  ")

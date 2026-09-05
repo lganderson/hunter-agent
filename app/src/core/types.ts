@@ -1,4 +1,4 @@
-export type Application = {
+export type ApplicationDetail = {
   id: string;
   company_id: string;
   company: string;
@@ -48,7 +48,7 @@ export type PostingSnapshot = {
   source_html_char_count: number;
 };
 
-export type Action = {
+export type ActionDetail = {
   id: string;
   application_id: string;
   company: string;
@@ -72,7 +72,7 @@ export type Action = {
   sort_due: string;
 };
 
-export type Contact = {
+export type ContactDetail = {
   id: string;
   name: string;
   company: string;
@@ -86,7 +86,7 @@ export type Contact = {
   notes: string;
 };
 
-export type Company = {
+export type CompanyDetail = {
   id: string;
   name: string;
   aliases: string;
@@ -264,7 +264,7 @@ export type CompanyContact = {
   created_at: string;
 };
 
-export type CompanyCareerSource = {
+export type CompanyCareerSourceDetail = {
   company_id: string;
   source_url: string;
   platform_type: string;
@@ -276,7 +276,7 @@ export type CompanyCareerSource = {
   notes: string;
 };
 
-export type CompanyPostingCandidate = {
+export type CompanyPostingCandidateDetail = {
   id: string;
   company_id: string;
   title: string;
@@ -382,7 +382,7 @@ export type DiscoveryLastRunSummary = {
   enrichment?: DiscoveryEnrichmentResult;
 };
 
-export type DiscoveryCandidate = {
+export type DiscoveryCandidateDetail = {
   id: string;
   search_id: string;
   search_ids: string[];
@@ -748,3 +748,24 @@ export type AgentChatResponse = {
   tool_calls: AgentToolCall[];
   mutated: boolean;
 };
+
+/** List responses omit detail fields. Undefined means not loaded. */
+export type Application = Omit<ApplicationDetail, "notes"> & Partial<Pick<ApplicationDetail, "notes">>;
+
+/** List responses omit detail fields. Undefined means not loaded. */
+export type Action = Omit<ActionDetail, "description" | "created_date" | "completed_date" | "source" | "related_url" | "notes"> & Partial<Pick<ActionDetail, "description" | "created_date" | "completed_date" | "source" | "related_url" | "notes">>;
+
+/** List responses omit detail fields. Undefined means not loaded. */
+export type Contact = Omit<ContactDetail, "notes"> & Partial<Pick<ContactDetail, "notes">>;
+
+/** List responses omit detail fields. Undefined means not loaded. */
+export type CompanyCareerSource = Omit<CompanyCareerSourceDetail, "evidence" | "notes"> & Partial<Pick<CompanyCareerSourceDetail, "evidence" | "notes">>;
+
+/** List responses omit detail fields. Undefined means not loaded. */
+export type Company = Omit<CompanyDetail, "discovered_at" | "last_seen_at" | "company_profile_url" | "company_metadata_source" | "company_metadata_checked_at" | "company_metadata_suggestions_json" | "company_research_status" | "company_discovery_evidence" | "company_location_evidence" | "company_location_checked_at" | "company_fit_checked_at" | "company_evaluation_version" | "company_evaluation_checked_at" | "notes"> & Partial<Pick<CompanyDetail, "discovered_at" | "last_seen_at" | "company_profile_url" | "company_metadata_source" | "company_metadata_checked_at" | "company_metadata_suggestions_json" | "company_research_status" | "company_discovery_evidence" | "company_location_evidence" | "company_location_checked_at" | "company_fit_checked_at" | "company_evaluation_version" | "company_evaluation_checked_at" | "notes">>;
+
+/** List responses omit detail fields. Undefined means not loaded. */
+export type CompanyPostingCandidate = Omit<CompanyPostingCandidateDetail, "matched_queries" | "description_hash" | "score_inputs_hash" | "normalization_warnings" | "last_scan_run_id" | "notes" | "requisition_ids"> & Partial<Pick<CompanyPostingCandidateDetail, "matched_queries" | "description_hash" | "score_inputs_hash" | "normalization_warnings" | "last_scan_run_id" | "notes" | "requisition_ids">>;
+
+/** List responses omit detail fields. Undefined means not loaded. */
+export type DiscoveryCandidate = Omit<DiscoveryCandidateDetail, "detail_attempt_count" | "detail_last_attempt_at" | "detail_gaps" | "requisition_ids" | "description_text" | "warnings" | "source_urls_json" | "source_urls" | "acquisition_provenance_json" | "acquisition_provenance" | "ignore_reason" | "ignore_reason_detail" | "fit_strengths" | "fit_gaps" | "is_direct_employer_source" | "responsibility_signals" | "ingested_application_id" | "notes"> & Partial<Pick<DiscoveryCandidateDetail, "detail_attempt_count" | "detail_last_attempt_at" | "detail_gaps" | "requisition_ids" | "description_text" | "warnings" | "source_urls_json" | "source_urls" | "acquisition_provenance_json" | "acquisition_provenance" | "ignore_reason" | "ignore_reason_detail" | "fit_strengths" | "fit_gaps" | "is_direct_employer_source" | "responsibility_signals" | "ingested_application_id" | "notes">>;

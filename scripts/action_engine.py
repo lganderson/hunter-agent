@@ -424,7 +424,7 @@ def create_actions_for_application(app, warnings=None, use_ai=False):
             if was_created:
                 created.append(row)
 
-    repository.write_actions(rows)
+    repository.save_actions_changes(rows)
     action_store.sync_next_action(app.get("id", ""))
     return created, ai_warning
 

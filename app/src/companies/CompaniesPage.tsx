@@ -29,11 +29,11 @@ import type { AppState, Company, CompanyCareerSource, CompanyDiscoveryJob, Compa
 import { selectionFromParam, selectionParamValue, sortFromParams, usePersistentViewParams } from "../core/viewState";
 import {
   candidateFitScore,
-  candidateRank,
+  candidateRank
 } from "./candidateUtils";
 import {
-  companyListItemToLegacyCandidate,
-  discoveryListItemToLegacyCandidate
+  companyListItemToSummary,
+  discoveryListItemToSummary
 } from "../core/readModelAdapters";
 import {
   useCompanyCandidateList,
@@ -950,9 +950,9 @@ export function CompanyDetailPage({ data: shellData, refresh, applyCompanyCandid
           ]
         : shellData.company_career_sources,
       company_posting_candidates: (companyCandidatesQuery.data?.pages || [])
-        .flatMap(page => page.items.map(companyListItemToLegacyCandidate)),
+        .flatMap(page => page.items.map(companyListItemToSummary)),
       discovery_candidates: (discoveryCandidatesQuery.data?.pages || [])
-        .flatMap(page => page.items.map(discoveryListItemToLegacyCandidate))
+        .flatMap(page => page.items.map(discoveryListItemToSummary))
     };
   }, [companyCandidatesQuery.data?.pages, companyDetailQuery.data?.item, discoveryCandidatesQuery.data?.pages, id, shellData]);
   const refreshCandidatePool = async (pool: "company" | "discovery") => {

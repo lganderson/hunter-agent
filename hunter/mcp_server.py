@@ -8,6 +8,7 @@ import json
 import subprocess
 import sys
 
+from .validation import validate
 from . import actions as action_store
 from . import app_state
 from . import applications as application_store
@@ -1764,10 +1765,15 @@ def call_tool_result(params):
 def call_named_tool(name, args):
     if name not in TOOLS:
         raise ValueError(f"Unknown tool: {name}")
+    validate(args, TOOLS[name]["inputSchema"], "arguments")
     return TOOLS[name]["handler"](args)
 
 
 def handle_request(message):
+    if not isinstance(message, dict) or not isinstance(message.get("method"), str):
+        return error_response(None, -32600, "Invalid JSON-RPC request.")
+    if "params" in message and not isinstance(message["params"], dict):
+        return error_response(message.get("id"), -32602, "params must be an object.")
     method = message.get("method")
     request_id = message.get("id")
     params = message.get("params") or {}

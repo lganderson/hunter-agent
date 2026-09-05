@@ -129,7 +129,7 @@ def create_action(application_id, values):
         raise ValueError(str(exc)) from exc
     row = {field: storage.clean(row.get(field, "")) for field in schema.ACTION_FIELDS}
     rows.append(row)
-    repository.write_actions(rows)
+    repository.save_actions_changes(rows)
     sync_next_action(wanted)
     return row
 
@@ -182,7 +182,7 @@ def update_action_fields(action_id, updates):
                 row[field] = priority
             else:
                 row[field] = storage.clean(value)
-        repository.write_actions(rows)
+        repository.save_actions_changes(rows)
         sync_next_action(row.get("application_id", ""))
         return row
     raise ValueError(f"No action found with id {action_id}.")
@@ -205,7 +205,7 @@ def make_next_action(action_id):
     for app in applications:
         if app.get("id", "").upper() == application_id:
             app["next_action_id"] = action.get("id", "")
-            repository.write_applications(applications)
+            repository.save_applications_changes(applications)
             return sync_next_action(application_id)
     raise ValueError(f"No application found with id {application_id}.")
 
@@ -241,5 +241,5 @@ def sync_next_action(application_id):
         target["next_action"] = next_action.get("title", "") if next_action else ""
         target["next_action_date"] = next_action.get("due_date", "") if next_action else ""
 
-    repository.write_applications(applications)
+    repository.save_applications_changes(applications)
     return target

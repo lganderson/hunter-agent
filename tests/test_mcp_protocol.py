@@ -84,3 +84,19 @@ class McpProtocolTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class InvalidShapeTest(unittest.TestCase):
+    def test_malformed_shape_does_not_stop_following_requests(self):
+        import io
+        from hunter import mcp_server
+        output = io.StringIO()
+        mcp_server.serve(io.StringIO('[]\n{"jsonrpc":"2.0","id":2,"method":"tools/list"}\n'), output)
+        responses = [json.loads(line) for line in output.getvalue().splitlines()]
+        self.assertEqual(responses[0]["error"]["code"], -32600)
+        self.assertIn("tools", responses[1]["result"])
+
+    def test_tool_arguments_are_validated_before_dispatch(self):
+        from hunter import mcp_server
+        with self.assertRaisesRegex(ValueError, "arguments"):
+            mcp_server.call_named_tool("hunter_list_postings", ["invalid"])

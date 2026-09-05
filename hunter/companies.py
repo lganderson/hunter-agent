@@ -15,6 +15,10 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
 from urllib.request import Request, urlopen
 
+from .adapters import greenhouse as greenhouse_adapter, lever as lever_adapter
+from .adapters.text import normalize_url, clean_html_text
+from .adapters.greenhouse import (greenhouse_text_value, greenhouse_metadata_value, greenhouse_location, greenhouse_category, greenhouse_candidate_url)
+
 from . import applications, candidate_eligibility, paths, repository, schema, settings as settings_store, storage
 
 
@@ -960,30 +964,6 @@ def unlink_contact(company_id, contact_id):
     return repository.unlink_company_contact(company_id, contact_id)
 
 
-@lru_cache(maxsize=16_384)
-def normalize_url(value):
-    cleaned = (value or "").strip()
-    if not cleaned:
-        return ""
-    parsed = urlparse(cleaned)
-    scheme = "https" if parsed.scheme.lower() in {"http", "https", ""} else parsed.scheme.lower()
-    ignored_query_prefixes = {"utm_"}
-    ignored_query_keys = set()
-    if re.search(r"/jobs/results/[^/]+", parsed.path):
-        ignored_query_keys.update({"q", "page", "location"})
-    query = [
-        (key, item)
-        for key, item in parse_qsl(parsed.query, keep_blank_values=True)
-        if not key.lower().startswith(tuple(ignored_query_prefixes)) and key.lower() not in ignored_query_keys
-    ]
-    normalized = parsed._replace(
-        scheme=scheme,
-        netloc=parsed.netloc.lower(),
-        path=parsed.path.rstrip("/"),
-        query=urlencode(query, doseq=True),
-        fragment="",
-    )
-    return urlunparse(normalized)
 
 
 def job_board_family(host):
@@ -1288,10 +1268,6 @@ def clean_link_text(value):
     return storage.clean(html.unescape(value))
 
 
-def clean_html_text(value):
-    value = re.sub(r"<(br|p|li|div|section|article|h[1-6])\b[^>]*>", " ", value or "", flags=re.I)
-    value = re.sub(r"<[^>]+>", " ", value)
-    return storage.clean(html.unescape(value))
 
 
 def split_list_text(value):
@@ -2269,56 +2245,12 @@ def greenhouse_headers():
     return {"Accept": "application/json"}
 
 
-def greenhouse_text_value(value):
-    if isinstance(value, list):
-        return " ".join(greenhouse_text_value(item) for item in value)
-    if isinstance(value, dict):
-        if "value" in value:
-            return greenhouse_text_value(value.get("value"))
-        values = []
-        for key in ["name", "title", "label", "amount", "unit", "min_value", "max_value"]:
-            if value.get(key) is not None:
-                values.append(storage.clean(str(value.get(key))))
-        if values:
-            return " ".join(values)
-        return " ".join(greenhouse_text_value(item) for item in value.values())
-    return storage.clean(str(value or ""))
 
 
-def greenhouse_metadata_value(job, name):
-    metadata = job.get("metadata")
-    if isinstance(metadata, list):
-        for item in metadata:
-            if isinstance(item, dict) and storage.clean(item.get("name", "")).lower() == name.lower():
-                return greenhouse_text_value(item.get("value"))
-    if isinstance(metadata, dict):
-        return greenhouse_text_value(metadata.get(name))
-    return ""
 
 
-def greenhouse_location(job):
-    values = []
-    location = job.get("location")
-    if isinstance(location, dict):
-        values.append(storage.clean(str(location.get("name", "") or "")))
-    elif location:
-        values.append(storage.clean(str(location)))
-    values.append(greenhouse_metadata_value(job, "Career Page - Office Location"))
-    values.append(greenhouse_metadata_value(job, "Worksite Classification"))
-    return ", ".join(dict.fromkeys(value for value in values if value))
 
 
-def greenhouse_category(job):
-    values = []
-    department = job.get("department")
-    if isinstance(department, dict):
-        values.extend(storage.clean(str(part)) for part in department.get("path") or [] if storage.clean(str(part)))
-        values.append(storage.clean(str(department.get("name", "") or "")))
-    values.append(greenhouse_metadata_value(job, "Career Page - Department"))
-    values.append(greenhouse_metadata_value(job, "Career Page - Sub Department"))
-    values.append(greenhouse_metadata_value(job, "Career Page - Studio Project"))
-    values.append(storage.clean(str(job.get("company_name", "") or "")))
-    return ", ".join(dict.fromkeys(value for value in values if value))
 
 
 def greenhouse_department_matches_company(department, company):
@@ -2631,15 +2563,6 @@ def extract_next_static_jobs_candidates(page_html, careers_url, config=None):
     return candidates
 
 
-def greenhouse_candidate_url(job):
-    url = storage.clean(str(job.get("absolute_url", "") or ""))
-    if url:
-        return normalize_url(url)
-    job_id = storage.clean(str(job.get("id", "") or ""))
-    board_url = storage.clean(str(job.get("board_url", "") or ""))
-    if job_id and board_url:
-        return normalize_url(urljoin(board_url.rstrip("/") + "/", f"jobs/{job_id}"))
-    return ""
 
 
 def extract_greenhouse_jobs_candidates(payload, config=None):
@@ -2663,43 +2586,9 @@ def greenhouse_payload_has_jobs(payload):
 
 
 def greenhouse_candidates_from_jobs(jobs, config=None):
-    config = config or {}
     resume_text = fit_context_text()
-    candidates = []
-    seen = set()
-    for job in jobs:
-        if not isinstance(job, dict):
-            continue
-        if config.get("board_url"):
-            job = {**job, "board_url": config.get("board_url")}
-        title = storage.clean(str(job.get("title", "") or ""))
-        url = greenhouse_candidate_url(job)
-        if not title or not url or url in seen:
-            continue
-        description = clean_html_text(
-            " ".join(
-                greenhouse_text_value(job.get(field))
-                for field in ["content", "description"]
-                if job.get(field)
-            )
-        )
-        candidate = {
-            "title": title,
-            "url": url,
-            "description": description,
-            "location": greenhouse_location(job),
-            "category": greenhouse_category(job),
-            "search_text": " ".join(
-                greenhouse_text_value(job.get(field))
-                for field in ["requisition_id", "internal_job_id", "updated_at", "first_published", "metadata"]
-                if job.get(field)
-            ),
-        }
-        if not candidate_matches_resume_role(candidate, resume_text):
-            continue
-        seen.add(url)
-        candidates.append(candidate)
-    return candidates
+    return [row for row in greenhouse_adapter.greenhouse_candidates_from_jobs(jobs, config)
+            if candidate_matches_resume_role(row, resume_text)]
 
 
 def fetch_greenhouse_detail_for_jobs(jobs, fetch, config):
@@ -4162,49 +4051,9 @@ def lever_postings_api_url(careers_url):
 
 
 def extract_lever_candidates(payload):
-    try:
-        postings = json.loads(payload or "[]")
-    except json.JSONDecodeError:
-        return []
-    if not isinstance(postings, list):
-        return []
     resume_text = fit_context_text()
-    candidates = []
-    for posting in postings:
-        if not isinstance(posting, dict):
-            continue
-        title = storage.clean(str(posting.get("text", "") or ""))
-        url = normalize_url(posting.get("hostedUrl", ""))
-        categories = posting.get("categories") or {}
-        if not isinstance(categories, dict):
-            categories = {}
-        location = storage.clean(str(categories.get("location", "") or ""))
-        workplace_type = storage.clean(str(posting.get("workplaceType", "") or ""))
-        category = ", ".join(
-            dict.fromkeys(
-                storage.clean(str(categories.get(field, "") or ""))
-                for field in ["team", "department", "commitment"]
-                if storage.clean(str(categories.get(field, "") or ""))
-            )
-        )
-        description = " ".join(
-            storage.clean(str(posting.get(field, "") or ""))
-            for field in ["descriptionPlain", "additionalPlain"]
-            if storage.clean(str(posting.get(field, "") or ""))
-        )
-        candidate = {
-            "title": title,
-            "url": url,
-            "location": location,
-            "work_mode": workplace_type,
-            "category": category,
-            "description": description,
-            "source_job_id": storage.clean(str(posting.get("id", "") or "")),
-        }
-        if not title or not url or not candidate_matches_resume_role(candidate, resume_text):
-            continue
-        candidates.append(candidate)
-    return candidates
+    return [row for row in lever_adapter.extract_lever_candidates(payload)
+            if candidate_matches_resume_role(row, resume_text)]
 
 
 def fetch_lever_candidates(careers_url, fetch, config=None):

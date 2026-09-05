@@ -88,7 +88,7 @@ class HunterWorkflowTest(unittest.TestCase):
 
     def test_simplified_workflow_migrates_existing_stages_without_losing_outcomes(self):
         sqlite_store.initialize()
-        repository.write_applications([
+        repository.replace_applications_for_import([
             application_row({"id": "A0001", "stage": "posting-review"}),
             application_row({"id": "A0002", "stage": "waiting-response", "date_applied": "2026-08-01"}),
             application_row({"id": "A0003", "stage": "first-interview"}),
@@ -113,7 +113,7 @@ class HunterWorkflowTest(unittest.TestCase):
 
     def test_closed_posting_requires_structured_outcome(self):
         sqlite_store.initialize()
-        repository.write_applications([
+        repository.replace_applications_for_import([
             application_row({"id": "A0001", "stage": "posting-review"}),
         ])
 
@@ -126,7 +126,7 @@ class HunterWorkflowTest(unittest.TestCase):
 
     def test_manual_application_creation_assigns_id_and_validates_required_fields(self):
         sqlite_store.initialize()
-        repository.write_applications([application_row({"id": "A0007"})])
+        repository.replace_applications_for_import([application_row({"id": "A0007"})])
 
         created = applications.create_application({
             "company": "Acme",
@@ -143,7 +143,7 @@ class HunterWorkflowTest(unittest.TestCase):
 
     def test_manual_action_creation_syncs_posting_next_action(self):
         sqlite_store.initialize()
-        repository.write_applications([application_row({"id": "A0001"})])
+        repository.replace_applications_for_import([application_row({"id": "A0001"})])
 
         created = actions.create_action("A0001", {
             "title": "Email recruiter",
@@ -160,7 +160,7 @@ class HunterWorkflowTest(unittest.TestCase):
 
     def test_mcp_create_action_returns_action_and_synced_posting(self):
         sqlite_store.initialize()
-        repository.write_applications([application_row({"id": "A0001"})])
+        repository.replace_applications_for_import([application_row({"id": "A0001"})])
 
         result = mcp_server.call_named_tool(
             "hunter_create_action",
@@ -182,7 +182,7 @@ class HunterWorkflowTest(unittest.TestCase):
 
     def test_mcp_get_posting_returns_readable_snapshot_without_raw_html(self):
         sqlite_store.initialize()
-        repository.write_applications([application_row({"id": "A0001"})])
+        repository.replace_applications_for_import([application_row({"id": "A0001"})])
         repository.write_posting_snapshot("A0001", {
             "source_url": "https://example.com/jobs/engineer",
             "final_url": "https://example.com/jobs/engineer",
@@ -201,10 +201,10 @@ class HunterWorkflowTest(unittest.TestCase):
 
     def test_application_company_update_syncs_related_actions(self):
         sqlite_store.initialize()
-        repository.write_applications([
+        repository.replace_applications_for_import([
             application_row({"id": "A0001", "company": "", "role": "Engineer"}),
         ])
-        repository.write_actions([
+        repository.replace_actions_for_import([
             action_row({"id": "T0001", "application_id": "A0001", "company": "", "role": "Engineer"}),
         ])
 
@@ -225,10 +225,10 @@ class HunterWorkflowTest(unittest.TestCase):
 
     def test_mcp_update_application_can_set_company(self):
         sqlite_store.initialize()
-        repository.write_applications([
+        repository.replace_applications_for_import([
             application_row({"id": "A0001", "company": ""}),
         ])
-        repository.write_actions([
+        repository.replace_actions_for_import([
             action_row({"id": "T0001", "application_id": "A0001", "company": ""}),
         ])
 
@@ -253,7 +253,7 @@ class HunterWorkflowTest(unittest.TestCase):
         sqlite_store.initialize()
         workflow.archive_action_type("verify-source")
         app = application_row({"id": "A0001", "notes": "Requires browser verification."})
-        repository.write_applications([app])
+        repository.replace_applications_for_import([app])
 
         created, warning = action_engine.create_actions_for_application(
             app,
@@ -338,10 +338,10 @@ class HunterWorkflowTest(unittest.TestCase):
 
     def test_action_completion_syncs_posting_next_action(self):
         sqlite_store.initialize()
-        repository.write_applications([
+        repository.replace_applications_for_import([
             application_row({"id": "A0001", "stage": "posting-review", "next_action": "Old", "next_action_date": "2026-07-01"}),
         ])
-        repository.write_actions([
+        repository.replace_actions_for_import([
             action_row({"id": "T0001", "application_id": "A0001", "title": "First", "due_date": "2026-07-01", "priority": "medium"}),
             action_row({"id": "T0002", "application_id": "A0001", "title": "Second", "due_date": "2026-07-02", "priority": "high"}),
         ])
@@ -366,7 +366,7 @@ class HunterWorkflowTest(unittest.TestCase):
 
     def test_app_state_derives_next_action_from_actions(self):
         sqlite_store.initialize()
-        repository.write_applications([
+        repository.replace_applications_for_import([
             application_row({
                 "id": "A0001",
                 "stage": "posting-review",
@@ -374,7 +374,7 @@ class HunterWorkflowTest(unittest.TestCase):
                 "next_action_date": "2026-07-01",
             }),
         ])
-        repository.write_actions([
+        repository.replace_actions_for_import([
             action_row({"id": "T0001", "application_id": "A0001", "title": "Done", "status": "done", "due_date": "2026-07-01"}),
         ])
 
@@ -386,10 +386,10 @@ class HunterWorkflowTest(unittest.TestCase):
 
     def test_can_make_specific_open_action_next(self):
         sqlite_store.initialize()
-        repository.write_applications([
+        repository.replace_applications_for_import([
             application_row({"id": "A0001", "stage": "posting-review"}),
         ])
-        repository.write_actions([
+        repository.replace_actions_for_import([
             action_row({"id": "T0001", "application_id": "A0001", "title": "First", "due_date": "2026-07-01"}),
             action_row({"id": "T0002", "application_id": "A0001", "title": "Chosen", "due_date": "2026-07-10"}),
         ])
@@ -407,10 +407,10 @@ class HunterWorkflowTest(unittest.TestCase):
 
     def test_action_due_date_update_syncs_posting_summary(self):
         sqlite_store.initialize()
-        repository.write_applications([
+        repository.replace_applications_for_import([
             application_row({"id": "A0001", "stage": "posting-review"}),
         ])
-        repository.write_actions([
+        repository.replace_actions_for_import([
             action_row({"id": "T0001", "application_id": "A0001", "title": "Review", "due_date": "2026-07-01"}),
         ])
 
@@ -423,10 +423,10 @@ class HunterWorkflowTest(unittest.TestCase):
 
     def test_mcp_list_postings_uses_derived_next_action(self):
         sqlite_store.initialize()
-        repository.write_applications([
+        repository.replace_applications_for_import([
             application_row({"id": "A0001", "stage": "posting-review", "next_action": "Stale", "next_action_date": "2026-07-01"}),
         ])
-        repository.write_actions([
+        repository.replace_actions_for_import([
             action_row({"id": "T0001", "application_id": "A0001", "title": "Done", "status": "done", "due_date": "2026-07-01"}),
         ])
 
@@ -438,12 +438,12 @@ class HunterWorkflowTest(unittest.TestCase):
 
     def test_considering_posting_warns_unless_exactly_one_action_is_open(self):
         sqlite_store.initialize()
-        repository.write_applications([
+        repository.replace_applications_for_import([
             application_row({"id": "A0001", "stage": "considering"}),
             application_row({"id": "A0002", "stage": "considering"}),
             application_row({"id": "A0003", "stage": "applied"}),
         ])
-        repository.write_actions([
+        repository.replace_actions_for_import([
             action_row({"id": "T0001", "application_id": "A0002", "title": "First"}),
             action_row({"id": "T0002", "application_id": "A0002", "title": "Second"}),
         ])
